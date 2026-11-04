@@ -1,5 +1,5 @@
 ﻿"""
-API Endpoint Testleri
+API Endpoint Tests
 ━━━━━━━━━━━━━━━━━━━━━
 
 Verifies the HTTP status and JSON structure of the core API endpoints.
@@ -134,30 +134,6 @@ class TestIncrementalExecutionEndpoint:
         assert data["execution"]["will_execute"] is False
         assert data["raw_rows_included"] is False
 
-    def test_incremental_execute_requires_post_load_gate_confirmation_before_write_connection(self, app_client, monkeypatch):
-        import app as app_module
-
-        monkeypatch.setattr(
-            app_module,
-            "run_configured_incremental_strategy_preflight",
-            lambda _specs: self._ready_preflight(),
-            raising=False,
-        )
-        monkeypatch.setattr(
-            app_module,
-            "_open_incremental_target_connection",
-            lambda: pytest.fail("write connection must not open before post-load gates are confirmed"),
-            raising=False,
-        )
-
-        resp = app_client.post("/api/incremental/execute", json={"spec_name": "SH_SALES_ODS", "approved": True})
-
-        assert resp.status_code == 400
-        data = resp.get_json()
-        assert "post_load_gate_results" in data["error"]
-        assert data["execution"]["status"] == "ready_for_executor"
-        assert data["raw_rows_included"] is False
-
     def test_incremental_execute_calls_executor_with_redacted_status_only(self, app_client, monkeypatch):
         import app as app_module
 
@@ -177,7 +153,10 @@ class TestIncrementalExecutionEndpoint:
             def __exit__(self, exc_type, exc_val, exc_tb):
                 return False
 
+        from routes import schema_write
+
         fake_conn = FakeConnection()
+        fake_source = FakeConnection()
         monkeypatch.setattr(
             app_module,
             "run_configured_incremental_strategy_preflight",
@@ -187,12 +166,12 @@ class TestIncrementalExecutionEndpoint:
         monkeypatch.setattr(app_module, "_open_incremental_target_connection", lambda: fake_conn, raising=False)
         monkeypatch.setattr(app_module, "WatermarkManager", FakeWatermarkManager)
 
-        def fake_execute(preflight_result, *, approved, target_conn, watermark_writer, post_load_gate_results):
+        def fake_execute(preflight_result, *, approved, target_conn, source_conn, watermark_writer):
             calls.append({
                 "approved": approved,
                 "target_conn": target_conn,
+                "source_conn": source_conn,
                 "watermark_writer": watermark_writer,
-                "post_load_gate_results": post_load_gate_results,
                 "spec": preflight_result["spec"],
             })
             return {
@@ -205,17 +184,11 @@ class TestIncrementalExecutionEndpoint:
             }
 
         monkeypatch.setattr(app_module, "execute_incremental_append", fake_execute, raising=False)
+        monkeypatch.setattr(schema_write, "_open_incremental_source_connection", lambda: fake_source, raising=False)
 
         resp = app_client.post(
             "/api/incremental/execute",
-            json={
-                "spec_name": "SH_SALES_ODS",
-                "approved": True,
-                "post_load_gate_results": {
-                    "post_load_golden_record_passed": True,
-                    "post_load_dq_passed": True,
-                },
-            },
+            json={"spec_name": "SH_SALES_ODS", "approved": True},
         )
 
         assert resp.status_code == 200
@@ -226,14 +199,12 @@ class TestIncrementalExecutionEndpoint:
         assert calls == [{
             "approved": True,
             "target_conn": fake_conn,
+            "source_conn": fake_source,
             "watermark_writer": calls[0]["watermark_writer"],
-            "post_load_gate_results": {
-                "post_load_golden_record_passed": True,
-                "post_load_dq_passed": True,
-            },
             "spec": "SH_SALES_ODS",
         }]
         assert fake_conn.closed is True
+        assert fake_source.closed is True
 
     def test_incremental_execute_redacts_executor_exception_message(self, app_client, monkeypatch):
         import app as app_module
@@ -255,7 +226,10 @@ class TestIncrementalExecutionEndpoint:
             lambda _specs: self._ready_preflight(),
             raising=False,
         )
+        from routes import schema_write
+
         monkeypatch.setattr(app_module, "_open_incremental_target_connection", lambda: FakeConnection(), raising=False)
+        monkeypatch.setattr(schema_write, "_open_incremental_source_connection", lambda: FakeConnection(), raising=False)
         monkeypatch.setattr(app_module, "WatermarkManager", FakeWatermarkManager)
 
         def boom(*_args, **_kwargs):
@@ -265,14 +239,7 @@ class TestIncrementalExecutionEndpoint:
 
         resp = app_client.post(
             "/api/incremental/execute",
-            json={
-                "spec_name": "SH_SALES_ODS",
-                "approved": True,
-                "post_load_gate_results": {
-                    "post_load_golden_record_passed": True,
-                    "post_load_dq_passed": True,
-                },
-            },
+            json={"spec_name": "SH_SALES_ODS", "approved": True},
         )
 
         assert resp.status_code == 500
@@ -1179,7 +1146,14 @@ class TestMappingPersistentWriteEndpoints:
 
 
 class TestAskTruncateIntent:
-    def test_truncate_intent_returns_confirmation_request_without_llm_or_run(self, app_client, monkeypatch):
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "MAP_HR_EMPLOYEES_TO_ODS icin truncate ekle",  # intentional Turkish input
+            "MAP_HR_EMPLOYEES_TO_ODS target truncate",
+        ],
+    )
+    def test_truncate_intent_returns_confirmation_request_without_llm_or_run(self, app_client, monkeypatch, message):
         import app as app_module
 
         monkeypatch.setattr(
@@ -1191,7 +1165,7 @@ class TestAskTruncateIntent:
         resp = app_client.post(
             "/api/ask",
             json={
-                "message": "MAP_HR_EMPLOYEES_TO_ODS icin truncate ekle",
+                "message": message,
                 "history": [],
             },
         )
@@ -3019,7 +2993,7 @@ class TestOdiMappingApi:
 
 
 class TestStatusEndpoint:
-    """GET /api/status testleri."""
+    """GET /api/status tests."""
 
     def test_status_returns_200(self, app_client):
         resp = app_client.get("/api/status")
@@ -3031,7 +3005,7 @@ class TestStatusEndpoint:
         assert "ok" in data
         assert "checks" in data
         assert "count" in data
-        # count formati: "X/8"
+        # count format: "X/8"
         assert "/" in data["count"]
 
     def test_status_uses_health_checkers_without_shape_change(self, app_client, monkeypatch):
@@ -3080,7 +3054,7 @@ class TestStatusEndpoint:
 
 
 class TestAlertEndpoints:
-    """Alert API testleri."""
+    """Alert API tests."""
 
     def test_alerts_returns_200(self, app_client):
         resp = app_client.get("/api/alerts")
@@ -3463,7 +3437,7 @@ class TestLegacyAirflowWriteEndpoints:
 
 
 class TestTablesEndpoint:
-    """GET /api/tables testleri."""
+    """GET /api/tables tests."""
 
     def test_tables_returns_200(self, app_client):
         resp = app_client.get("/api/tables")
@@ -3476,7 +3450,7 @@ class TestTablesEndpoint:
 
 
 class TestMonitoringEndpoints:
-    """Monitoring API testleri."""
+    """Monitoring API tests."""
 
     def test_freshness_returns_200(self, app_client):
         resp = app_client.get("/api/monitoring/freshness")
@@ -3635,7 +3609,7 @@ class TestMappingSnapshotReadEndpoints:
 
 
 class TestQualityEndpoints:
-    """DQ API testleri."""
+    """DQ API tests."""
 
     def test_validate_runs_generated_and_extra_rules(self, app_client, monkeypatch):
         import app as app_module
@@ -3927,7 +3901,7 @@ class TestQualityEndpoints:
 
 
 class TestSkeyEndpoints:
-    """SKEY API testleri."""
+    """SKEY API tests."""
 
     def test_skey_create_uses_manager(self, app_client, monkeypatch):
         import app as app_module

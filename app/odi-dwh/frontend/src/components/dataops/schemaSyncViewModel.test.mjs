@@ -167,7 +167,7 @@ test('summarizes mapping catalog context for project and folder display', () => 
 
 test('summarizes mapping detail around selected target column', () => {
   const detail = {
-    sources: [{ component: 'EMPLOYEES', name: 'SRC_HR.EMPLOYEES', role: 'Ana kaynak' }],
+    sources: [{ component: 'EMPLOYEES', name: 'SRC_HR.EMPLOYEES', role: 'Main source' }],
     target: { component: 'ODS_HR_EMPLOYEES', name: 'TGT_DWH.ODS_HR_EMPLOYEES' },
     columns: [
       { tgt: 'FIRST_NAME', src: 'EMPLOYEES.FIRST_NAME', type: 'VARCHAR2(30)', is_exp: false },

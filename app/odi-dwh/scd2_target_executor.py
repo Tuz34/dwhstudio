@@ -13,19 +13,41 @@ import scd2_builder
 logger = logging.getLogger("dwh_app.scd2_target_executor")
 
 _COLUMNS_SQL = """
-SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
+SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE,
+       CHAR_LENGTH, CHAR_USED
 FROM ALL_TAB_COLUMNS
 WHERE OWNER = :owner AND TABLE_NAME = :table_name
 ORDER BY COLUMN_ID
 """
+_GRANTS_SQL = """
+SELECT GRANTEE, PRIVILEGE, TABLE_NAME
+FROM ALL_TAB_PRIVS
+WHERE TABLE_SCHEMA = :owner AND TABLE_NAME IN (:table_name, :sequence_name)
+"""
 
 
-def _full_type(data_type: object, length: object, precision: object, scale: object) -> str:
+def _full_type(
+    data_type: object,
+    length: object,
+    precision: object,
+    scale: object,
+    char_length: object = None,
+    char_used: object = None,
+) -> str:
+    """Render a catalog column as a SQL type.
+
+    Character sizes come from CHAR_LENGTH (DATA_LENGTH is in bytes and is two
+    to four times larger for multibyte national types). VARCHAR2 and CHAR keep
+    their CHAR semantics when the catalog says so.
+    """
     base = str(data_type or "").upper()
     if base.startswith("TIMESTAMP"):
         return "TIMESTAMP"
     if base in {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"}:
-        return f"{base}({int(length)})"
+        size = int(char_length) if char_length else int(length)
+        if base in {"VARCHAR2", "CHAR"} and str(char_used or "").upper() == "C":
+            return f"{base}({size} CHAR)"
+        return f"{base}({size})"
     if base == "NUMBER" and precision is not None:
         if scale not in (None, 0):
             return f"NUMBER({int(precision)},{int(scale)})"
@@ -41,10 +63,10 @@ def read_catalog_columns(
     return [
         {
             "name": str(name),
-            "data_type": _full_type(data_type, length, precision, scale),
+            "data_type": _full_type(data_type, length, precision, scale, char_length, char_used),
             "nullable": nullable == "Y",
         }
-        for name, data_type, length, precision, scale, nullable in cursor.fetchall()
+        for name, data_type, length, precision, scale, nullable, char_length, char_used in cursor.fetchall()
     ]
 
 
@@ -89,6 +111,11 @@ def _exists(cursor: Any, sql: str, owner: str, name: str) -> bool:
     return int(cursor.fetchone()[0]) > 0
 
 
+def _user_exists(cursor: Any, username: str) -> bool:
+    cursor.execute("SELECT COUNT(*) FROM ALL_USERS WHERE USERNAME = :u", {"u": username})
+    return int(cursor.fetchone()[0]) > 0
+
+
 def _table_exists(cursor: Any, owner: str, table: str) -> bool:
     return _exists(
         cursor,
@@ -115,6 +142,60 @@ def _matches_contract(actual: list[dict[str, Any]], plan: Mapping[str, Any]) -> 
     return actual == expected
 
 
+def _apply_grants(
+    cursor: Any,
+    plan: Mapping[str, Any],
+    grants: list[tuple[str, str, str]],
+    result: dict[str, Any],
+) -> None:
+    for grant in grants:
+        try:
+            cursor.execute(scd2_builder.render_grant_statement(plan, grant))
+            result["grants_applied"] += 1
+        except oracledb.DatabaseError as exc:
+            result["grants_failed"] += 1
+            logger.warning("SCD2 grant failed: %s", type(exc).__name__)
+
+
+def _recover_existing(cursor: Any, plan: Mapping[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Existing matching table: verify the sequence and grants.
+
+    Repairs stay inside the absent-only scope (create a missing sequence, add
+    missing grants). The table itself is never altered or dropped.
+    """
+    owner = plan["target"]["owner"]
+    sequence = plan["surrogate_key"]["sequence"]
+    repaired: list[str] = []
+    if not _sequence_exists(cursor, owner, sequence):
+        result["write_operations_attempted"].append("create_sequence")
+        try:
+            cursor.execute(scd2_builder.render_create_sequence(plan))
+        except oracledb.DatabaseError as exc:
+            result["status"] = "blocked_target_incomplete"
+            result["missing"] = ["sequence"]
+            result["error_type"] = type(exc).__name__
+            return result
+        result["sequence_created"] = True
+        repaired.append("sequence")
+    cursor.execute(
+        _GRANTS_SQL,
+        {"owner": owner, "table_name": plan["target"]["table"], "sequence_name": sequence},
+    )
+    present = {(str(table), str(grantee), str(privilege)) for grantee, privilege, table in cursor.fetchall()}
+    missing = [g for g in scd2_builder.required_grants(plan) if g not in present]
+    if missing:
+        result["write_operations_attempted"].append("grants")
+        _apply_grants(cursor, plan, missing, result)
+        repaired.append("grants")
+    if result["grants_failed"] > 0:
+        result["status"] = "blocked_target_incomplete"
+        result["missing"] = ["grants"]
+        return result
+    result["status"] = "repaired_incomplete_target" if repaired else "already_exists_matching"
+    result["repaired"] = repaired
+    return result
+
+
 def _error_status(exc: oracledb.Error) -> str:
     text = str(exc)
     if "ORA-01031" in text or "ORA-01950" in text:
@@ -129,7 +210,7 @@ def execute_target_ddl(
     *,
     approved: object,
     connection_factory: Callable[[], Any],
-    ddl_user: str = "APP_USER",
+    ddl_user: str = "APP_USER",  # kept for call compatibility; grants no longer depend on it
 ) -> dict[str, Any]:
     """Create the SCD2 sequence and table only when both are absent.
 
@@ -148,16 +229,27 @@ def execute_target_ddl(
         connection = connection_factory()
         result["connection_attempted"] = True
         cursor = connection.cursor()
+        stage = "preflight_grantees"
+        missing_users = [u for u in scd2_builder.required_grantees(plan) if not _user_exists(cursor, u)]
+        if missing_users:
+            result["status"] = "blocked_grantee_missing"
+            result["missing_grantees"] = missing_users
+            result["message"] = (
+                "Required grantee user(s) "
+                + ", ".join(missing_users)
+                + " do not exist in the database. Create the user or set ODI_EXEC_USER to the "
+                "ODI execution user, then retry. No DDL was executed."
+            )
+            return result
         stage = "preflight_table"
         if _table_exists(cursor, owner, table):
             actual = read_catalog_columns(cursor, owner, table)
-            result["status"] = (
-                "already_exists_matching"
-                if _matches_contract(actual, plan)
-                else "blocked_target_exists_mismatch"
-            )
             result["column_count"] = len(actual)
-            return result
+            if not _matches_contract(actual, plan):
+                result["status"] = "blocked_target_exists_mismatch"
+                return result
+            stage = "recover_existing"
+            return _recover_existing(cursor, plan, result)
         stage = "preflight_sequence"
         sequence_present = _sequence_exists(cursor, owner, sequence)
         result["sequence_already_existed"] = sequence_present
@@ -183,13 +275,7 @@ def execute_target_ddl(
 
         stage = "grants"
         result["write_operations_attempted"].append("grants")
-        for statement in scd2_builder.render_grant_statements(plan, ddl_user):
-            try:
-                cursor.execute(statement)
-                result["grants_applied"] += 1
-            except oracledb.DatabaseError as exc:
-                result["grants_failed"] += 1
-                logger.warning("SCD2 grant failed: %s", type(exc).__name__)
+        _apply_grants(cursor, plan, scd2_builder.required_grants(plan), result)
         result["status"] = "created" if result["grants_failed"] == 0 else "created_grants_incomplete"
         return result
     except oracledb.Error as exc:

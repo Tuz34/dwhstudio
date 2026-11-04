@@ -82,7 +82,6 @@ def collect_postflight(
     result: dict[str, Any] = {
         "mode": "scd2_postflight",
         "status": "error",
-        "target": {"owner": owner, "table": table},
         "counts": {},
         "raw_rows_included": False,
         "pk_values_included": False,
@@ -94,6 +93,7 @@ def collect_postflight(
         result["status"] = "invalid_request"
         result["error_code"] = exc.code
         return result
+    result["target"] = {"owner": owner, "table": table}  # echoed only after validation
     connection = cursor = None
     try:
         connection = connection_factory()

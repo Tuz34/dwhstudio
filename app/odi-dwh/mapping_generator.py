@@ -44,6 +44,74 @@ def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> s
 
 
 _SOURCE_SYSTEM_LITERAL = _sql_string_literal(SOURCE_SYSTEM_NAME, "ORACLE_SOURCE")
+_ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
+_ERROR_TYPE_ASSIGN_RE = re.compile(r"\berror_type=([A-Za-z][A-Za-z0-9_$]{0,127})\b")
+
+
+def _error_type_class(value: object) -> str | None:
+    if isinstance(value, str) and _ERROR_TYPE_RE.fullmatch(value):
+        return value
+    return None
+
+
+def _json_object(line: str) -> dict | None:
+    stripped = line.strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return None
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def mapping_replace_state_from_output(output: str) -> dict[str, object]:
+    """Read replaced, kept_existing_on_failure, and the exception class only."""
+    replaced = False
+    kept_existing_on_failure = False
+    error_type: str | None = None
+    for line in (output or "").splitlines():
+        payload = _json_object(line)
+        if payload is None:
+            continue
+        if not any(key in payload for key in ("replaced", "kept_existing_on_failure", "error_type")):
+            continue
+        replaced = payload.get("replaced") is True
+        kept_existing_on_failure = payload.get("kept_existing_on_failure") is True
+        error_type = _error_type_class(payload.get("error_type"))
+    if error_type is None:
+        match = _ERROR_TYPE_ASSIGN_RE.search(output or "")
+        if match:
+            error_type = match.group(1)
+    return {
+        "replaced": replaced,
+        "kept_existing_on_failure": kept_existing_on_failure,
+        "error_type": error_type,
+    }
+
+
+def create_mapping_output_failed(output: str) -> bool:
+    """True when Groovy reported a failed create, including a structured error line."""
+    text = output or ""
+    if "Hata:" in text or "FATAL ERROR" in text:
+        return True
+    for line in text.splitlines():
+        payload = _json_object(line)
+        if payload is not None and str(payload.get("status", "")).lower() in {"error", "fail", "failed"}:
+            return True
+    return False
+
+
+class MappingCreationFailure(RuntimeError):
+    """ODI mapping creation failed. error_type is the exception class name only."""
+
+    def __init__(self, message: str, state: dict[str, object]) -> None:
+        super().__init__(message)
+        self.replaced = state.get("replaced") is True
+        self.kept_existing_on_failure = state.get("kept_existing_on_failure") is True
+        self.error_type = _error_type_class(state.get("error_type"))
 
 
 # Expected JSON format when extracting mapping parameters from a prompt
@@ -1061,10 +1129,17 @@ class MappingGenerator:
             ikm_name=ikm_override,           # IKM override for SKEY lookup tables
         )
 
-        # OdiOrchestrator returns "KOMUT HAZIRLANDI: ..." in stub mode
-        if "Hata:" in result:
-            self._add_log("create_mapping", "FAILED", result)
-            raise RuntimeError(f"Could not create ODI mapping: {result}")
+        # OdiOrchestrator returns "KOMUT HAZIRLANDI: ..." in stub mode.
+        # Structured Groovy output reports whether the previous mapping was replaced
+        # or kept because validation failed before the delete was committed.
+        state = mapping_replace_state_from_output(result)
+        if create_mapping_output_failed(result):
+            failure_class = state["error_type"] or "MappingCreationFailure"
+            self._add_log("create_mapping", "FAILED", failure_class)
+            raise MappingCreationFailure(
+                f"Could not create ODI mapping. error_type={failure_class}",
+                state,
+            )
 
         self._add_log("create_mapping", "SUCCESS", result[:100])
         return {
@@ -1074,6 +1149,9 @@ class MappingGenerator:
             "source_datastore": src_table,
             "target_model": odi_tgt_model,
             "target_datastore": tgt_table,
+            "replaced": state["replaced"] is True,
+            "kept_existing_on_failure": False,
+            "error_type": None,
         }
 
     # ── Create SKEY ─────────────────────────────────────────────────────────
@@ -1329,7 +1407,15 @@ class MappingGenerator:
         except (ValueError, RuntimeError) as e:
             result["overall_status"] = "FAILED"
             result["error"] = str(e)
-            self._add_log("pipeline", "FAILED", str(e))
+            if isinstance(e, MappingCreationFailure):
+                result["replaced"] = e.replaced
+                result["kept_existing_on_failure"] = e.kept_existing_on_failure
+                if e.error_type:
+                    result["error_type"] = e.error_type
+            failure_class = type(e).__name__
+            if isinstance(e, MappingCreationFailure) and e.error_type:
+                failure_class = e.error_type
+            self._add_log("pipeline", "FAILED", failure_class)
 
             # Failed MAPPING_LOG record
             if result.get("params"):

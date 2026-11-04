@@ -37,8 +37,26 @@ try {
     odi.getSecurityManager().setCurrentThreadAuthentication(auth)
 }
 
+// Build the replacement under another name, validate it, then rename-swap
+// inside this same transaction. A failed build rolls the delete back.
+def temporaryReplacementName = { String finalName ->
+    String suffix = "__NEW"
+    String base = (finalName == null || finalName.trim().isEmpty()) ? "MAP" : finalName.trim()
+    int maxLen = 128
+    if (base.length() + suffix.length() > maxLen) {
+        base = base.substring(0, maxLen - suffix.length())
+    }
+    String candidate = base + suffix
+    if (finalName != null && candidate.equalsIgnoreCase(finalName)) {
+        candidate = base + "_NEW"
+    }
+    return candidate
+}
+
 ITransactionManager txnMgr = odi.getTransactionManager()
 ITransactionStatus txnStatus = txnMgr.getTransaction(new oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition())
+boolean preserveExistingOnFailure = false
+def existingMapping = null
 
 try {
     def em = odi.getTransactionalEntityManager()
@@ -69,19 +87,23 @@ try {
     OdiFolder folder = project.getFolders().find { it.getName().equalsIgnoreCase(fName) }
     if (folder == null) throw new Exception("Folder not found: " + fName)
     
-    // CLEANUP: Only delete the mapping we are about to create (NOT hardcoded MAP_CUSTOMER_TO_ODS)
+    // Do not delete the current mapping until the replacement has been validated.
     def mapFinder = em.getFinder(Mapping.class)
-    def existing = mapFinder.findByName(folder, mName)
-    if (existing != null) {
+    existingMapping = mapFinder.findByName(folder, mName)
+    String persistedName = mName
+    if (existingMapping != null) {
         if (!replaceExistingMapping) {
             throw new Exception("Mapping already exists and replacement was not approved: " + mName)
         }
-        em.remove(existing)
-        txnMgr.commit(txnStatus)
-        txnStatus = txnMgr.getTransaction(new oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition()) 
+        preserveExistingOnFailure = true
+        persistedName = temporaryReplacementName(mName)
+        def stagingClash = mapFinder.findByName(folder, persistedName)
+        if (stagingClash != null) {
+            throw new IllegalStateException("Replacement staging name is already in use")
+        }
     }
     
-    Mapping mapping = new Mapping(mName, folder)
+    Mapping mapping = new Mapping(persistedName, folder)
     em.persist(mapping)
     
     // Custom helper to find datastore robustly
@@ -704,13 +726,33 @@ try {
         println "WARNING: Physical node not found, KM assignment skipped"
     }
     
-    mapping.validate() 
+    def vr = mapping.validate()
+    if (vr instanceof Boolean && !vr) throw new IllegalStateException("Mapping validation failed")
+    if (vr != null && !(vr instanceof Boolean) && vr.metaClass.respondsTo(vr, 'isValid') && !vr.isValid()) throw new IllegalStateException("Mapping validation failed")
+    boolean replacedExisting = false
+    if (preserveExistingOnFailure) {
+        em.remove(existingMapping)
+        em.flush()
+        // After a replace the new mapping has a new internal id; existing <MAPPING>_SCN scenarios are not re-pointed and must be regenerated.
+        mapping.setName(mName)
+        if (mapping.getName() == null || !mName.equals(mapping.getName())) {
+            throw new IllegalStateException("Mapping rename-swap failed")
+        }
+        replacedExisting = true
+    }
     txnMgr.commit(txnStatus)
+    txnStatus = null
+    preserveExistingOnFailure = false
     println "SUCCESS: Mapping '${mName}' created successfully."
+    println '{"status":"passed","action":"create_mapping","replaced":' + replacedExisting + ',"kept_existing_on_failure":false}'
 
 } catch (Exception e) {
     if (txnStatus != null && !txnStatus.isCompleted()) try { txnMgr.rollback(txnStatus) } catch (ig) {}
-    println '{"status":"error","action":"create_mapping","error_type":"' + e.getClass().getSimpleName() + '"}'
+    String errorType = e.getClass().getSimpleName()
+    if (!(errorType ==~ '[A-Za-z][A-Za-z0-9_$]{0,127}')) {
+        errorType = "Exception"
+    }
+    println '{"status":"error","action":"create_mapping","replaced":false,"kept_existing_on_failure":' + preserveExistingOnFailure + ',"error_type":"' + errorType + '"}'
     System.exit(1)
 } finally {
     if (standaloneMode && odi != null) odi.close()

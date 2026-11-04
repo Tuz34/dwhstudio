@@ -16,7 +16,7 @@ IDENTIFIER_RE = re.compile(r"^[A-Z0-9_$#]{1,30}$")
 # ODI scenario names are limited to 35 characters; "<mapping>_SCN" must fit.
 MAPPING_NAME_MAX = 31
 MAPPING_NAME_RE = re.compile(r"^[A-Z0-9_$#]{1,%d}$" % MAPPING_NAME_MAX)
-_TYPE_SQL_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:\([0-9]+(?:,[0-9]+)?\))?$")
+_TYPE_SQL_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:\([0-9]+(?:,[0-9]+| CHAR)?\))?$")
 
 TARGET_OWNERS = ("DWH", "DM")
 # ODI model code per schema owner. Targets must be DWH or DM; sources may also
@@ -106,6 +106,8 @@ def normalize_source_columns(
             raise Scd2PlanError("invalid_source_columns")
         name = str(item.get("name") or "").strip().upper()
         data_type = re.sub(r"\s+", "", str(item.get("data_type") or "").upper())
+        data_type = re.sub(r"(\d)BYTE\)", r"\1)", data_type)  # BYTE is the default semantics
+        data_type = re.sub(r"(\d)CHAR\)", r"\1 CHAR)", data_type)
         if data_type.startswith("TIMESTAMP(") and ")" in data_type:
             data_type = "TIMESTAMP"
         if not IDENTIFIER_RE.fullmatch(name) or name in seen or not data_type:
@@ -160,6 +162,9 @@ def validate_request(request: Mapping[str, object]) -> dict[str, Any]:
         tracked: list[str] | str = "all"
     else:
         tracked = _identifier_list(tracked_raw, "invalid_tracked_columns")
+    grant_reader = request.get("grant_select_to_app_user", False)
+    if not isinstance(grant_reader, bool):
+        raise Scd2PlanError("invalid_grant_option")
     overwrite_raw = request.get("overwrite_columns")
     overwrite = _identifier_list(overwrite_raw, "invalid_overwrite_columns") if overwrite_raw else []
     sequence_raw = request.get("sequence_name")
@@ -179,6 +184,7 @@ def validate_request(request: Mapping[str, object]) -> dict[str, Any]:
         "natural_key": natural_key,
         "tracked": tracked,
         "overwrite": overwrite,
+        "grant_reader": grant_reader,
         "sequence_name": sequence,
     }
 
@@ -187,9 +193,17 @@ def _target_column(name: str, data_type: str, nullable: bool, role: str) -> dict
     return {"name": name, "data_type": data_type, "nullable": nullable, "scd_role": role}
 
 
+def default_exec_user() -> str:
+    """Execution user from config (ODI_EXEC_USER, default ODI_EXEC)."""
+    from config import ODI_EXEC_USER
+
+    return ODI_EXEC_USER
+
+
 def build_scd2_plan(
     request: Mapping[str, object],
     source_columns: Iterable[Mapping[str, object]],
+    exec_user: str | None = None,
 ) -> dict[str, Any]:
     """Build the connectionless Type 2 target contract.
 
@@ -197,6 +211,7 @@ def build_scd2_plan(
     only metadata: no rows, no key values, no credentials.
     """
     req = validate_request(request)
+    grantee = _identifier(exec_user or default_exec_user(), "invalid_exec_user")
     source = normalize_source_columns(source_columns)
     by_name = {column["name"]: column for column in source}
 
@@ -287,6 +302,7 @@ def build_scd2_plan(
         "target_columns": columns,
         "primary_key": {"name": _pk_name(req["target_table"]), "columns": [sk_name]},
         "alternate_key": {"name": _ak_name(req["target_table"]), "columns": list(req["natural_key"])},
+        "options": {"grant_select_to_app_user": req["grant_reader"], "exec_user": grantee},
         "knowledge_modules": {
             "ikm": "IKM Oracle Slowly Changing Dimension",
             "lkm": "LKM SQL to Oracle (Built-In)",
@@ -341,19 +357,34 @@ def render_create_sequence(plan: Mapping[str, Any]) -> str:
     return f'CREATE SEQUENCE "{owner}"."{sequence}" START WITH 1 INCREMENT BY 1 NOCYCLE'
 
 
-def render_grant_statements(plan: Mapping[str, Any], ddl_user: str) -> list[str]:
-    owner = plan["target"]["owner"]
+def required_grants(plan: Mapping[str, Any]) -> list[tuple[str, str, str]]:
+    """Required (object name, grantee, privilege) triples.
+
+    The execution user (``ODI_EXEC_USER``, default ODI_EXEC) only by default. A SELECT for APP_USER (needed by the app's own
+    count-only postflight read) is opt-in via ``grant_select_to_app_user``.
+    """
     table = plan["target"]["table"]
     sequence = plan["surrogate_key"]["sequence"]
-    statements: list[str] = []
-    if (ddl_user or "").upper() != "APP_USER":
-        statements.append(f'GRANT SELECT ON "{owner}"."{table}" TO APP_USER')
-    statements.extend(
-        f'GRANT {privilege} ON "{owner}"."{table}" TO ODI_EXEC'
-        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
-    )
-    statements.append(f'GRANT SELECT ON "{owner}"."{sequence}" TO ODI_EXEC')
-    return statements
+    exec_user = plan["options"]["exec_user"]
+    grants = [(table, exec_user, privilege) for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")]
+    grants.append((sequence, exec_user, "SELECT"))
+    if plan.get("options", {}).get("grant_select_to_app_user") is True:
+        grants.append((table, "APP_USER", "SELECT"))
+    return grants
+
+
+def render_grant_statement(plan: Mapping[str, Any], grant: tuple[str, str, str]) -> str:
+    name, grantee, privilege = grant
+    return f'GRANT {privilege} ON "{plan["target"]["owner"]}"."{name}" TO {grantee}'
+
+
+def render_grant_statements(plan: Mapping[str, Any]) -> list[str]:
+    return [render_grant_statement(plan, grant) for grant in required_grants(plan)]
+
+
+def required_grantees(plan: Mapping[str, Any]) -> list[str]:
+    """Distinct grantee users that must exist before any DDL runs."""
+    return sorted({grantee for _name, grantee, _privilege in required_grants(plan)})
 
 
 def expected_target_metadata(plan: Mapping[str, Any]) -> list[tuple[str, str, bool]]:
@@ -407,7 +438,7 @@ def groovy_params(plan: Mapping[str, Any]) -> dict[str, str]:
 
 def _param_type(data_type: str) -> str:
     """Encode a SQL type for the parameter transport (no parentheses issues)."""
-    return data_type.replace("(", "_").replace(")", "").replace(",", "_")
+    return data_type.replace("(", "_").replace(")", "").replace(",", "_").replace(" ", "_")
 
 
 def probe_params(

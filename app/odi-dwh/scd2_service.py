@@ -7,6 +7,7 @@ mocks. Responses carry statuses, counts and booleans only.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -106,7 +107,7 @@ def plan_preview(body: Mapping[str, Any], services: Scd2Services) -> tuple[dict[
             "ddl": {
                 "create_sequence": scd2_builder.render_create_sequence(plan),
                 "create_table": scd2_builder.render_create_table(plan),
-                "grants": scd2_builder.render_grant_statements(plan, services.ddl_user),
+                "grants": scd2_builder.render_grant_statements(plan),
             },
             "odi_expressions": scd2_builder.odi_expressions(plan),
             "write_operations_attempted": [],
@@ -196,16 +197,23 @@ def generate(
         status, extra = blocked
         return _generate_response(status, plan, steps, 409, **extra)
 
+    mismatches = scd2_odi.existing_mismatches(plan, probe_step)
+    if mismatches:
+        return _generate_response(
+            "blocked_existing_object_mismatch", plan, steps, 409, mismatches=mismatches
+        )
+
     ddl = scd2_target_executor.execute_target_ddl(
         plan, approved=True, connection_factory=services.ddl_connection, ddl_user=services.ddl_user
     )
     steps.append({"step": "target_ddl", **ddl})
-    if ddl["status"] not in {"created", "created_grants_incomplete", "already_exists_matching"}:
+    if ddl["status"] not in {"created", "already_exists_matching", "repaired_incomplete_target"}:
+        failure = {
+            "partial_failure": "partial_failure_target_ddl",
+            "created_grants_incomplete": "partial_failure_target_grants",
+        }.get(ddl["status"], ddl["status"])
         return _generate_response(
-            "partial_failure_target_ddl" if ddl["status"] == "partial_failure" else ddl["status"],
-            plan,
-            steps,
-            409 if ddl["status"].startswith("blocked") else 502,
+            failure, plan, steps, 409 if failure.startswith("blocked") else 502
         )
 
     if not checks["ikm_present"]:
@@ -255,11 +263,11 @@ def validate_run_request(body: Mapping[str, Any]) -> dict[str, Any]:
         str(body.get("mapping_name") or ""),
     )
     natural_key = scd2_builder.identifier_list(body.get("natural_key"), "invalid_natural_key")
-    version = str(body.get("scenario_version") or "001").strip()
+    version = str(body.get("scenario_version") or "").strip()
     context = str(body.get("context") or "GLOBAL").strip().upper()
     if not scd2_builder.IDENTIFIER_RE.fullmatch(context):
         raise scd2_builder.Scd2PlanError("invalid_context")
-    if not version or len(version) > 12 or not all(ch.isalnum() or ch in "._-" for ch in version):
+    if version and (len(version) > 12 or not all(ch.isalnum() or ch in "._-" for ch in version)):
         raise scd2_builder.Scd2PlanError("invalid_scenario_version")
     return {
         "probe": probe,
@@ -284,6 +292,19 @@ def _target_is_scd2(spec: Mapping[str, Any], services: Scd2Services) -> bool | N
         logger.warning("SCD2 target metadata read failed: %s", type(exc).__name__)
         return None
     return SCD2_REQUIRED_COLUMNS <= {column["name"] for column in columns}
+
+
+def _version_key(version: str) -> tuple[Any, ...]:
+    return tuple(int(p) if p.isdigit() else p for p in re.split(r"[._-]", version))
+
+
+def _select_version(requested: str, available: list[str]) -> str | None:
+    """Bind a run to a version verified to exist for this mapping's scenario."""
+    if requested:
+        return requested if requested in available else None
+    if not available:
+        return None
+    return max(available, key=lambda v: tuple((0, p) if isinstance(p, int) else (1, p) for p in _version_key(v)))
 
 
 def run(
@@ -312,6 +333,20 @@ def run(
     checks = probe_step["checks"]
     if not (checks["mapping_exists"] and checks["scenario_exists"]):
         return {"status": "blocked_scenario_missing", "steps": steps}, 409
+    mismatches = scd2_odi.mapping_mismatches(
+        probe_step["mapping"],
+        {"source_table": spec["source_table"], "target_table": spec["target_table"]},
+    )
+    if mismatches:
+        return {"status": "blocked_existing_object_mismatch", "mismatches": mismatches, "steps": steps}, 409
+    version = _select_version(spec["scenario_version"], probe_step["scenario_versions"])
+    if version is None:
+        return {
+            "status": "blocked_scenario_version_missing",
+            "available_versions": probe_step["scenario_versions"],
+            "steps": steps,
+        }, 409
+    spec["scenario_version"] = version
 
     source = (spec["source_owner"], spec["source_table"])
     before = scd2_postflight.collect_postflight(

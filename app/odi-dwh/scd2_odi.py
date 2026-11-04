@@ -15,6 +15,8 @@ from typing import Any
 import scd2_builder
 from odi_orchestrator import groovy_approval_context
 
+IKM_NAME = "IKM Oracle Slowly Changing Dimension"
+LKM_NAME = "LKM SQL to Oracle (Built-In)"
 SCRIPT_PROBE = "scd2_probe.groovy"
 SCRIPT_REGISTER = "scd2_datastore_register.groovy"
 SCRIPT_MAPPING = "scd2_mapping_create.groovy"
@@ -146,13 +148,144 @@ def probe(orchestrator: Any, probe_params: Mapping[str, str]) -> dict[str, Any]:
     count = result.get("source_column_count")
     if type(count) is not int or count < 0:
         return _failed("odi_probe", "InvalidGroovyEnvelope")
+    details = _probe_details(result)
+    if details is None:
+        return _failed("odi_probe", "InvalidGroovyEnvelope")
     return _step(
         "odi_probe",
         "passed",
         side_effects=False,
         checks={key: result[key] for key in _PROBE_BOOLEANS},
         source_column_count=count,
+        **details,
     )
+
+
+_VERSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,12}$")
+_ROLES = frozenset(
+    {
+        "SURROGATE_KEY",
+        "NATURAL_KEY",
+        "ADD_ROW_ON_CHANGE",
+        "OVERWRITE_ON_CHANGE",
+        "START_TIMESTAMP",
+        "END_TIMESTAMP",
+        "CURRENT_RECORD_FLAG",
+        "NONE",
+    }
+)
+_MAPPING_KEYS = frozenset(
+    {
+        "target_count",
+        "target_table",
+        "source_tables",
+        "integration_type",
+        "target_ikm",
+        "lkm_names",
+        "target_attribute_count",
+        "mapped_attribute_count",
+    }
+)
+
+
+def _name_list(value: object) -> list[str] | None:
+    if not isinstance(value, list) or not all(isinstance(v, str) and len(v) <= 128 for v in value):
+        return None
+    return list(value)
+
+
+def _probe_details(result: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Validate contract-relevant metadata returned by the probe."""
+    versions = _name_list(result.get("scenario_versions"))
+    pk = _name_list(result.get("target_primary_key"))
+    ak = _name_list(result.get("target_alternate_key"))
+    columns = result.get("target_columns")
+    if versions is None or pk is None or ak is None or not isinstance(columns, list):
+        return None
+    if not all(_VERSION_RE.fullmatch(v) for v in versions):
+        return None
+    clean_columns = []
+    for column in columns:
+        if (
+            not isinstance(column, dict)
+            or set(column) != {"name", "role", "mandatory"}
+            or not isinstance(column["name"], str)
+            or column["role"] not in _ROLES
+            or type(column["mandatory"]) is not bool
+        ):
+            return None
+        clean_columns.append(dict(column))
+    mapping = result.get("mapping")
+    if mapping is not None:
+        if not isinstance(mapping, dict) or set(mapping) != _MAPPING_KEYS:
+            return None
+        lkms = _name_list(mapping["lkm_names"])
+        sources = _name_list(mapping["source_tables"])
+        counts_ok = all(
+            type(mapping[key]) is int and mapping[key] >= 0
+            for key in ("target_count", "target_attribute_count", "mapped_attribute_count")
+        )
+        text_ok = all(mapping[key] is None or isinstance(mapping[key], str) for key in ("target_table", "integration_type", "target_ikm"))
+        if lkms is None or sources is None or not counts_ok or not text_ok:
+            return None
+        mapping = {**mapping, "lkm_names": lkms, "source_tables": sources}
+    return {
+        "scenario_versions": versions,
+        "target_datastore": {"columns": clean_columns, "primary_key": pk, "alternate_key": ak},
+        "mapping": mapping,
+    }
+
+
+def mapping_mismatches(
+    mapping: Mapping[str, Any] | None,
+    plan_like: Mapping[str, Any],
+    expected_attributes: int | None = None,
+) -> list[str]:
+    """Compare an existing mapping with the requested source/target/KMs."""
+    if mapping is None:
+        return ["mapping_unreadable"]
+    found: list[str] = []
+    if mapping["target_count"] != 1 or mapping["target_table"] != plan_like["target_table"]:
+        found.append("mapping_target")
+    if mapping["source_tables"] != [plan_like["source_table"]]:
+        found.append("mapping_source")
+    if mapping["integration_type"] not in {"SCD", "SLOWLY_CHANGING_DIMENSION"}:
+        found.append("mapping_integration_type")
+    if mapping["target_ikm"] != IKM_NAME or not mapping["lkm_names"] or set(mapping["lkm_names"]) != {LKM_NAME}:
+        found.append("mapping_knowledge_modules")
+    if mapping["mapped_attribute_count"] != mapping["target_attribute_count"] or (
+        expected_attributes is not None and mapping["target_attribute_count"] != expected_attributes
+    ):
+        found.append("mapping_coverage")
+    return found
+
+
+def existing_mismatches(plan: Mapping[str, Any], step: Mapping[str, Any]) -> list[str]:
+    """Mismatch codes between existing ODI objects and the requested plan."""
+    checks = step["checks"]
+    found: list[str] = []
+    if checks["target_datastore_exists"]:
+        role_by_name = {
+            c["name"]: ("NONE" if c["scd_role"] == "NONE" else c["scd_role"]) for c in plan["target_columns"]
+        }
+        expected = [
+            {"name": c["name"], "role": role_by_name[c["name"]], "mandatory": not c["nullable"]}
+            for c in plan["target_columns"]
+        ]
+        store = step["target_datastore"]
+        if store["columns"] != expected:
+            found.append("datastore_columns")
+        if store["primary_key"] != plan["primary_key"]["columns"] or store["alternate_key"] != plan["natural_key"]:
+            found.append("datastore_keys")
+    if checks["mapping_exists"]:
+        found.extend(
+            mapping_mismatches(
+                step["mapping"],
+                {"source_table": plan["source"]["table"], "target_table": plan["target"]["table"]},
+                len(plan["target_columns"]),
+            )
+        )
+    return found
 
 
 def _counts_ok(result: Mapping[str, Any], keys: tuple[str, ...]) -> bool:

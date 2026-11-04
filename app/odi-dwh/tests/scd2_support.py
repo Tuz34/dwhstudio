@@ -29,17 +29,18 @@ REQUEST = {
 
 
 def catalog_row(name: str, data_type: str, nullable: bool):
-    match = re.fullmatch(r"([A-Z0-9]+)(?:\((\d+)(?:,(\d+))?\))?", data_type)
+    match = re.fullmatch(r"([A-Z0-9]+)(?:\((\d+)(?:,(\d+)| CHAR)?\))?", data_type)
     base, first, second = match.groups()
     flag = "Y" if nullable else "N"
     if base in {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"}:
-        return (name, base, int(first), None, None, flag)
+        used = "C" if "CHAR" in data_type.split("(")[-1] or base in {"NVARCHAR2", "NCHAR"} else "B"
+        return (name, base, int(first), None, None, flag, int(first), used)
     if base == "NUMBER":
         scale = int(second) if second else (0 if first else None)
-        return (name, base, 22, int(first) if first else None, scale, flag)
+        return (name, base, 22, int(first) if first else None, scale, flag, 0, None)
     if base == "TIMESTAMP":
-        return (name, "TIMESTAMP(6)", 11, None, None, flag)
-    return (name, base, 7, None, None, flag)
+        return (name, "TIMESTAMP(6)", 11, None, None, flag, 0, None)
+    return (name, base, 7, None, None, flag, 0, None)
 
 
 def plan_catalog_rows(plan):
@@ -111,7 +112,12 @@ def _envelope(tool, mode, side_effects, result):
     }
 
 
-def probe_payload(**overrides):
+def _default_plan():
+    return scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)
+
+
+def probe_payload(plan=None, **overrides):
+    plan = plan or _default_plan()
     result = {
         "source_model_exists": True,
         "source_datastore_exists": True,
@@ -125,7 +131,33 @@ def probe_payload(**overrides):
         "lkm_present": True,
         "mapping_exists": False,
         "scenario_exists": False,
+        "scenario_versions": [],
+        "target_columns": [],
+        "target_primary_key": [],
+        "target_alternate_key": [],
+        "mapping": None,
     }
+    if overrides.get("target_datastore_exists"):
+        result["target_columns"] = [
+            {"name": c["name"], "role": c["scd_role"], "mandatory": not c["nullable"]}
+            for c in plan["target_columns"]
+        ]
+        result["target_primary_key"] = plan["primary_key"]["columns"]
+        result["target_alternate_key"] = plan["natural_key"]
+    if overrides.get("mapping_exists"):
+        count = len(plan["target_columns"])
+        result["mapping"] = {
+            "target_count": 1,
+            "target_table": plan["target"]["table"],
+            "source_tables": [plan["source"]["table"]],
+            "integration_type": "SCD",
+            "target_ikm": "IKM Oracle Slowly Changing Dimension",
+            "lkm_names": ["LKM SQL to Oracle (Built-In)"],
+            "target_attribute_count": count,
+            "mapped_attribute_count": count,
+        }
+    if overrides.get("scenario_exists"):
+        result["scenario_versions"] = ["001"]
     result.update(overrides)
     return json.dumps(_envelope("odi.scd2_probe", "generic_scd2_readiness_probe", False, result))
 
@@ -242,12 +274,16 @@ def default_catalog_handler(sql, params):
     return [(0,)]
 
 
+def default_ddl_handler(sql, params):
+    return [(1,)] if "FROM ALL_USERS" in sql else [(0,)]
+
+
 def make_services(orchestrator, ddl_log=None, ddl_handler=None, catalog_log=None, catalog_handler=None):
     ddl_log = [] if ddl_log is None else ddl_log
     catalog_log = [] if catalog_log is None else catalog_log
     return Scd2Services(
         catalog_connection=connection_factory(catalog_log, catalog_handler or default_catalog_handler),
-        ddl_connection=connection_factory(ddl_log, ddl_handler or (lambda sql, params: [(0,)])),
+        ddl_connection=connection_factory(ddl_log, ddl_handler or default_ddl_handler),
         ddl_user="DWH_DDL",
         orchestrator_factory=lambda: orchestrator,
     )

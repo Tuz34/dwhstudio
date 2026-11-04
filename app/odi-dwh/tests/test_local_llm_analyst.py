@@ -9,7 +9,7 @@ class FakeResponse:
 
     def json(self):
         return {
-            "choices": [{"message": {"content": "Kisa ozet\n- Risk yok\n- Sonraki adim test"}}],
+            "choices": [{"message": {"content": "Short summary\n- No risk\n- Next step: test"}}],
             "usage": {"completion_tokens": 12},
         }
 

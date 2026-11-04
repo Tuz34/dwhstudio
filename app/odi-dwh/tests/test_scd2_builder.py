@@ -189,20 +189,32 @@ def test_create_table_ddl_text_is_26_style_and_has_no_drop():
     assert "DROP" not in ddl.upper()
 
 
-def test_sequence_and_grants_text():
+def test_sequence_and_grants_text_are_odi_exec_only_by_default():
     plan = build_scd2_plan(request(), small_columns())
     assert scd2_builder.render_create_sequence(plan) == (
         'CREATE SEQUENCE "DM"."SEQ_DIM_CUSTOMER" START WITH 1 INCREMENT BY 1 NOCYCLE'
     )
-    grants = scd2_builder.render_grant_statements(plan, "DWH_DDL")
-    assert 'GRANT SELECT ON "DM"."DIM_CUSTOMER" TO APP_USER' in grants
+    grants = scd2_builder.render_grant_statements(plan)
     for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
         assert f'GRANT {privilege} ON "DM"."DIM_CUSTOMER" TO ODI_EXEC' in grants
     assert 'GRANT SELECT ON "DM"."SEQ_DIM_CUSTOMER" TO ODI_EXEC' in grants
-    assert not any("DROP" in g or "REVOKE" in g for g in grants)
-    assert 'GRANT SELECT ON "DM"."DIM_CUSTOMER" TO APP_USER' not in scd2_builder.render_grant_statements(
-        plan, "APP_USER"
-    )
+    assert len(grants) == 5
+    assert not any("APP_USER" in g or "DROP" in g or "REVOKE" in g for g in grants)
+
+
+def test_app_user_reader_grant_is_explicit_opt_in():
+    plan = build_scd2_plan(request(grant_select_to_app_user=True), small_columns())
+    assert plan["options"]["grant_select_to_app_user"] is True
+    assert 'GRANT SELECT ON "DM"."DIM_CUSTOMER" TO APP_USER' in scd2_builder.render_grant_statements(plan)
+    with pytest.raises(Scd2PlanError):
+        build_scd2_plan(request(grant_select_to_app_user="yes"), small_columns())
+
+
+def test_char_semantics_types_flow_through_plan_ddl_and_params():
+    cols = small_columns() + [{"name": "CUST_NOTE", "data_type": "VARCHAR2(40 CHAR)", "nullable": True}]
+    plan = build_scd2_plan(request(tracked_columns=["CUST_NOTE"]), cols)
+    assert '"CUST_NOTE" VARCHAR2(40 CHAR)' in scd2_builder.render_create_table(plan)
+    assert "CUST_NOTE:VARCHAR2_40_CHAR" in scd2_builder.groovy_params(plan)["odi.scd2.column_types"]
 
 
 def test_custom_sequence_name_is_used():

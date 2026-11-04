@@ -384,7 +384,9 @@ def test_data_ops_has_explicit_incremental_load_operator_gate():
     assert "rerunState === 'new_window_ready'" in panel
     assert "window.confirm('This runs a live DB append and persisted watermark update. Continue?')" in panel
     assert "approved: true" in panel
-    assert "post_load_gate_results" in panel
+    assert "post_load_gate_results" not in panel
+    assert "post_load_golden_record_passed: goldenPassed" not in panel
+    assert "computed by the server" in panel
 
 
 def test_header_does_not_render_global_alert_banner_or_airflow_link():

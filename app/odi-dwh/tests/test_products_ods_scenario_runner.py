@@ -55,7 +55,7 @@ def test_products_runner_returns_fixed_success_without_session_identifier(monkey
 
     def fake_run(name, version, context):
         called.append((name, version, context))
-        return "Session ID: 12345\nStatus: DONE\nSUCCESS: Senaryo basariyla calistirildi."
+        return "Session ID: 12345\nStatus: DONE\nSUCCESS: Scenario completed successfully."
 
     monkeypatch.setattr(orch, "run_scenario", fake_run)
     result = orch.run_products_ods_scenario_safe(

@@ -1,6 +1,6 @@
 """
 pytest Fixtures
-━━━━━━━━━━━━━━━━━━━
+===============
 
 Shared fixtures for all test files.
 """

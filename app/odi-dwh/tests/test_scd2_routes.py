@@ -113,6 +113,8 @@ def test_generate_route_end_to_end_with_mocks(app_client, stub_services, plan):
 
 
 def _ddl(plan, sql):
+    if "FROM ALL_USERS" in sql:
+        return [(1,)]
     if "FROM ALL_TABLES" in sql or "FROM ALL_SEQUENCES" in sql:
         return [(0,)]
     if "FROM ALL_TAB_COLUMNS" in sql:
@@ -220,9 +222,23 @@ def test_write_routes_enforce_csrf_when_enabled(stub_services):
         limiter.enabled = old_limiter
 
 
-def test_dm_is_a_recognised_owner_but_not_a_blanket_allowlist_widening():
+def test_dm_is_not_in_the_global_owner_allowlist(app_client):
     import app as app_module
 
-    assert app_module._validate_owner("dm") is True
+    assert app_module._validate_owner("DM") is False
     assert app_module._validate_owner("SYS") is False
-    assert app_module._validate_owner("DM_EVIL") is False
+    response = app_client.post(
+        "/api/mapping/delete", json={"mapping_name": "MAP_X", "tgt_owner": "DM", "approved": True}
+    )
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "Invalid target owner."
+
+
+def test_postflight_invalid_owner_and_table_are_not_echoed(app_client, stub_services):
+    stub_services()
+    response = app_client.get("/api/scd2/postflight?owner=EVIL_OWNER_X&table=EVIL_TABLE_Y&natural_key=A")
+    assert response.status_code == 400
+    text = response.get_data(as_text=True)
+    assert "EVIL_OWNER_X" not in text and "EVIL_TABLE_Y" not in text
+    response = app_client.get("/api/scd2/postflight?owner=DM&table=BAD%20TABLE%3B&natural_key=A")
+    assert response.status_code == 400 and "BAD" not in response.get_data(as_text=True)

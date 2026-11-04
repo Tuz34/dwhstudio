@@ -344,11 +344,11 @@ class MappingStateManager:
                 )
             """, payload)
             conn.commit()
-            logger.info("MAPPING_RUN_STATE yazildi: batch=%s mapping=%s status=%s step=%s",
+            logger.info("MAPPING_RUN_STATE written: batch=%s mapping=%s status=%s step=%s",
                         batch_id, mapping_name, normalized_status, state.get("current_step"))
         except Exception as exc:
             # Include the full error for diagnosis — do not hide permission/connection/schema issues
-            logger.error("MAPPING_RUN_STATE yazilamadi (batch=%s mapping=%s): %s",
+            logger.error("MAPPING_RUN_STATE write failed (batch=%s mapping=%s): %s",
                          batch_id, mapping_name, exc, exc_info=True)
         finally:
             cursor.close()

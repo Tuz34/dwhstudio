@@ -115,7 +115,7 @@ ODI_REPO_PASSWORD = get_secret("ODI_REPO_PASSWORD", "")
 LOG_LEVEL          = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FILE           = os.getenv("LOG_FILE", "logs/app.log")
 
-# ── 10. Productization — Cevre Bagimsiz Ayarlar ──────────────────────────────
+# ── 10. Productization — Environment-Independent Settings ──────────────────────────────
 JAVA_HOME           = os.getenv("JAVA_HOME", "C:\\Program Files\\Java\\jdk1.8.0_211")
 JAVA_FALLBACK_PATHS = [
     item.strip()
@@ -136,10 +136,13 @@ SOURCE_SYSTEM_NAME  = os.getenv("SOURCE_SYSTEM_NAME", "ORACLE_SAMPLE_SCHEMAS")
 TABLE_NAME_MAX_LEN  = int(os.getenv("TABLE_NAME_MAX_LENGTH", "128"))  # Oracle 12.2+/19c and ODI 14c support 128-char identifiers
 OJDBC_JAR_NAME      = os.getenv("OJDBC_JAR_NAME", "ojdbc8.jar")     # ojdbc8 | ojdbc11
 GROOVY_JAR_NAME     = os.getenv("GROOVY_JAR_NAME", "groovy-all-2.4.17.jar")
+# Oracle user that executes ODI loads and needs DML grants on SCD2 targets.
+# Override when the database has no ODI_EXEC user (documented in dwh-scd2-generic-builder.md).
+ODI_EXEC_USER       = (os.getenv("ODI_EXEC_USER", "ODI_EXEC") or "ODI_EXEC").strip().upper()
 ODI_IKM_PRIORITY    = os.getenv("ODI_IKM_PRIORITY", "oracle merge,oracle update,oracle insert")
 ODI_LKM_PRIORITY    = os.getenv("ODI_LKM_PRIORITY", "sql to oracle,mssql to oracle,sql to sql")
 
-# ── 9. Alert & Monitoring Ayarlari ──────────────────────────────────────────
+# ── 9. Alert & Monitoring Settings ──────────────────────────────────────────
 ALERT_FRESHNESS_DAYS = int(os.getenv("ALERT_FRESHNESS_DAYS", "2"))
 ALERT_POLL_INTERVAL  = int(os.getenv("ALERT_POLL_INTERVAL", "60"))
 

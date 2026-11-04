@@ -225,7 +225,7 @@ def get_rag_context(user_query: str) -> str:
         # Past mapping runs (for questions about how a mapping was done).
         runs = search_documents("mapping_runs", user_query, n_results=2, query_emb=query_emb)
         if runs:
-            context_parts.append("--- GEÇMİŞ MAPPING ÇALIŞTIRMA KAYITLARI ---\n" + "\n".join(runs))
+            context_parts.append("--- PAST MAPPING RUN RECORDS ---\n" + "\n".join(runs))
 
     except Exception as e:
         logger.error("RAG search error: %s", e)

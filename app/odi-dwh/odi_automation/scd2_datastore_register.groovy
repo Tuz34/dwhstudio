@@ -25,7 +25,7 @@ import oracle.odi.domain.model.finder.IOdiModelFinder
 final String TOOL = "odi.scd2_datastore_register"
 final String MODE = "generic_absent_only_scd2_datastore_registration"
 final java.util.regex.Pattern ID = ~/^[A-Z0-9_#]{1,30}$/
-final java.util.regex.Pattern TYPE = ~/^([A-Z][A-Z0-9]*?)(?:_(\d+)(?:_(\d+))?)?$/
+final java.util.regex.Pattern TYPE = ~/^([A-Z][A-Z0-9]*?)(?:_(\d+)(?:_(\d+))?)?(?:_(CHAR))?$/
 final Map<String, String> FIXED_ROLES = [
     EFFECTIVE_FROM: "START_TIMESTAMP",
     EFFECTIVE_TO: "END_TIMESTAMP",
@@ -45,10 +45,12 @@ def safeFlags = {
     ]
 }
 
-// Stable reason codes only: never echo parameter values or repository ids.
+// Fixed allowlisted reason codes or the exception class simple name; the exception
+// message is never returned (it could carry repository values).
+final Set<String> REASON_CODES = ["InvalidParameter", "InvalidColumnType", "TargetModelUnavailable", "TargetModelNotOracle", "TargetDatastoreAlreadyExists", "ColumnContractMismatch", "ColumnOrderMismatch", "ColumnMetadataMismatch", "PrimaryKeyMismatch", "NaturalKeyMismatch"] as Set
 def reasonCode = { Exception e ->
     String message = e.getMessage()
-    if (message != null && message ==~ /^[A-Za-z][A-Za-z0-9_]{0,63}$/) {
+    if (e instanceof IllegalStateException && message != null && REASON_CODES.contains(message)) {
         return message
     }
     return e.getClass().getSimpleName()
@@ -163,7 +165,9 @@ try {
             OdiColumn column = new OdiColumn(target, name)
             column.setDataTypeCode(base)
             String dataFormat = base
-            if (length != null && scale != null) {
+            if (matcher.group(4) != null) {
+                dataFormat += "(${length} CHAR)"
+            } else if (length != null && scale != null) {
                 dataFormat += "(${length},${scale})"
             } else if (length != null) {
                 dataFormat += "(${length})"

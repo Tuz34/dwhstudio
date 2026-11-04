@@ -24,16 +24,21 @@ def plan():
 def ddl_handler(plan, **kw):
     rows = plan_catalog_rows(plan)
     fail_on = kw.get("fail_on")
+    users = kw.get("users", {})
 
     def handler(sql, params):
         if fail_on and fail_on in sql:
             return oracle_error("ORA-01031")
+        if "FROM ALL_USERS" in sql:
+            return [(users.get(params.get("u"), 1),)]
         if "FROM ALL_TABLES" in sql:
             return [(kw.get("table_exists", 0),)]
         if "FROM ALL_SEQUENCES" in sql:
-            return [(0,)]
+            return [(kw.get("sequence_exists", 0),)]
         if "FROM ALL_TAB_COLUMNS" in sql:
             return rows
+        if "FROM ALL_TAB_PRIVS" in sql:
+            return kw.get("grants", [(g, p, t) for t, g, p in scd2_builder.required_grants(plan)])
         return []
 
     return handler
@@ -262,7 +267,7 @@ def test_rerun_skips_objects_that_already_exist(plan):
     ddl_log = []
     payload, status = scd2_service.generate(
         REQUEST,
-        make_services(orchestrator, ddl_log=ddl_log, ddl_handler=ddl_handler(plan, table_exists=1)),
+        make_services(orchestrator, ddl_log=ddl_log, ddl_handler=ddl_handler(plan, table_exists=1, sequence_exists=1)),
         approved=True,
     )
     assert status == 200 and payload["status"] == "generated"
@@ -328,7 +333,7 @@ def test_run_requires_approval(plan):
 
 def test_run_blocks_non_scd2_targets(plan):
     orchestrator = FakeOrchestrator(plan)
-    plain = lambda sql, params: [("CUST_ID", "NUMBER", 22, 10, 0, "N")]  # noqa: E731
+    plain = lambda sql, params: [("CUST_ID", "NUMBER", 22, 10, 0, "N", 0, None)]  # noqa: E731
     payload, status = scd2_service.run(RUN_BODY, make_services(orchestrator, catalog_handler=plain), approved=True)
     assert status == 409 and payload["status"] == "blocked_target_not_scd2"
     assert orchestrator.calls == []
@@ -374,3 +379,156 @@ def test_postflight_service_validates_and_returns_counts(plan):
     assert status == 400
     payload, status = scd2_service.postflight({"owner": "DM", "table": "T"}, services)
     assert status == 400
+
+
+# ------------------------------------------------ review round 2: verification
+
+
+def existing_probe(plan, **overrides):
+    return probe_payload(
+        plan, target_datastore_exists=True, mapping_exists=True, scenario_exists=True, **overrides
+    )
+
+
+def _mutated_probe(plan, mutate):
+    import json as _json
+
+    payload = _json.loads(existing_probe(plan))
+    mutate(payload["result"])
+    return _json.dumps(payload)
+
+
+def test_matching_existing_objects_are_accepted(plan):
+    orchestrator = FakeOrchestrator(
+        plan, responses={"scd2_probe.groovy": existing_probe(plan)}, scenario_result={"status": "already_ready"}
+    )
+    payload, status = scd2_service.generate(
+        REQUEST,
+        make_services(orchestrator, ddl_handler=ddl_handler(plan, table_exists=1, sequence_exists=1)),
+        approved=True,
+    )
+    assert status == 200 and payload["status"] == "generated"
+
+
+@pytest.mark.parametrize(
+    "mutate, code",
+    [
+        (lambda r: r["target_columns"][2].update(role="OVERWRITE_ON_CHANGE"), "datastore_columns"),
+        (lambda r: r["target_columns"].pop(), "datastore_columns"),
+        (lambda r: r["target_columns"][1].update(mandatory=False), "datastore_columns"),
+        (lambda r: r.update(target_primary_key=["CUST_ID"]), "datastore_keys"),
+        (lambda r: r.update(target_alternate_key=[]), "datastore_keys"),
+        (lambda r: r["mapping"].update(source_tables=["OTHER_TABLE"]), "mapping_source"),
+        (lambda r: r["mapping"].update(target_table="OTHER_DIM"), "mapping_target"),
+        (lambda r: r["mapping"].update(integration_type="IU"), "mapping_integration_type"),
+        (lambda r: r["mapping"].update(target_ikm="IKM Oracle Insert"), "mapping_knowledge_modules"),
+        (lambda r: r["mapping"].update(lkm_names=["LKM Other"]), "mapping_knowledge_modules"),
+        (lambda r: r["mapping"].update(lkm_names=[]), "mapping_knowledge_modules"),
+        (lambda r: r["mapping"].update(mapped_attribute_count=1), "mapping_coverage"),
+    ],
+)
+def test_mismatched_existing_datastore_or_mapping_is_blocked_with_no_write(plan, mutate, code):
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": _mutated_probe(plan, mutate)})
+    ddl_log = []
+    payload, status = scd2_service.generate(
+        REQUEST,
+        make_services(orchestrator, ddl_log=ddl_log, ddl_handler=ddl_handler(plan, table_exists=1)),
+        approved=True,
+    )
+    assert status == 409 and payload["status"] == "blocked_existing_object_mismatch"
+    assert code in payload["mismatches"]
+    assert orchestrator.order == ["scd2_probe.groovy"] and ddl_log == []
+
+
+def test_existing_target_missing_sequence_and_grants_is_repaired_then_generated(plan):
+    orchestrator = FakeOrchestrator(
+        plan, responses={"scd2_probe.groovy": existing_probe(plan)}, scenario_result={"status": "already_ready"}
+    )
+    payload, status = scd2_service.generate(
+        REQUEST,
+        make_services(orchestrator, ddl_handler=ddl_handler(plan, table_exists=1, grants=[])),
+        approved=True,
+    )
+    assert status == 200
+    ddl_step = [s for s in payload["steps"] if s["step"] == "target_ddl"][0]
+    assert ddl_step["status"] == "repaired_incomplete_target" and ddl_step["repaired"] == ["sequence", "grants"]
+
+
+def test_unrepairable_existing_target_blocks_before_odi_writes(plan):
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": existing_probe(plan)})
+    payload, status = scd2_service.generate(
+        REQUEST,
+        make_services(
+            orchestrator,
+            ddl_handler=ddl_handler(plan, table_exists=1, sequence_exists=1, grants=[], fail_on="GRANT "),
+        ),
+        approved=True,
+    )
+    assert status == 409 and payload["status"] == "blocked_target_incomplete"
+    assert orchestrator.order == ["scd2_probe.groovy"]
+
+
+def test_incomplete_grants_on_fresh_create_stop_generation(plan):
+    orchestrator = FakeOrchestrator(plan)
+    payload, status = scd2_service.generate(
+        REQUEST,
+        make_services(orchestrator, ddl_handler=ddl_handler(plan, fail_on="TO ODI_EXEC")),
+        approved=True,
+    )
+    assert status == 502 and payload["status"] == "partial_failure_target_grants"
+    assert orchestrator.order == ["scd2_probe.groovy"]
+
+
+def run_services(plan, orchestrator):
+    return make_services(orchestrator, catalog_handler=run_catalog_handler(plan, []))
+
+
+def test_run_rejects_a_caller_version_that_does_not_exist_for_the_mapping(plan):
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": existing_probe(plan)})
+    payload, status = scd2_service.run(
+        {**RUN_BODY, "scenario_version": "999"}, run_services(plan, orchestrator), approved=True
+    )
+    assert status == 409 and payload["status"] == "blocked_scenario_version_missing"
+    assert payload["available_versions"] == ["001"]
+    assert not any(c[0] == "scenario_run" for c in orchestrator.calls)
+
+
+def test_run_uses_the_verified_requested_version_or_the_latest(plan):
+    probe = _mutated_probe(plan, lambda r: r.update(scenario_versions=["001", "002", "010"]))
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": probe})
+    payload, status = scd2_service.run(RUN_BODY, run_services(plan, orchestrator), approved=True)
+    assert status == 200 and payload["scenario"]["version"] == "010"
+    run_call = [c for c in orchestrator.calls if c[0] == "scenario_run"][0][1]
+    assert run_call["version"] == "010" and run_call["scenario_name"] == "MAP_ODS_CUST_TO_DIM_CUST_SCN"
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": probe})
+    payload, _ = scd2_service.run(
+        {**RUN_BODY, "scenario_version": "002"}, run_services(plan, orchestrator), approved=True
+    )
+    assert payload["scenario"]["version"] == "002"
+
+
+def test_run_blocks_when_the_mapping_is_not_the_requested_scd2_mapping(plan):
+    probe = _mutated_probe(plan, lambda r: r["mapping"].update(integration_type="IU"))
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": probe})
+    payload, status = scd2_service.run(RUN_BODY, run_services(plan, orchestrator), approved=True)
+    assert status == 409 and payload["status"] == "blocked_existing_object_mismatch"
+    assert not any(c[0] == "scenario_run" for c in orchestrator.calls)
+
+
+def test_run_scenario_name_is_server_derived(plan):
+    spec = scd2_service.validate_run_request({**RUN_BODY, "scenario_name": "MAP_HR_EMPLOYEES_TO_ODS_SCN"})
+    assert spec["scenario_name"] == "MAP_ODS_CUST_TO_DIM_CUST_SCN"
+
+
+def test_generate_blocks_on_missing_exec_user_before_any_odi_write(plan):
+    orchestrator = FakeOrchestrator(plan)
+    ddl_log = []
+    payload, status = scd2_service.generate(
+        REQUEST,
+        make_services(orchestrator, ddl_log=ddl_log, ddl_handler=ddl_handler(plan, users={"ODI_EXEC": 0})),
+        approved=True,
+    )
+    assert status == 409 and payload["status"] == "blocked_grantee_missing"
+    assert orchestrator.order == ["scd2_probe.groovy"]
+    assert not any(sql.startswith(("CREATE", "GRANT")) for sql in ddl_log)
+    assert "message" in payload["steps"][-1]

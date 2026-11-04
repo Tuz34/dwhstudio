@@ -52,10 +52,12 @@ def safeFlags = {
     ]
 }
 
-// Stable reason codes only: never echo parameter values or repository ids.
+// Fixed allowlisted reason codes or the exception class simple name; the exception
+// message is never returned (it could carry repository values).
+final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable", "ProjectFolderUnavailable", "MappingAlreadyExists", "ScenarioAlreadyExists", "SourceDatastoreUnavailable", "TargetDatastoreUnavailable", "SourceColumnsMissing", "ScdRoleContractMismatch", "IkmUnavailable", "LkmUnavailable", "IkmIntegrationTypeMismatch", "IntegrationTypeMismatch", "SourceAttributeUnavailable", "UnmappedTargetAttribute", "TargetPhysicalNodeUnavailable", "StagingLocationUnavailable", "TargetNodeLostAfterReset", "IkmAssignmentMismatch", "LkmAssignmentMismatch", "MappingCoverageMismatch"] as Set
 def reasonCode = { Exception e ->
     String message = e.getMessage()
-    if (message != null && message ==~ /^[A-Za-z][A-Za-z0-9_]{0,63}$/) {
+    if (e instanceof IllegalStateException && message != null && REASON_CODES.contains(message)) {
         return message
     }
     return e.getClass().getSimpleName()

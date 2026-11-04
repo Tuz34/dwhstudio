@@ -77,7 +77,7 @@ class MappingSnapshotManager:
             mapping_name: ODI mapping name.
             mapping_data: Mapping dictionary containing the column list
                 (output of odi_get_mapping_details).
-            label: Opsiyonel versiyon etiketi (orn. "before_refactor").
+            label: Optional version label (e.g. "before_refactor").
 
         Returns:
             Created SNAP_ID.
@@ -112,7 +112,7 @@ class MappingSnapshotManager:
         finally:
             cursor.close()
 
-    # ── Snapshot Listesi ──────────────────────────────────────────────────────
+    # ── Snapshot List ──────────────────────────────────────────────────────
     def get_snapshots(self, mapping_name: str, limit: int = 10) -> list[dict]:
         """Return the mapping snapshot history (newest first).
 
@@ -201,7 +201,7 @@ class MappingSnapshotManager:
                 "error": "At least 2 snapshots are required for comparison.",
                 "snap_count": len(snaps),
             }
-        newer = snaps[0]  # En yeni
+        newer = snaps[0]  # Newest
         older = snaps[1]  # Previous one
         diff = self.compare_snapshots(older["snap_id"], newer["snap_id"])
         diff["snap_old"] = older

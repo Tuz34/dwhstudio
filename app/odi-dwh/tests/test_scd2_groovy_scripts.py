@@ -200,3 +200,23 @@ def test_script_delimiters_are_balanced(name):
     text = re.sub(r"/\^.*?\$/|~/.*?/", "", text)
     for open_char, close_char in ("{}", "()", "[]"):
         assert text.count(open_char) == text.count(close_char), name
+
+
+@pytest.mark.parametrize("name", SCD2_SCRIPTS)
+def test_error_type_is_an_allowlisted_code_or_exception_class_name_never_the_message(name):
+    text = read(name)
+    assert "final Set<String> REASON_CODES" in text
+    body = text.split("def reasonCode")[1].split("def requireProp")[0]
+    assert "REASON_CODES.contains(message)" in body
+    assert "e.getClass().getSimpleName()" in body
+    assert "return message\n" in body and "contains(message)" in body  # message only after allowlist check
+    codes = re.search(r"REASON_CODES = \[(.*?)\] as Set", text, re.S).group(1)
+    assert all(re.fullmatch(r'"[A-Za-z][A-Za-z0-9]{0,63}"', c.strip()) for c in codes.split(","))
+
+
+def test_probe_returns_contract_metadata_for_existing_objects():
+    text = read("scd2_probe.groovy")
+    for needle in ("scenario_versions", "target_columns", "target_primary_key", "target_alternate_key",
+                   "integration_type", "target_ikm", "lkm_names", "source_tables", "findBySourceMapping"):
+        assert needle in text, needle
+    assert "txnMgr.commit" not in text

@@ -62,3 +62,23 @@ No raw rows, key values, secrets or repository ids appear in any response.
 Groovy output is parsed through strict envelopes; unexpected shapes become a
 fixed `InvalidGroovyEnvelope` error. The new Groovy actions are registered in
 `GROOVY_ACTION_REGISTRY` with the strict structured-error contract.
+
+## Execution user (grantee)
+
+DML grants go to the Oracle user named by the config key `ODI_EXEC_USER`
+(default `ODI_EXEC`). Before any DDL the executor checks `ALL_USERS`; if the
+user does not exist, generation stops with `blocked_grantee_missing` and a
+message naming the missing user, with no DDL executed. A `SELECT` grant to
+`APP_USER` (needed so the app's own count-only postflight can read the target)
+is opt-in with `"grant_select_to_app_user": true` in the request.
+
+## Existing objects
+
+Existing target tables, datastores and mappings are verified against the
+requested plan (columns, SCD roles, keys, source/target, integration type,
+IKM/LKM) before being reused; any difference returns
+`blocked_existing_object_mismatch` and nothing is written. An existing matching
+table with a missing sequence or grants is repaired (create sequence, add
+grants) without altering the table, or reported as `blocked_target_incomplete`.
+`run` is bound to the server-derived `<mapping>_SCN` and a version verified to
+exist for that mapping (latest by default).

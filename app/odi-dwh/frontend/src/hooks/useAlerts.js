@@ -11,7 +11,7 @@ export function useAlerts() {
       const alerts = Array.isArray(data) ? data : [];
       dispatch({ type: 'SET_ALERTS', payload: alerts });
     } catch {
-      // sessiz kal
+      // stay silent
     }
   }, [dispatch]);
 

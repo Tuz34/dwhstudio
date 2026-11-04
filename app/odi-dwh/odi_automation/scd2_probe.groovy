@@ -15,6 +15,8 @@ import oracle.odi.core.persistence.transaction.ITransactionStatus
 import oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition
 import oracle.odi.core.security.Authentication
 import oracle.odi.domain.mapping.Mapping
+import oracle.odi.domain.mapping.component.DatastoreComponent
+import oracle.odi.domain.mapping.physical.MapPhysicalDesign
 import oracle.odi.domain.model.OdiDataStore
 import oracle.odi.domain.model.OdiModel
 import oracle.odi.domain.model.finder.IOdiDataStoreFinder
@@ -49,10 +51,12 @@ def safeFlags = {
     ]
 }
 
-// Stable reason codes only: never echo parameter values or repository ids.
+// Fixed allowlisted reason codes or the exception class simple name; the exception
+// message is never returned (it could carry repository values).
+final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable"] as Set
 def reasonCode = { Exception e ->
     String message = e.getMessage()
-    if (message != null && message ==~ /^[A-Za-z][A-Za-z0-9_]{0,63}$/) {
+    if (e instanceof IllegalStateException && message != null && REASON_CODES.contains(message)) {
         return message
     }
     return e.getClass().getSimpleName()
@@ -127,9 +131,63 @@ try {
         IOdiLKMFinder lkmFinder = (IOdiLKMFinder) em.getFinder(OdiLKM.class)
         OdiLKM lkm = (lkmFinder.findByName(LKM_NAME) ?: []).find { it.getName()?.equalsIgnoreCase(LKM_NAME) }
 
-        boolean mappingExists = folder != null && em.getFinder(Mapping.class).findByName(folder, mappingName) != null
+        Mapping mapping = folder == null ? null : em.getFinder(Mapping.class).findByName(folder, mappingName)
+        boolean mappingExists = mapping != null
         IOdiScenarioFinder scenarioFinder = (IOdiScenarioFinder) em.getFinder(OdiScenario.class)
-        boolean scenarioExists = scenarioFinder.findLatestByName(scenarioName) != null
+        List<String> scenarioVersions = []
+        if (mapping != null) {
+            scenarioVersions = (scenarioFinder.findBySourceMapping(mapping.getInternalId()) ?: [])
+                .findAll { it.getName()?.equalsIgnoreCase(scenarioName) }
+                .collect { it.getVersion() }.findAll { it != null }.sort()
+        }
+        boolean scenarioExists = !scenarioVersions.isEmpty() ||
+            scenarioFinder.findLatestByName(scenarioName) != null
+
+        // Contract-relevant metadata of existing objects (identifiers and counts only).
+        List<Map> targetColumns = []
+        List<String> targetPk = []
+        List<String> targetAk = []
+        if (tgtStore != null) {
+            targetColumns = tgtStore.getColumns().toList().sort { it.getPosition() }.collect {
+                [name: it.getName(), role: it.getScdType()?.name() ?: "NONE", mandatory: it.isMandatory()]
+            }
+            tgtStore.getKeys()?.each { key ->
+                if (key.isPK()) targetPk = key.getColumns()*.getName()
+                if (key.isAK()) targetAk = key.getColumns()*.getName()
+            }
+        }
+        Map mappingInfo = null
+        if (mapping != null) {
+            List<DatastoreComponent> components = mapping.getAllComponents().findAll {
+                it instanceof DatastoreComponent
+            } as List<DatastoreComponent>
+            def isTarget = { DatastoreComponent c -> c.getBoundDataStore()?.getName()?.equalsIgnoreCase(targetTable) }
+            List<DatastoreComponent> targets = components.findAll { isTarget(it) }
+            List<DatastoreComponent> sources = components.findAll { !isTarget(it) }
+            String integrationType = targets.size() == 1 ? targets[0].getIntegrationType() : null
+            String ikmName = null
+            List<String> lkmNames = []
+            try {
+                MapPhysicalDesign design = mapping.getPhysicalDesign(0)
+                def tNode = design.getPhysicalNodes().find { it.isTargetNode() }
+                ikmName = tNode?.getTargetComponentKMName()
+                lkmNames = design.getPhysicalNodes().findAll { it.isAPNode() }
+                    .collect { it.getXKMName() }.findAll { it }.unique().sort()
+            } catch (Exception ignoredPhysical) {
+                ikmName = null
+            }
+            mappingInfo = [
+                target_count: targets.size(),
+                target_table: targets.size() == 1 ? targets[0].getBoundDataStore()?.getName() : null,
+                source_tables: sources.collect { it.getBoundDataStore()?.getName() }.findAll { it }.sort(),
+                integration_type: integrationType,
+                target_ikm: ikmName,
+                lkm_names: lkmNames,
+                target_attribute_count: targets.size() == 1 ? targets[0].getAttributes().size() : 0,
+                mapped_attribute_count: targets.size() == 1 ?
+                    targets[0].getAttributes().count { it.getExpression() != null } : 0,
+            ]
+        }
 
         String targetTechnology = tgtModel?.getTechnology()?.getName()?.toUpperCase()
         txnMgr.rollback(txnStatus)
@@ -155,6 +213,11 @@ try {
                 lkm_present: lkm != null,
                 mapping_exists: mappingExists,
                 scenario_exists: scenarioExists,
+                scenario_versions: scenarioVersions,
+                target_columns: targetColumns,
+                target_primary_key: targetPk,
+                target_alternate_key: targetAk,
+                mapping: mappingInfo,
             ],
         ])
     } catch (Exception inner) {
