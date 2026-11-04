@@ -139,6 +139,11 @@ try {
             if (definition.scale != null) {
                 column.setScale(definition.scale as Integer)
             }
+            if (definition.dataType == "NUMBER" && definition.length == null && definition.scale == null) {
+                // Oracle's unconstrained NUMBER sentinel overrides OdiColumn's default length 50.
+                column.setLength(0)
+                column.setScale(-127)
+            }
             column.setMandatory(definition.mandatory as boolean)
             column.setPosition(position++)
             if (definition.scd != null) {
