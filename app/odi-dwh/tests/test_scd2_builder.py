@@ -176,17 +176,27 @@ def test_create_table_ddl_text_is_26_style_and_has_no_drop():
     assert ddl.startswith('CREATE TABLE "DM"."DIM_CUSTOMER" (')
     assert '"CUSTOMER_SK" NUMBER NOT NULL' in ddl
     assert '"CUST_ID" NUMBER(10) NOT NULL' in ddl
-    assert '"CUST_NAME" VARCHAR2(50) NOT NULL' in ddl  # tracked nullability follows the source
-    assert '"CUST_CITY" VARCHAR2(30),' in ddl
+    assert '"CUST_NAME" VARCHAR2(50 BYTE) NOT NULL' in ddl  # tracked nullability follows the source
+    assert '"CUST_CITY" VARCHAR2(30 BYTE),' in ddl
     assert '"EFFECTIVE_FROM" DATE NOT NULL' in ddl
     assert '"EFFECTIVE_TO" DATE NOT NULL' in ddl
-    assert '"CURRENT_FLAG" VARCHAR2(1) NOT NULL' in ddl
+    assert '"CURRENT_FLAG" VARCHAR2(1 BYTE) NOT NULL' in ddl
     assert '"INSERT_DATE" TIMESTAMP NOT NULL' in ddl
     assert '"UPDATE_DATE" TIMESTAMP' in ddl and '"UPDATE_DATE" TIMESTAMP NOT NULL' not in ddl
-    assert '"SOURCE_SYSTEM" VARCHAR2(50) NOT NULL' in ddl
+    assert '"SOURCE_SYSTEM" VARCHAR2(50 BYTE) NOT NULL' in ddl
     assert '"ETL_BATCH_ID" NUMBER NOT NULL' in ddl
     assert 'CONSTRAINT "PK_DIM_CUSTOMER" PRIMARY KEY ("CUSTOMER_SK")' in ddl
     assert "DROP" not in ddl.upper()
+
+
+def test_explicit_byte_semantics_survive_planning_and_char_default_ddl():
+    columns = small_columns()
+    columns[1]["data_type"] = "VARCHAR2(50 BYTE)"
+    plan = build_scd2_plan(request(), columns)
+    by_name = {column["name"]: column for column in plan["target_columns"]}
+    assert by_name["CUST_NAME"]["data_type"] == "VARCHAR2(50 BYTE)"
+    assert '"CUST_NAME" VARCHAR2(50 BYTE) NOT NULL' in scd2_builder.render_create_table(plan)
+    assert "CUST_NAME:VARCHAR2_50_BYTE" in scd2_builder.groovy_params(plan)["odi.scd2.column_types"]
 
 
 def test_sequence_and_grants_text_are_odi_exec_only_by_default():

@@ -160,6 +160,8 @@ def _probe_block(plan: Mapping[str, Any], checks: Mapping[str, bool]) -> tuple[s
         return "blocked_project_folder_missing", {}
     if not checks["lkm_present"]:
         return "blocked_lkm_missing", {"required_km": plan["knowledge_modules"]["lkm"]}
+    if checks["scenario_name_collision"]:
+        return "blocked_scenario_name_collision", {}
     if checks["mapping_exists"] and not checks["target_datastore_exists"]:
         return "blocked_mapping_exists_unrelated", {}
     return None
@@ -273,8 +275,10 @@ def validate_run_request(body: Mapping[str, Any]) -> dict[str, Any]:
         "probe": probe,
         "source_owner": str(body["source_owner"]).strip().upper(),
         "source_table": probe["odi.scd2.source_table"],
+        "source_model": probe["odi.scd2.source_model"],
         "target_owner": str(body["target_owner"]).strip().upper(),
         "target_table": probe["odi.scd2.target_table"],
+        "target_model": probe["odi.scd2.target_model"],
         "mapping_name": probe["odi.scd2.mapping"],
         "natural_key": natural_key,
         "scenario_name": f"{probe['odi.scd2.mapping']}_SCN",
@@ -331,11 +335,14 @@ def run(
     if probe_step["status"] != "passed":
         return {"status": "failed_odi_probe", "steps": steps}, 502
     checks = probe_step["checks"]
+    if checks["scenario_name_collision"]:
+        return {"status": "blocked_scenario_name_collision", "steps": steps}, 409
     if not (checks["mapping_exists"] and checks["scenario_exists"]):
         return {"status": "blocked_scenario_missing", "steps": steps}, 409
     mismatches = scd2_odi.mapping_mismatches(
         probe_step["mapping"],
-        {"source_table": spec["source_table"], "target_table": spec["target_table"]},
+        {"source_model": spec["source_model"], "source_table": spec["source_table"],
+         "target_model": spec["target_model"], "target_table": spec["target_table"]},
     )
     if mismatches:
         return {"status": "blocked_existing_object_mismatch", "mismatches": mismatches, "steps": steps}, 409

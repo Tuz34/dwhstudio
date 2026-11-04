@@ -241,8 +241,9 @@ def test_multibyte_national_types_use_char_length_not_data_length():
     assert executor._full_type("NVARCHAR2", 100, None, None, 50, "C") == "NVARCHAR2(50)"
     assert executor._full_type("NCHAR", 20, None, None, 10, "C") == "NCHAR(10)"
     assert executor._full_type("VARCHAR2", 200, None, None, 50, "C") == "VARCHAR2(50 CHAR)"
-    assert executor._full_type("VARCHAR2", 50, None, None, 50, "B") == "VARCHAR2(50)"
-    assert executor._full_type("CHAR", 4, None, None, 4, "B") == "CHAR(4)"
+    assert executor._full_type("VARCHAR2", 50, None, None, 50, "B") == "VARCHAR2(50 BYTE)"
+    assert executor._full_type("VARCHAR2", 100, None, None, 50, "B") == "VARCHAR2(100 BYTE)"
+    assert executor._full_type("CHAR", 4, None, None, 4, "B") == "CHAR(4 BYTE)"
 
 
 def test_catalog_read_maps_multibyte_rows():

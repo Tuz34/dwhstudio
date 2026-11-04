@@ -44,9 +44,11 @@ def _full_type(
     if base.startswith("TIMESTAMP"):
         return "TIMESTAMP"
     if base in {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"}:
-        size = int(char_length) if char_length else int(length)
-        if base in {"VARCHAR2", "CHAR"} and str(char_used or "").upper() == "C":
-            return f"{base}({size} CHAR)"
+        semantics = str(char_used or "").upper()
+        size = int(char_length) if char_length and semantics != "B" else int(length)
+        if base in {"VARCHAR2", "CHAR"} and semantics in {"B", "C"}:
+            qualifier = "BYTE" if semantics == "B" else "CHAR"
+            return f"{base}({size} {qualifier})"
         return f"{base}({size})"
     if base == "NUMBER" and precision is not None:
         if scale not in (None, 0):
@@ -136,7 +138,7 @@ def _sequence_exists(cursor: Any, owner: str, sequence: str) -> bool:
 
 def _matches_contract(actual: list[dict[str, Any]], plan: Mapping[str, Any]) -> bool:
     expected = [
-        {"name": n, "data_type": t, "nullable": nullable}
+        {"name": n, "data_type": scd2_builder.oracle_ddl_type(t), "nullable": nullable}
         for n, t, nullable in scd2_builder.expected_target_metadata(plan)
     ]
     return actual == expected

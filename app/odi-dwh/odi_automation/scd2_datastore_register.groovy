@@ -25,7 +25,7 @@ import oracle.odi.domain.model.finder.IOdiModelFinder
 final String TOOL = "odi.scd2_datastore_register"
 final String MODE = "generic_absent_only_scd2_datastore_registration"
 final java.util.regex.Pattern ID = ~/^[A-Z0-9_#]{1,30}$/
-final java.util.regex.Pattern TYPE = ~/^([A-Z][A-Z0-9]*?)(?:_(\d+)(?:_(\d+))?)?(?:_(CHAR))?$/
+final java.util.regex.Pattern TYPE = ~/^([A-Z][A-Z0-9]*?)(?:_(\d+)(?:_(\d+))?)?(?:_(CHAR|BYTE))?$/
 final Map<String, String> FIXED_ROLES = [
     EFFECTIVE_FROM: "START_TIMESTAMP",
     EFFECTIVE_TO: "END_TIMESTAMP",
@@ -166,7 +166,7 @@ try {
             column.setDataTypeCode(base)
             String dataFormat = base
             if (matcher.group(4) != null) {
-                dataFormat += "(${length} CHAR)"
+                dataFormat += "(${length} ${matcher.group(4)})"
             } else if (length != null && scale != null) {
                 dataFormat += "(${length},${scale})"
             } else if (length != null) {

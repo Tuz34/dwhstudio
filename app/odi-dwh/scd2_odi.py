@@ -35,6 +35,7 @@ _TOOLS = {
 }
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
 _HATA_ERROR_TYPE_RE = re.compile(r"error_type=([A-Za-z][A-Za-z0-9_$]{0,127})")
+_TYPE_PARTS_RE = re.compile(r"^([A-Z][A-Z0-9]*)(?:\(([0-9]+)(?:,([0-9]+)| (CHAR|BYTE))?\))?$")
 
 _PROBE_BOOLEANS = (
     "source_model_exists",
@@ -48,6 +49,7 @@ _PROBE_BOOLEANS = (
     "lkm_present",
     "mapping_exists",
     "scenario_exists",
+    "scenario_name_collision",
 )
 _REGISTER_COUNT_KEYS = (
     "target_column_count",
@@ -179,6 +181,8 @@ _MAPPING_KEYS = frozenset(
         "target_count",
         "target_table",
         "source_tables",
+        "target_component",
+        "source_components",
         "integration_type",
         "target_ikm",
         "lkm_names",
@@ -192,6 +196,14 @@ def _name_list(value: object) -> list[str] | None:
     if not isinstance(value, list) or not all(isinstance(v, str) and len(v) <= 128 for v in value):
         return None
     return list(value)
+
+
+def _component(value: object) -> dict[str, str] | None:
+    if not isinstance(value, dict) or set(value) != {"model", "table"}:
+        return None
+    if not all(isinstance(value[key], str) and scd2_builder.IDENTIFIER_RE.fullmatch(value[key]) for key in ("model", "table")):
+        return None
+    return {"model": value["model"], "table": value["table"]}
 
 
 def _probe_details(result: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -208,10 +220,18 @@ def _probe_details(result: Mapping[str, Any]) -> dict[str, Any] | None:
     for column in columns:
         if (
             not isinstance(column, dict)
-            or set(column) != {"name", "role", "mandatory"}
+            or set(column) != {"name", "role", "mandatory", "data_format", "type_code", "length", "scale", "length_semantics"}
             or not isinstance(column["name"], str)
             or column["role"] not in _ROLES
             or type(column["mandatory"]) is not bool
+            or not isinstance(column["data_format"], str)
+            or _TYPE_PARTS_RE.fullmatch(column["data_format"]) is None
+            or column["type_code"] != column["data_format"].split("(", 1)[0]
+            or type(column["length"]) not in (int, type(None))
+            or type(column["scale"]) not in (int, type(None))
+            or (column["length"] is not None and column["length"] < 0)
+            or (column["scale"] is not None and column["scale"] < 0)
+            or column["length_semantics"] not in (None, "CHAR", "BYTE")
         ):
             return None
         clean_columns.append(dict(column))
@@ -221,14 +241,19 @@ def _probe_details(result: Mapping[str, Any]) -> dict[str, Any] | None:
             return None
         lkms = _name_list(mapping["lkm_names"])
         sources = _name_list(mapping["source_tables"])
+        target_component = _component(mapping["target_component"]) if mapping["target_component"] is not None else None
+        source_components_raw = mapping["source_components"]
+        if not isinstance(source_components_raw, list):
+            return None
+        source_components = [_component(item) for item in source_components_raw]
         counts_ok = all(
             type(mapping[key]) is int and mapping[key] >= 0
             for key in ("target_count", "target_attribute_count", "mapped_attribute_count")
         )
         text_ok = all(mapping[key] is None or isinstance(mapping[key], str) for key in ("target_table", "integration_type", "target_ikm"))
-        if lkms is None or sources is None or not counts_ok or not text_ok:
+        if lkms is None or sources is None or any(item is None for item in source_components) or not counts_ok or not text_ok:
             return None
-        mapping = {**mapping, "lkm_names": lkms, "source_tables": sources}
+        mapping = {**mapping, "lkm_names": lkms, "source_tables": sources, "target_component": target_component, "source_components": source_components}
     return {
         "scenario_versions": versions,
         "target_datastore": {"columns": clean_columns, "primary_key": pk, "alternate_key": ak},
@@ -245,9 +270,16 @@ def mapping_mismatches(
     if mapping is None:
         return ["mapping_unreadable"]
     found: list[str] = []
-    if mapping["target_count"] != 1 or mapping["target_table"] != plan_like["target_table"]:
+    if (
+        mapping["target_count"] != 1
+        or mapping["target_table"] != plan_like["target_table"]
+        or mapping["target_component"] != {"model": plan_like["target_model"], "table": plan_like["target_table"]}
+    ):
         found.append("mapping_target")
-    if mapping["source_tables"] != [plan_like["source_table"]]:
+    if (
+        mapping["source_tables"] != [plan_like["source_table"]]
+        or mapping["source_components"] != [{"model": plan_like["source_model"], "table": plan_like["source_table"]}]
+    ):
         found.append("mapping_source")
     if mapping["integration_type"] not in {"SCD", "SLOWLY_CHANGING_DIMENSION"}:
         found.append("mapping_integration_type")
@@ -260,6 +292,19 @@ def mapping_mismatches(
     return found
 
 
+def _column_matches(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+    if any(actual[key] != expected[key] for key in expected):
+        return False
+    parts = _TYPE_PARTS_RE.fullmatch(expected["data_format"])
+    if parts is None or actual["type_code"] != parts.group(1):
+        return False
+    if parts.group(2) is not None and actual["length"] != int(parts.group(2)):
+        return False
+    if parts.group(3) is not None and actual["scale"] != int(parts.group(3)):
+        return False
+    return actual["length_semantics"] == parts.group(4)
+
+
 def existing_mismatches(plan: Mapping[str, Any], step: Mapping[str, Any]) -> list[str]:
     """Mismatch codes between existing ODI objects and the requested plan."""
     checks = step["checks"]
@@ -269,11 +314,15 @@ def existing_mismatches(plan: Mapping[str, Any], step: Mapping[str, Any]) -> lis
             c["name"]: ("NONE" if c["scd_role"] == "NONE" else c["scd_role"]) for c in plan["target_columns"]
         }
         expected = [
-            {"name": c["name"], "role": role_by_name[c["name"]], "mandatory": not c["nullable"]}
+            {"name": c["name"], "role": role_by_name[c["name"]], "mandatory": not c["nullable"],
+             "data_format": scd2_builder.oracle_ddl_type(c["data_type"])}
             for c in plan["target_columns"]
         ]
         store = step["target_datastore"]
-        if store["columns"] != expected:
+        if len(store["columns"]) != len(expected) or any(
+            not _column_matches(actual, wanted)
+            for actual, wanted in zip(store["columns"], expected)
+        ):
             found.append("datastore_columns")
         if store["primary_key"] != plan["primary_key"]["columns"] or store["alternate_key"] != plan["natural_key"]:
             found.append("datastore_keys")
@@ -281,7 +330,8 @@ def existing_mismatches(plan: Mapping[str, Any], step: Mapping[str, Any]) -> lis
         found.extend(
             mapping_mismatches(
                 step["mapping"],
-                {"source_table": plan["source"]["table"], "target_table": plan["target"]["table"]},
+                {"source_model": plan["models"]["source"], "source_table": plan["source"]["table"],
+                 "target_model": plan["models"]["target"], "target_table": plan["target"]["table"]},
                 len(plan["target_columns"]),
             )
         )

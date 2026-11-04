@@ -16,7 +16,7 @@ IDENTIFIER_RE = re.compile(r"^[A-Z0-9_$#]{1,30}$")
 # ODI scenario names are limited to 35 characters; "<mapping>_SCN" must fit.
 MAPPING_NAME_MAX = 31
 MAPPING_NAME_RE = re.compile(r"^[A-Z0-9_$#]{1,%d}$" % MAPPING_NAME_MAX)
-_TYPE_SQL_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:\([0-9]+(?:,[0-9]+| CHAR)?\))?$")
+_TYPE_SQL_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:\([0-9]+(?:,[0-9]+| (?:CHAR|BYTE))?\))?$")
 
 TARGET_OWNERS = ("DWH", "DM")
 # ODI model code per schema owner. Targets must be DWH or DM; sources may also
@@ -106,8 +106,7 @@ def normalize_source_columns(
             raise Scd2PlanError("invalid_source_columns")
         name = str(item.get("name") or "").strip().upper()
         data_type = re.sub(r"\s+", "", str(item.get("data_type") or "").upper())
-        data_type = re.sub(r"(\d)BYTE\)", r"\1)", data_type)  # BYTE is the default semantics
-        data_type = re.sub(r"(\d)CHAR\)", r"\1 CHAR)", data_type)
+        data_type = re.sub(r"(\d)(BYTE|CHAR)\)", r"\1 \2)", data_type)
         if data_type.startswith("TIMESTAMP(") and ")" in data_type:
             data_type = "TIMESTAMP"
         if not IDENTIFIER_RE.fullmatch(name) or name in seen or not data_type:
@@ -127,6 +126,11 @@ def _supported_type(data_type: str) -> bool:
     if not _TYPE_SQL_RE.fullmatch(data_type):
         return False
     return data_type.split("(", 1)[0] in _PASSTHROUGH_BASES
+
+
+def oracle_ddl_type(data_type: str) -> str:
+    """Make an unqualified Oracle character size independent of session defaults."""
+    return re.sub(r"^(VARCHAR2|CHAR)\(([0-9]+)\)$", r"\1(\2 BYTE)", data_type)
 
 
 def surrogate_key_name(target_table: str, taken: Iterable[str]) -> str:
@@ -339,7 +343,7 @@ def render_create_table(plan: Mapping[str, Any]) -> str:
         if not _TYPE_SQL_RE.fullmatch(data_type):
             raise Scd2PlanError("unsupported_column_type", str(column["name"]))
         null_sql = "" if column["nullable"] else " NOT NULL"
-        definitions.append(f'  "{column["name"]}" {data_type}{null_sql}')
+        definitions.append(f'  "{column["name"]}" {oracle_ddl_type(data_type)}{null_sql}')
     pk = plan["primary_key"]
     definitions.append(
         f'  CONSTRAINT "{pk["name"]}" PRIMARY KEY ("{pk["columns"][0]}")'
@@ -428,7 +432,7 @@ def groovy_params(plan: Mapping[str, Any]) -> dict[str, str]:
         "odi.scd2.tracked": ",".join(plan["tracked_attributes"]),
         "odi.scd2.overwrite": ",".join(plan["overwrite_attributes"]) or "none",
         "odi.scd2.column_types": ",".join(
-            f"{c['name']}:{_param_type(str(c['data_type']))}" for c in columns
+            f"{c['name']}:{_param_type(oracle_ddl_type(str(c['data_type'])))}" for c in columns
         ),
         "odi.scd2.column_nullable": ",".join(
             f"{c['name']}:{'Y' if c['nullable'] else 'N'}" for c in columns

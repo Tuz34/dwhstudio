@@ -140,8 +140,12 @@ try {
                 .findAll { it.getName()?.equalsIgnoreCase(scenarioName) }
                 .collect { it.getVersion() }.findAll { it != null }.sort()
         }
-        boolean scenarioExists = !scenarioVersions.isEmpty() ||
-            scenarioFinder.findLatestByName(scenarioName) != null
+        OdiScenario latestScenario = scenarioFinder.findLatestByName(scenarioName)
+        boolean scenarioExists = !scenarioVersions.isEmpty() || latestScenario != null
+        boolean scenarioNameCollision = latestScenario != null && (
+            mapping == null || latestScenario.getSourceMappingId() == null ||
+            latestScenario.getSourceMappingId().toString() != mapping.getInternalId().toString()
+        )
 
         // Contract-relevant metadata of existing objects (identifiers and counts only).
         List<Map> targetColumns = []
@@ -149,7 +153,19 @@ try {
         List<String> targetAk = []
         if (tgtStore != null) {
             targetColumns = tgtStore.getColumns().toList().sort { it.getPosition() }.collect {
-                [name: it.getName(), role: it.getScdType()?.name() ?: "NONE", mandatory: it.isMandatory()]
+                String format = null
+                try { format = it.getDataFormat() } catch (MissingMethodException ignoredFormat) {}
+                if (format == null) format = it.getDdlDataType()
+                format = format?.trim()?.toUpperCase()?.replaceAll(/\s+/, " ")
+                String semantics = format?.endsWith(" BYTE)") ? "BYTE" :
+                    (format?.endsWith(" CHAR)") ? "CHAR" : null)
+                [
+                    name: it.getName(), role: it.getScdType()?.name() ?: "NONE",
+                    mandatory: it.isMandatory(), data_format: format,
+                    type_code: it.getDataType()?.getCode(), length: it.getLength(),
+                    scale: it.getScale(),
+                    length_semantics: semantics,
+                ]
             }
             tgtStore.getKeys()?.each { key ->
                 if (key.isPK()) targetPk = key.getColumns()*.getName()
@@ -161,7 +177,14 @@ try {
             List<DatastoreComponent> components = mapping.getAllComponents().findAll {
                 it instanceof DatastoreComponent
             } as List<DatastoreComponent>
-            def isTarget = { DatastoreComponent c -> c.getBoundDataStore()?.getName()?.equalsIgnoreCase(targetTable) }
+            def identity = { OdiDataStore store ->
+                [model: store?.getModel()?.getCode(), table: store?.getName()]
+            }
+            def isTarget = { DatastoreComponent c ->
+                OdiDataStore store = c.getBoundDataStore()
+                store?.getModel()?.getCode()?.equalsIgnoreCase(targetModel) &&
+                    store?.getName()?.equalsIgnoreCase(targetTable)
+            }
             List<DatastoreComponent> targets = components.findAll { isTarget(it) }
             List<DatastoreComponent> sources = components.findAll { !isTarget(it) }
             String integrationType = targets.size() == 1 ? targets[0].getIntegrationType() : null
@@ -180,6 +203,9 @@ try {
                 target_count: targets.size(),
                 target_table: targets.size() == 1 ? targets[0].getBoundDataStore()?.getName() : null,
                 source_tables: sources.collect { it.getBoundDataStore()?.getName() }.findAll { it }.sort(),
+                target_component: targets.size() == 1 ? identity(targets[0].getBoundDataStore()) : null,
+                source_components: sources.collect { identity(it.getBoundDataStore()) }
+                    .sort { "${it.model}.${it.table}" },
                 integration_type: integrationType,
                 target_ikm: ikmName,
                 lkm_names: lkmNames,
@@ -213,6 +239,7 @@ try {
                 lkm_present: lkm != null,
                 mapping_exists: mappingExists,
                 scenario_exists: scenarioExists,
+                scenario_name_collision: scenarioNameCollision,
                 scenario_versions: scenarioVersions,
                 target_columns: targetColumns,
                 target_primary_key: targetPk,

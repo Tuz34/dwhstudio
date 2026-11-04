@@ -29,11 +29,11 @@ REQUEST = {
 
 
 def catalog_row(name: str, data_type: str, nullable: bool):
-    match = re.fullmatch(r"([A-Z0-9]+)(?:\((\d+)(?:,(\d+)| CHAR)?\))?", data_type)
-    base, first, second = match.groups()
+    match = re.fullmatch(r"([A-Z0-9]+)(?:\((\d+)(?:,(\d+)| (CHAR|BYTE))?\))?", data_type)
+    base, first, second, semantics = match.groups()
     flag = "Y" if nullable else "N"
     if base in {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"}:
-        used = "C" if "CHAR" in data_type.split("(")[-1] or base in {"NVARCHAR2", "NCHAR"} else "B"
+        used = "C" if semantics == "CHAR" or base in {"NVARCHAR2", "NCHAR"} else "B"
         return (name, base, int(first), None, None, flag, int(first), used)
     if base == "NUMBER":
         scale = int(second) if second else (0 if first else None)
@@ -116,6 +116,18 @@ def _default_plan():
     return scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)
 
 
+def _probe_column(column):
+    data_format = scd2_builder.oracle_ddl_type(column["data_type"])
+    parts = re.fullmatch(r"([A-Z][A-Z0-9]*)(?:\((\d+)(?:,(\d+)| (CHAR|BYTE))?\))?", data_format)
+    base, length, scale, semantics = parts.groups()
+    return {
+        "name": column["name"], "role": column["scd_role"],
+        "mandatory": not column["nullable"], "data_format": data_format,
+        "type_code": base, "length": int(length) if length else None,
+        "scale": int(scale) if scale else None, "length_semantics": semantics,
+    }
+
+
 def probe_payload(plan=None, **overrides):
     plan = plan or _default_plan()
     result = {
@@ -131,6 +143,7 @@ def probe_payload(plan=None, **overrides):
         "lkm_present": True,
         "mapping_exists": False,
         "scenario_exists": False,
+        "scenario_name_collision": False,
         "scenario_versions": [],
         "target_columns": [],
         "target_primary_key": [],
@@ -138,10 +151,7 @@ def probe_payload(plan=None, **overrides):
         "mapping": None,
     }
     if overrides.get("target_datastore_exists"):
-        result["target_columns"] = [
-            {"name": c["name"], "role": c["scd_role"], "mandatory": not c["nullable"]}
-            for c in plan["target_columns"]
-        ]
+        result["target_columns"] = [_probe_column(c) for c in plan["target_columns"]]
         result["target_primary_key"] = plan["primary_key"]["columns"]
         result["target_alternate_key"] = plan["natural_key"]
     if overrides.get("mapping_exists"):
@@ -150,6 +160,8 @@ def probe_payload(plan=None, **overrides):
             "target_count": 1,
             "target_table": plan["target"]["table"],
             "source_tables": [plan["source"]["table"]],
+            "target_component": {"model": plan["models"]["target"], "table": plan["target"]["table"]},
+            "source_components": [{"model": plan["models"]["source"], "table": plan["source"]["table"]}],
             "integration_type": "SCD",
             "target_ikm": "IKM Oracle Slowly Changing Dimension",
             "lkm_names": ["LKM SQL to Oracle (Built-In)"],

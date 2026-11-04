@@ -410,16 +410,48 @@ def test_matching_existing_objects_are_accepted(plan):
     assert status == 200 and payload["status"] == "generated"
 
 
+def test_same_table_name_in_distinct_models_is_accepted():
+    request = {**REQUEST, "target_table": REQUEST["source_table"]}
+    plan = scd2_builder.build_scd2_plan(request, SOURCE_COLUMNS)
+    orchestrator = FakeOrchestrator(
+        plan,
+        responses={"scd2_probe.groovy": probe_payload(plan, target_datastore_exists=True, mapping_exists=True, scenario_exists=True)},
+        scenario_result={"status": "already_ready"},
+    )
+    payload, status = scd2_service.generate(
+        request,
+        make_services(orchestrator, ddl_handler=ddl_handler(plan, table_exists=1, sequence_exists=1)),
+        approved=True,
+    )
+    assert status == 200 and payload["status"] == "generated"
+
+
+def test_unrelated_scenario_name_collision_stops_before_ddl(plan):
+    probe = probe_payload(plan, scenario_exists=True, scenario_versions=[], scenario_name_collision=True)
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": probe})
+    ddl_log = []
+    payload, status = scd2_service.generate(
+        REQUEST, make_services(orchestrator, ddl_log=ddl_log), approved=True
+    )
+    assert status == 409 and payload["status"] == "blocked_scenario_name_collision"
+    assert orchestrator.order == ["scd2_probe.groovy"] and ddl_log == []
+
+
 @pytest.mark.parametrize(
     "mutate, code",
     [
         (lambda r: r["target_columns"][2].update(role="OVERWRITE_ON_CHANGE"), "datastore_columns"),
         (lambda r: r["target_columns"].pop(), "datastore_columns"),
         (lambda r: r["target_columns"][1].update(mandatory=False), "datastore_columns"),
+        (lambda r: r["target_columns"][2].update(data_format="NUMBER(8,2)", type_code="NUMBER", length=8, scale=2, length_semantics=None), "datastore_columns"),
+        (lambda r: r["target_columns"][2].update(data_format="VARCHAR2(99 BYTE)", length=99), "datastore_columns"),
+        (lambda r: r["target_columns"][2].update(data_format="VARCHAR2(50 CHAR)", length_semantics="CHAR"), "datastore_columns"),
         (lambda r: r.update(target_primary_key=["CUST_ID"]), "datastore_keys"),
         (lambda r: r.update(target_alternate_key=[]), "datastore_keys"),
         (lambda r: r["mapping"].update(source_tables=["OTHER_TABLE"]), "mapping_source"),
         (lambda r: r["mapping"].update(target_table="OTHER_DIM"), "mapping_target"),
+        (lambda r: r["mapping"]["source_components"][0].update(model="TGT_DM"), "mapping_source"),
+        (lambda r: r["mapping"]["target_component"].update(model="TGT_DWH"), "mapping_target"),
         (lambda r: r["mapping"].update(integration_type="IU"), "mapping_integration_type"),
         (lambda r: r["mapping"].update(target_ikm="IKM Oracle Insert"), "mapping_knowledge_modules"),
         (lambda r: r["mapping"].update(lkm_names=["LKM Other"]), "mapping_knowledge_modules"),

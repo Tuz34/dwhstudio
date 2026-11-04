@@ -216,7 +216,10 @@ def test_error_type_is_an_allowlisted_code_or_exception_class_name_never_the_mes
 
 def test_probe_returns_contract_metadata_for_existing_objects():
     text = read("scd2_probe.groovy")
-    for needle in ("scenario_versions", "target_columns", "target_primary_key", "target_alternate_key",
-                   "integration_type", "target_ikm", "lkm_names", "source_tables", "findBySourceMapping"):
+    for needle in ("scenario_versions", "scenario_name_collision", "target_columns", "target_primary_key",
+                   "target_alternate_key", "integration_type", "target_ikm", "lkm_names",
+                   "source_tables", "source_components", "target_component", "getDataFormat()",
+                   "getSourceMappingId()", "findBySourceMapping"):
         assert needle in text, needle
+    assert "getModel()?.getCode()?.equalsIgnoreCase(targetModel)" in text
     assert "txnMgr.commit" not in text
