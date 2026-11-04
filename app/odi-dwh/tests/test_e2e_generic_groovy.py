@@ -416,3 +416,80 @@ def test_repository_preflight_has_no_write_or_data_operations():
                       "getConnectionSettings", "getJdbcUrl", "getUserName", "getMessage()", "printStackTrace"):
         assert forbidden not in text
     assert '"mapping_preflight.groovy"' in (GROOVY_ROOT.parent / "odi_orchestrator.py").read_text(encoding="utf-8")
+
+
+# --- same-schema / final-pass physical design and validate() messages ------------------
+
+
+def test_create_mapping_assigns_load_km_to_access_points_after_final_staging():
+    text = _text("create_mapping.groovy")
+    staging = text.index("design.setStagingLocationName(locName)")
+    final_pass = text[staging:text.index("def vr") if "def vr" in text else text.index("boolean mappingValid")]
+
+    # The AP nodes are re-read from the final design, after the last staging change.
+    assert "FINAL PASS" in final_pass
+    assert "design.getAllAPNodes()" in final_pass
+    assert "finalAps.each { MapPhysicalNode finalAp ->" in final_pass
+    assert "assignLoadKm(finalAp)" in final_pass
+    # LKM assignment is shared by the early and the final pass and is only skipped when no AP exists.
+    assert text.count("def assignLoadKm =") == 1
+    assert "LKM NOT REQUIRED" in text and "FINAL PASS: no access point" in final_pass
+    # Cross-schema sources still use the configured load KM (fallback chain keeps SQL to Oracle).
+    assert '"sql to oracle,mssql to oracle,sql to sql"' in text
+
+
+def test_create_mapping_same_schema_moves_source_into_target_execution_unit():
+    text = _text("create_mapping.groovy")
+
+    assert "def sameLogicalSchema =" in text
+    assert "physicalDiag.same_schema = sameLogicalSchema(srcDS, tgtDS)" in text
+    assert "design.moveNodes([srcNode], tgtNode.getExecutionUnit(), moveIssues)" in text
+    # Any AP that survives the move still gets the load KM; nothing is silently skipped.
+    assert text.index("design.moveNodes(") < text.index("assignLoadKm(finalAp)")
+
+
+def test_create_mapping_surfaces_validate_messages_in_structured_error():
+    text = _text("create_mapping.groovy")
+    catch = text[text.index("} catch (Exception e) {"):]
+
+    assert "mapping.validate(validationIssues, false)" in text
+    assert "collectDesignFailure(design, validationIssues, physicalDiag)" in text
+    assert '"validation_messages":' in catch and '"physical_design":' in catch
+    assert "JsonOutput.toJson(validationMessages)" in catch
+    # The contract keys are untouched (additive only).
+    for key in ('"status":"error"', '"action":"create_mapping"', '"replaced":false',
+                '"kept_existing_on_failure":', '"error_type":"'):
+        assert key in catch
+    assert '"kept_existing_on_failure":false,"physical_design":' in text
+
+
+def test_validation_and_schema_helpers_behaviorally():
+    text = _text("create_mapping.groovy")
+    helpers = text[text.index("def sameLogicalSchema ="):text.index("def odi = null")]
+    _run_isolated_helpers(helpers + r'''
+def ls = { id, name -> new Expando(getInternalId: { id }, getName: { name }) }
+def ds = { logical -> new Expando(getModel: { new Expando(getLogicalSchema: { logical }) }) }
+def dwh = ls(7, "LGCL_DWH")
+assert sameLogicalSchema(ds(dwh), ds(dwh))
+assert sameLogicalSchema(ds(ls(7, "LGCL_DWH")), ds(ls(7, "LGCL_DWH")))
+assert !sameLogicalSchema(ds(ls(8, "LGCL_HR")), ds(dwh))
+assert !sameLogicalSchema(ds(null), ds(dwh))
+
+def issue = { level, msg -> new Expando(getLevel: { level }, getMessage: { msg }) }
+def messages = summarizeIssues([issue("INFO", "ignored"), issue("ERROR", "bad\nnode password=hunter2 x"),
+    issue("WARNING", "w" * 500)] + (1..30).collect { issue("ERROR", "e" + it) })
+assert messages.size() == 20
+assert messages[0] == "ERROR: bad node password=*** x"
+assert messages[1].length() <= 9 + 300
+assert !messages.any { it.contains("hunter2") || it.contains("ignored") }
+
+def design = new Expando(validate: { issues, verbose -> issues.add(issue("ERROR", "AP has no LKM")); false },
+    getPhysicalNodes: { [new Expando(getName: { "SRC_AP" }), new Expando(getName: { "TGT" })] })
+def diag = [:]
+def collected = collectDesignFailure(design, [], diag)
+assert collected == ["ERROR: AP has no LKM"]
+assert diag.physical_nodes == ["SRC_AP", "TGT"]
+def broken = new Expando(validate: { issues, verbose -> throw new IllegalStateException("x") },
+    getPhysicalNodes: { throw new IllegalStateException("y") })
+assert collectDesignFailure(broken, [issue("ERROR", "kept")], [:]) == ["ERROR: kept"]
+''')
