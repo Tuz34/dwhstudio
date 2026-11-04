@@ -165,6 +165,7 @@ def probe_payload(plan=None, **overrides):
             "integration_type": "SCD",
             "target_ikm": "IKM Oracle Slowly Changing Dimension",
             "lkm_names": ["LKM SQL to Oracle (Built-In)"],
+            "access_point_count": 1,
             "target_attribute_count": count,
             "mapped_attribute_count": count,
         }

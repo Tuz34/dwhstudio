@@ -223,3 +223,20 @@ def test_probe_returns_contract_metadata_for_existing_objects():
         assert needle in text, needle
     assert "getModel()?.getCode()?.equalsIgnoreCase(targetModel)" in text
     assert "txnMgr.commit" not in text
+
+
+def test_create_forces_builtin_lkm_on_every_final_access_point_and_fails_on_db_link():
+    text = read("scd2_mapping_create.groovy")
+    assert "design.getAllAPNodes()" in text
+    assert "node.setLKM(lkm)" in text and "getLKMName()" in text
+    assert "LkmDbLinkRemains" in text and '"LkmDbLinkRemains"' in text.split("REASON_CODES = [")[1].split("] as Set")[0]
+    # assignment happens after the last physical-design reset
+    assert text.index("design.resetSpec()") < text.index("design.getAllAPNodes()")
+    assert text.index("design.getAllAPNodes()") < text.index("txnMgr.commit")
+
+
+def test_probe_reports_access_point_count():
+    text = read("scd2_probe.groovy")
+    assert "access_point_count: accessPointCount" in text
+    line = text.split("lkmNames = apNodes")[1].split(chr(10))[0]
+    assert "it.getLKMName()" in line and "getXKMName" not in line and "unique()" not in line

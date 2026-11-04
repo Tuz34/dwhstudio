@@ -475,6 +475,7 @@ def test_generate_probes_the_planned_scenario_version(plan, monkeypatch):
         (lambda r: r["mapping"].update(target_ikm="IKM Oracle Insert"), "mapping_knowledge_modules"),
         (lambda r: r["mapping"].update(lkm_names=["LKM Other"]), "mapping_knowledge_modules"),
         (lambda r: r["mapping"].update(lkm_names=[]), "mapping_knowledge_modules"),
+        (lambda r: r["mapping"].update(lkm_names=["LKM Oracle to Oracle Pull (DB Link)"]), "mapping_knowledge_modules"),
         (lambda r: r["mapping"].update(mapped_attribute_count=1), "mapping_coverage"),
     ],
 )
@@ -583,3 +584,53 @@ def test_generate_blocks_on_missing_exec_user_before_any_odi_write(plan):
     assert orchestrator.order == ["scd2_probe.groovy"]
     assert not any(sql.startswith(("CREATE", "GRANT")) for sql in ddl_log)
     assert "message" in payload["steps"][-1]
+
+
+def test_km_mismatch_names_the_differing_kms_without_ids(plan):
+    mutate = lambda r: r["mapping"].update(lkm_names=["LKM Oracle to Oracle Pull (DB Link)"])
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": _mutated_probe(plan, mutate)})
+    payload, status = scd2_service.generate(
+        REQUEST, make_services(orchestrator, ddl_handler=ddl_handler(plan, table_exists=1)), approved=True
+    )
+    assert status == 409
+    km = payload["km_mismatch"]
+    assert km["found_lkms"] == ["LKM Oracle to Oracle Pull (DB Link)"]
+    assert km["expected_lkm"] == "LKM SQL to Oracle (Built-In)" and km["access_point_count"] == 1
+
+
+def test_same_server_mapping_without_access_point_or_lkm_is_accepted(plan):
+    mutate = lambda r: r["mapping"].update(lkm_names=[], access_point_count=0)
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": _mutated_probe(plan, mutate)})
+    payload, _ = scd2_service.generate(
+        REQUEST, make_services(orchestrator, ddl_handler=ddl_handler(plan, table_exists=1)), approved=True
+    )
+    assert "mapping_knowledge_modules" not in payload.get("mismatches", [])
+
+
+def test_no_access_point_but_stray_lkm_is_still_a_mismatch(plan):
+    from scd2_odi import mapping_mismatches
+    import json as _json
+    mapping = {**_json.loads(existing_probe(plan))["result"]["mapping"], "access_point_count": 0, "lkm_names": ["LKM Other"]}
+    assert "mapping_knowledge_modules" in mapping_mismatches(
+        mapping, {"source_model": mapping["source_components"][0]["model"], "source_table": mapping["source_tables"][0],
+                  "target_model": mapping["target_component"]["model"], "target_table": mapping["target_table"]})
+
+
+def test_mixed_access_points_one_builtin_one_unassigned_is_a_mismatch_naming_the_empty_lkm(plan):
+    mutate = lambda r: r["mapping"].update(lkm_names=["LKM SQL to Oracle (Built-In)", ""], access_point_count=2)
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": _mutated_probe(plan, mutate)})
+    payload, status = scd2_service.generate(
+        REQUEST, make_services(orchestrator, ddl_handler=ddl_handler(plan, table_exists=1)), approved=True
+    )
+    assert status == 409 and "mapping_knowledge_modules" in payload["mismatches"]
+    assert payload["km_mismatch"]["found_lkms"] == ["LKM SQL to Oracle (Built-In)", ""]
+    assert payload["km_mismatch"]["access_point_count"] == 2
+
+
+def test_run_409_on_db_link_lkm_carries_km_mismatch(plan):
+    probe = _mutated_probe(plan, lambda r: r["mapping"].update(lkm_names=["LKM Oracle to Oracle Pull (DB Link)"]))
+    orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": probe})
+    payload, status = scd2_service.run(RUN_BODY, run_services(plan, orchestrator), approved=True)
+    assert status == 409 and payload["status"] == "blocked_existing_object_mismatch"
+    assert payload["km_mismatch"]["found_lkms"] == ["LKM Oracle to Oracle Pull (DB Link)"]
+    assert not any(c[0] == "scenario_run" for c in orchestrator.calls)
