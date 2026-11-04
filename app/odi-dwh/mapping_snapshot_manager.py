@@ -201,7 +201,7 @@ class MappingSnapshotManager:
                 "error": "At least 2 snapshots are required for comparison.",
                 "snap_count": len(snaps),
             }
-        newer = snaps[0]  # En yeni
+        newer = snaps[0]  # Newest
         older = snaps[1]  # Previous one
         diff = self.compare_snapshots(older["snap_id"], newer["snap_id"])
         diff["snap_old"] = older

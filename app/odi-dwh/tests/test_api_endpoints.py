@@ -1179,7 +1179,14 @@ class TestMappingPersistentWriteEndpoints:
 
 
 class TestAskTruncateIntent:
-    def test_truncate_intent_returns_confirmation_request_without_llm_or_run(self, app_client, monkeypatch):
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "MAP_HR_EMPLOYEES_TO_ODS icin truncate ekle",  # intentional Turkish input
+            "MAP_HR_EMPLOYEES_TO_ODS target truncate",
+        ],
+    )
+    def test_truncate_intent_returns_confirmation_request_without_llm_or_run(self, app_client, monkeypatch, message):
         import app as app_module
 
         monkeypatch.setattr(
@@ -1191,7 +1198,7 @@ class TestAskTruncateIntent:
         resp = app_client.post(
             "/api/ask",
             json={
-                "message": "MAP_HR_EMPLOYEES_TO_ODS target truncate",
+                "message": message,
                 "history": [],
             },
         )

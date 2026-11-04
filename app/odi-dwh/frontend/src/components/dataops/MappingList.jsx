@@ -290,7 +290,7 @@ export function MappingList() {
         </div>
       ) : (
         <div className="flex flex-col lg:flex-row gap-4 h-[calc(100vh-280px)] min-h-[500px]">
-          {/* Sol: Liste (Premium Data Table) */}
+          {/* Left: List (Premium Data Table) */}
           <div className="flex-1 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
             <div className="overflow-y-auto flex-1 custom-scrollbar">
               <table className="w-full text-left border-collapse table-fixed excel-grid">
