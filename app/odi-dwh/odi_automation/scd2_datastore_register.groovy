@@ -30,6 +30,10 @@ final Map<String, String> FIXED_ROLES = [
     EFFECTIVE_FROM: "START_TIMESTAMP",
     EFFECTIVE_TO: "END_TIMESTAMP",
     CURRENT_FLAG: "CURRENT_RECORD_FLAG",
+    INSERT_DATE: "OVERWRITE_ON_CHANGE",
+    UPDATE_DATE: "OVERWRITE_ON_CHANGE",
+    SOURCE_SYSTEM: "OVERWRITE_ON_CHANGE",
+    ETL_BATCH_ID: "OVERWRITE_ON_CHANGE",
 ]
 
 def odi = null
@@ -153,6 +157,7 @@ try {
 
         Map<String, OdiColumn> columnsByName = [:]
         List<String> expectedNames = []
+        Map<String, Integer> expectedLengths = [:]
         int position = 1
         types.each { String name, String encoded ->
             def matcher = (encoded =~ TYPE)
@@ -173,6 +178,15 @@ try {
                 dataFormat += "(${length})"
             }
             column.setDataFormat(dataFormat)
+            if (base == "TIMESTAMP") {
+                // TIMESTAMP length is the fractional-seconds precision; OdiColumn's default 50 renders TIMESTAMP(50).
+                if (length == null) length = 6
+                if (scale != null || length < 0 || length > 9) {
+                    throw new IllegalStateException("InvalidColumnType")
+                }
+                dataFormat = length == 6 ? "TIMESTAMP" : "TIMESTAMP(${length})"
+                column.setDataFormat(dataFormat)
+            }
             if (length != null) column.setLength(length)
             if (scale != null) column.setScale(scale)
             if (base == "NUMBER" && length == null && scale == null) {
@@ -188,6 +202,7 @@ try {
             }
             columnsByName[name] = column
             expectedNames << name
+            expectedLengths[name] = (base == "NUMBER" && length == null && scale == null) ? 0 : length
         }
         ([skName, "EFFECTIVE_FROM", "EFFECTIVE_TO", "CURRENT_FLAG"] + naturalKey).each {
             if (!columnsByName.containsKey(it)) {
@@ -216,6 +231,14 @@ try {
             throw new IllegalStateException("ColumnOrderMismatch")
         }
         ordered.each { column ->
+            // Read-back: registered lengths must match the plan and stay inside the Oracle masks.
+            String code = column.getDataTypeCode()
+            Integer actualLength = column.getLength()
+            if (actualLength != expectedLengths[column.getName()] ||
+                (code == "TIMESTAMP" && (actualLength == null || actualLength < 0 || actualLength > 9)) ||
+                (code == "NUMBER" && actualLength != null && actualLength > 38)) {
+                throw new IllegalStateException("ColumnMetadataMismatch")
+            }
             if (column.getScdType()?.name() != roleOf(column.getName())) {
                 throw new IllegalStateException("ColumnMetadataMismatch")
             }

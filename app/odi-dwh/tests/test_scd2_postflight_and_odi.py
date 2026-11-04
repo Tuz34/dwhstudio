@@ -219,3 +219,21 @@ def test_numeric_metadata_defaults_are_checked_independently_of_format(data_form
         "length_semantics": None,
     }
     assert scd2_odi._column_matches(actual, expected) is matches
+
+
+@pytest.mark.parametrize(
+    "data_format,length,scale,matches",
+    [
+        ("TIMESTAMP", 6, None, True),
+        ("TIMESTAMP", None, None, True),
+        ("TIMESTAMP", 50, None, False),
+        ("TIMESTAMP", 3, None, False),
+        ("TIMESTAMP", 6, 0, False),
+        ("TIMESTAMP(3)", 3, None, True),
+        ("TIMESTAMP(3)", 6, None, False),
+    ],
+)
+def test_timestamp_length_is_fractional_precision(data_format, length, scale, matches):
+    expected = {"name": "T", "role": "NONE", "mandatory": False, "data_format": data_format}
+    actual = {**expected, "type_code": "TIMESTAMP", "length": length, "scale": scale, "length_semantics": None}
+    assert scd2_odi._column_matches(actual, expected) is matches

@@ -281,6 +281,12 @@ def build_scd2_plan(
         "EFFECTIVE_FROM": "START_TIMESTAMP",
         "EFFECTIVE_TO": "END_TIMESTAMP",
         "CURRENT_FLAG": "CURRENT_RECORD_FLAG",
+        # The IKM only loads columns with an SCD behaviour into I$ and inserts new rows from I$;
+        # audit columns without one arrive NULL. Overwrite never creates versions.
+        "INSERT_DATE": "OVERWRITE_ON_CHANGE",
+        "UPDATE_DATE": "OVERWRITE_ON_CHANGE",
+        "SOURCE_SYSTEM": "OVERWRITE_ON_CHANGE",
+        "ETL_BATCH_ID": "OVERWRITE_ON_CHANGE",
     }
     columns.extend(
         _target_column(name, data_type, nullable, scd_roles.get(name, "NONE"))
@@ -458,12 +464,33 @@ def groovy_params(plan: Mapping[str, Any]) -> dict[str, str]:
         "odi.scd2.tracked": ",".join(plan["tracked_attributes"]),
         "odi.scd2.overwrite": ",".join(plan["overwrite_attributes"]) or "none",
         "odi.scd2.column_types": ",".join(
-            f"{c['name']}:{_param_type(oracle_ddl_type(str(c['data_type'])))}" for c in columns
+            f"{c['name']}:{_param_type(registration_type(oracle_ddl_type(str(c['data_type']))))}" for c in columns
         ),
         "odi.scd2.column_nullable": ",".join(
             f"{c['name']}:{'Y' if c['nullable'] else 'N'}" for c in columns
         ),
     }
+
+
+TIMESTAMP_DEFAULT_PRECISION = 6
+TIMESTAMP_MAX_PRECISION = 9
+NUMBER_MAX_PRECISION = 38
+
+
+def registration_type(data_type: str) -> str:
+    """Type as registered in ODI: a TIMESTAMP always carries its fractional precision.
+
+    ODI's TIMESTAMP mask is ``TIMESTAMP(%L)``; an unset length would default to 50
+    on the column and render ``TIMESTAMP(50)`` (ORA-30088). Bare ``TIMESTAMP`` is the
+    Oracle default precision 6; an explicit ``TIMESTAMP(n)`` keeps n (0..9 only).
+    """
+    match = re.fullmatch(r"TIMESTAMP(?:\(([0-9]+)\))?", data_type)
+    if match is None:
+        return data_type
+    precision = TIMESTAMP_DEFAULT_PRECISION if match.group(1) is None else int(match.group(1))
+    if precision > TIMESTAMP_MAX_PRECISION:
+        raise Scd2PlanError("invalid_timestamp_precision")
+    return f"TIMESTAMP({precision})"
 
 
 def _param_type(data_type: str) -> str:

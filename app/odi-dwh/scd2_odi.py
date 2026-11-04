@@ -337,6 +337,12 @@ def _column_matches(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> b
         actual_precision = actual["length"] if actual["length"] is not None else 126
         if actual_precision != expected_precision or actual["scale"] is not None:
             return False
+    elif parts.group(1) == "TIMESTAMP":
+        # TIMESTAMP length is the fractional-seconds precision (default 6), never a size.
+        expected_precision = precision if precision is not None else 6
+        actual_precision = actual["length"] if actual["length"] is not None else 6
+        if actual_precision != expected_precision or not 0 <= actual_precision <= 9 or actual["scale"] is not None:
+            return False
     elif precision is not None and actual["length"] != precision:
         return False
     elif scale is not None and actual["scale"] != scale:

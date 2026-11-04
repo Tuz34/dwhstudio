@@ -251,6 +251,17 @@ try {
     if (!TARGET_IKM.equalsIgnoreCase(targetNode.getTargetComponentKMName())) {
         throw new IllegalStateException("IkmAssignmentMismatch")
     }
+    // Data-quality checks are intentionally off for SCD2 loads: with CKM Oracle present FLOW_CONTROL
+    // defaults to true and the CKM would divert rows to E$_<target>.
+    ["FLOW_CONTROL", "STATIC_CONTROL"].each { String optionName ->
+        targetNode.getIKMOptionValue(optionName)?.setValue(false)
+    }
+    ["FLOW_CONTROL", "STATIC_CONTROL"].each { String optionName ->
+        def optionValue = targetNode.getIKMOptionValue(optionName)
+        if (optionValue == null || optionValue.getValue() != false) {
+            throw new IllegalStateException("IkmOptionMismatch")
+        }
+    }
     // Access-point nodes are re-read from the final physical design (after the last reset/staging call)
     // so the built-in LKM is forced on every one of them; ODI otherwise defaults cross-server APs to a DB-Link LKM.
     def readAccessPoints = { design.getAllAPNodes() as List<MapPhysicalNode> }

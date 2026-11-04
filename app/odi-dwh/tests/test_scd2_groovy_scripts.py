@@ -240,3 +240,28 @@ def test_probe_reports_access_point_count():
     assert "access_point_count: accessPointCount" in text
     line = text.split("lkmNames = apNodes")[1].split(chr(10))[0]
     assert "it.getLKMName()" in line and "getXKMName" not in line and "unique()" not in line
+
+
+def test_register_scripts_set_timestamp_precision_and_read_back_lengths():
+    generic = read("scd2_datastore_register.groovy")
+    assert 'base == "TIMESTAMP"' in generic and "length = 6" in generic
+    assert "expectedLengths" in generic
+    assert "actualLength > 9" in generic and "actualLength > 38" in generic
+    assert generic.index("ColumnMetadataMismatch") < generic.index("txnMgr.commit(txnStatus)")
+    fixed = read("dim_product_scd2_datastore_register.groovy")
+    assert fixed.count('dataType: "TIMESTAMP", length: 6,') == 2
+    assert "actualLength > 9" in fixed
+
+
+def test_register_script_gives_audit_columns_overwrite_behaviour():
+    text = read("scd2_datastore_register.groovy")
+    for name in ("INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"):
+        assert f'{name}: "OVERWRITE_ON_CHANGE"' in text, name
+
+
+def test_mapping_script_turns_flow_and_static_control_off_and_reads_back():
+    text = read("scd2_mapping_create.groovy")
+    assert '"FLOW_CONTROL", "STATIC_CONTROL"' in text
+    assert "getIKMOptionValue(optionName)?.setValue(false)" in text
+    assert "IkmOptionMismatch" in text
+    assert text.index("setValue(false)") < text.index("IkmOptionMismatch") < text.index("txnMgr.commit(txnStatus)")

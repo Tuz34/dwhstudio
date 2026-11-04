@@ -49,8 +49,8 @@ final List<Map<String, Object>> COLUMN_CONTRACT = [
     [name: "EFFECTIVE_FROM", dataType: "DATE", length: null, scale: null, mandatory: true, scd: "START_TIMESTAMP"],
     [name: "EFFECTIVE_TO", dataType: "DATE", length: null, scale: null, mandatory: true, scd: "END_TIMESTAMP"],
     [name: "CURRENT_FLAG", dataType: "VARCHAR2", length: 1, scale: null, mandatory: true, scd: "CURRENT_RECORD_FLAG"],
-    [name: "INSERT_DATE", dataType: "TIMESTAMP", length: null, scale: null, mandatory: true, scd: null],
-    [name: "UPDATE_DATE", dataType: "TIMESTAMP", length: null, scale: null, mandatory: false, scd: null],
+    [name: "INSERT_DATE", dataType: "TIMESTAMP", length: 6, scale: null, mandatory: true, scd: null],
+    [name: "UPDATE_DATE", dataType: "TIMESTAMP", length: 6, scale: null, mandatory: false, scd: null],
     [name: "SOURCE_SYSTEM", dataType: "VARCHAR2", length: 50, scale: null, mandatory: true, scd: null],
     [name: "ETL_BATCH_ID", dataType: "NUMBER", length: null, scale: null, mandatory: true, scd: null],
 ]
@@ -132,6 +132,10 @@ try {
             } else if (definition.length != null) {
                 dataFormat += "(${definition.length})"
             }
+            if (definition.dataType == "TIMESTAMP") {
+                // Fractional-seconds precision 6 is the Oracle default; data format stays bare TIMESTAMP.
+                dataFormat = "TIMESTAMP"
+            }
             column.setDataFormat(dataFormat)
             if (definition.length != null) {
                 column.setLength(definition.length as Integer)
@@ -180,6 +184,11 @@ try {
             String actualRole = column.getScdType()?.name()
             if (column.isMandatory() != (definition.mandatory as boolean) ||
                 actualRole != (definition.scd as String)) {
+                throw new IllegalStateException("Created column metadata does not match fixed contract")
+            }
+            Integer actualLength = column.getLength()
+            if (definition.dataType == "TIMESTAMP" &&
+                (actualLength == null || actualLength < 0 || actualLength > 9)) {
                 throw new IllegalStateException("Created column metadata does not match fixed contract")
             }
         }
