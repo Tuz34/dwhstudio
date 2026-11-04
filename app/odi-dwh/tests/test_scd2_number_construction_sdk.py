@@ -243,3 +243,55 @@ def test_complete_registrar_compiles_without_running_body(sdk, tmp_path, name):
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert completed.returncode == 0, completed.stderr[-2000:]
+
+
+READBACK_TYPES = {
+    "N_BARE": "NUMBER", "N_6": "NUMBER_6", "D": "DATE",
+    "TS0": "TIMESTAMP_0", "TS3": "TIMESTAMP_3", "TS6": "TIMESTAMP_6", "TS_DEFAULT": "TIMESTAMP",
+}
+READBACK_HARNESS = HARNESS.replace(
+    "new GroovyShell(this.class.classLoader, binding).evaluate(imports + spec.fragment)",
+    """def failure = null
+try {
+    new GroovyShell(this.class.classLoader, binding).evaluate(imports + spec.fragment)
+} catch (IllegalStateException e) {
+    failure = e.getMessage()
+}""",
+).replace(
+    "println JsonOutput.toJson([rows:rows, constructor_ddl:fresh.getDdlDataType()])",
+    "println JsonOutput.toJson([failure:failure, rows:rows])",
+)
+
+
+def run_readback(sdk, mutate):
+    """Execute the registrar's real registration loop and read-back block in memory."""
+    source = (ROOT / GENERIC).read_text(encoding="utf-8")
+    code = fragment(source, "final java.util.regex.Pattern TYPE =", "final Map<String, String> FIXED_ROLES =")
+    code += fragment(source, "Map<String, OdiColumn> columnsByName = [:]", '([skName, "EFFECTIVE_FROM"')
+    code += "".join(f'columnsByName["{n}"].setLength({v})\n' for n, v in mutate.items())
+    code += "List<OdiColumn> ordered = target.getColumns().toList().sort { l, r -> l.getPosition() <=> r.getPosition() }\n"
+    code += fragment(source, "ordered.each { column ->", "if (!primaryKey.isPK()")
+    java, classpath = sdk
+    completed = subprocess.run(
+        [java, "-cp", classpath, "groovy.ui.GroovyMain", "-e", READBACK_HARNESS],
+        input=json.dumps({"fragment": code, "types": READBACK_TYPES}),
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    return json.loads(completed.stdout)
+
+
+def test_registrar_readback_passes_for_correct_lengths(sdk):
+    result = run_readback(sdk, {})
+    assert result["failure"] is None
+    rows = result["rows"]
+    assert [rows[n]["length"] for n in ("TS0", "TS3", "TS6", "TS_DEFAULT")] == [0, 3, 6, 6]
+    assert rows["N_BARE"]["length"] in (None, 0)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [{"TS6": 50}, {"TS3": 50}, {"TS0": 10}, {"TS_DEFAULT": 3}, {"N_6": 39}, {"N_BARE": 5}],
+)
+def test_registrar_readback_fails_structurally_for_wrong_lengths(sdk, mutate):
+    assert run_readback(sdk, mutate)["failure"] == "ColumnMetadataMismatch"

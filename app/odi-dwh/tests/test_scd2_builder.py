@@ -93,7 +93,6 @@ def test_tracked_all_takes_every_non_key_source_column():
     plan = build_scd2_plan(request(tracked_columns="all"), small_columns())
     assert plan["tracked_attributes"] == ["CUST_NAME", "CUST_CITY", "CREDIT_LIMIT", "UPDATED_ON"]
     types = {c["name"]: c["data_type"] for c in plan["target_columns"]}
-    assert types["UPDATED_ON"] == "TIMESTAMP"  # TIMESTAMP(6) normalised
     assert types["CREDIT_LIMIT"] == "NUMBER(8,2)"
 
 
@@ -251,3 +250,74 @@ def test_surrogate_key_collision_is_detected():
     with pytest.raises(Scd2PlanError) as excinfo:
         build_scd2_plan(request(tracked_columns=["CUSTOMER_SK"]), cols)
     assert excinfo.value.code == "surrogate_key_collision"
+
+
+def _column_type_map(plan):
+    return dict(item.split(":", 1) for item in scd2_builder.groovy_params(plan)["odi.scd2.column_types"].split(","))
+
+
+def test_timestamp_columns_register_with_fractional_precision():
+    plan = build_scd2_plan(request(), small_columns())
+    types = _column_type_map(plan)
+    assert types["INSERT_DATE"] == "TIMESTAMP_6" and types["UPDATE_DATE"] == "TIMESTAMP_6"
+
+
+def test_registration_type_rules():
+    assert scd2_builder.registration_type("TIMESTAMP") == "TIMESTAMP(6)"
+    assert scd2_builder.registration_type("TIMESTAMP(3)") == "TIMESTAMP(3)"
+    assert scd2_builder.registration_type("TIMESTAMP(0)") == "TIMESTAMP(0)"
+    assert scd2_builder.registration_type("NUMBER(10,2)") == "NUMBER(10,2)"
+    assert scd2_builder.registration_type("DATE") == "DATE"
+    with pytest.raises(Scd2PlanError):
+        scd2_builder.registration_type("TIMESTAMP(50)")
+
+
+def test_no_timestamp_or_number_param_carries_length_50():
+    plan = build_scd2_plan(request(), small_columns())
+    for name, encoded in _column_type_map(plan).items():
+        if encoded.startswith("TIMESTAMP"):
+            assert encoded.split("_")[1:] and 0 <= int(encoded.split("_")[1]) <= 9, name
+        if encoded.startswith("NUMBER_"):
+            assert int(encoded.split("_")[1]) <= 38, name
+        if encoded.startswith(("TIMESTAMP", "NUMBER", "DATE")):
+            assert not encoded.endswith("_50"), name
+
+
+def test_audit_columns_are_overwrite_on_change_and_core_roles_unchanged():
+    plan = build_scd2_plan(request(), small_columns())
+    roles = {c["name"]: c["scd_role"] for c in plan["target_columns"]}
+    for name in ("INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"):
+        assert roles[name] == "OVERWRITE_ON_CHANGE", name
+    assert roles["EFFECTIVE_FROM"] == "START_TIMESTAMP" and roles["EFFECTIVE_TO"] == "END_TIMESTAMP"
+    assert roles["CURRENT_FLAG"] == "CURRENT_RECORD_FLAG"
+    assert roles[plan["surrogate_key"]["column"]] == "SURROGATE_KEY"
+    assert "NONE" not in roles.values()
+    assert plan["overwrite_attributes"] == []  # audit columns are not user overwrite attributes
+
+
+def _plan_with_timestamp(data_type):
+    cols = [c for c in small_columns() if c["name"] != "UPDATED_ON"]
+    cols.append({"name": "UPDATED_ON", "data_type": data_type, "nullable": True})
+    return build_scd2_plan(request(tracked_columns=["CUST_NAME", "UPDATED_ON"]), cols)
+
+
+def test_plan_keeps_non_default_timestamp_precision_through_ddl_and_registration():
+    plan = _plan_with_timestamp("TIMESTAMP(3)")
+    types = {c["name"]: c["data_type"] for c in plan["target_columns"]}
+    assert types["UPDATED_ON"] == "TIMESTAMP(3)"
+    assert scd2_builder.oracle_ddl_type("TIMESTAMP(3)") == "TIMESTAMP(3)"
+    assert _column_type_map(plan)["UPDATED_ON"] == "TIMESTAMP_3"
+    assert _column_type_map(_plan_with_timestamp("TIMESTAMP(6)"))["UPDATED_ON"] == "TIMESTAMP_6"
+
+
+def test_plan_rejects_timestamp_precision_above_nine():
+    with pytest.raises(Scd2PlanError) as info:
+        _plan_with_timestamp("TIMESTAMP(50)")
+    assert info.value.code == "invalid_timestamp_precision"
+
+
+def test_catalog_timestamp_precision_round_trips():
+    import scd2_target_executor as ex
+
+    assert ex._full_type("TIMESTAMP(3)", 11, None, None) == "TIMESTAMP(3)"
+    assert ex._full_type("TIMESTAMP(6)", 11, None, None) == "TIMESTAMP"

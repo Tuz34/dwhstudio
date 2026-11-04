@@ -87,6 +87,44 @@ Two cases skip the grants instead of failing:
 Both flags are booleans only; no identities beyond the already-reported
 owner and table are added.
 
+## Column metadata registration
+
+ODI renders DDL from column metadata masks (`TIMESTAMP(%L)`, `NUMBER(%L,%P)`), so
+the registered length must be valid for the mask. A TIMESTAMP column is
+registered with its fractional-seconds precision as the length (default 6, range
+0..9) and no scale, never OdiColumn's default of 50 (which makes the IKM's flow
+table fail with ORA-30088). Plan construction validates source `TIMESTAMP(n)`:
+n in 0..9 is accepted (6 is the bare-TIMESTAMP default; other values flow
+through the DDL and registration), larger values are rejected with
+`invalid_timestamp_precision`. DATE carries no length, character types keep
+their size, and bare NUMBER keeps the unconstrained sentinel (its length reads
+back as null or 0, both treated as the sentinel). After registration the
+script reads the columns back and fails with `ColumnMetadataMismatch` (class
+only) if any length differs from the plan, a TIMESTAMP length is outside 0..9 or
+a NUMBER length exceeds 38. The fixed DIM_PRODUCT registration checks that its
+TIMESTAMP columns have length exactly 6. The probe compares TIMESTAMP length as that
+precision. Datastores registered before this change are not migrated.
+
+The audit columns `INSERT_DATE`, `UPDATE_DATE`, `SOURCE_SYSTEM` and
+`ETL_BATCH_ID` are registered with the SCD behaviour `OVERWRITE_ON_CHANGE`: the
+standard IKM loads only columns that carry an SCD behaviour into the I$ flow
+table and inserts new dimension rows from I$, so without one these columns
+arrive NULL. Their fixed expressions flow through I$ and are overwritten on
+matched rows without ever creating a version. This applies to all four,
+including `INSERT_DATE`: on a matched row it is overwritten, so it effectively
+means "last load timestamp". The mapping script's role contract check expects
+these four in addition to the caller's overwrite columns. The other roles are unchanged
+(surrogate key, natural key, tracked attributes, `EFFECTIVE_FROM`/`EFFECTIVE_TO`
+as start/end timestamp, `CURRENT_FLAG` as current record flag).
+
+## Flow control
+
+The mapping script sets the target IKM options `FLOW_CONTROL` and
+`STATIC_CONTROL` to false and reads them back, failing with `IkmOptionMismatch`
+(class only) otherwise. Data-quality checks are intentionally off for SCD2
+loads: with a CKM present in the repository, flow control defaults to true and
+would divert rows to `E$_<target>`.
+
 ## Existing objects
 
 Existing target tables, datastores and mappings are verified against the
