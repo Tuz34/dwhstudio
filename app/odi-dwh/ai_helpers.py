@@ -26,6 +26,13 @@ def df_to_jsonable(df):
         rows.append(clean)
     return rows
 
+# English forms of a mapping-creation request ("create mapping", "create a mapping",
+# "make a mapping", "build a mapping", ...). Turkish forms are matched by token lists.
+_CREATE_MAPPING_EN_RE = re.compile(r"\b(?:create|make|build)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?mapping")
+# Whole-word "table" (English) / "tablo..." (Turkish); avoids "stable", "suitable".
+_TABLE_WORD_RE = re.compile(r"\b(?:tablo\w*|tables?)\b")
+
+
 def _is_modeled_tables_question(message: str) -> bool:
     msg = (message or "").lower()
     msg_ascii = msg
@@ -37,7 +44,7 @@ def _is_modeled_tables_question(message: str) -> bool:
 
     # NEW MODELING REQUEST (create) -> NOT the list route; let it fall through to the LLM/mapping flow.
     # Turkish: "modellemek istiyorum", "X'i modelle", "ods katmanina modelle", "mapping olustur" ...
-    # English counterparts are matched via "mapping" + create/make verbs elsewhere in this module.
+    # English: "create/make/build (a) mapping" via _CREATE_MAPPING_EN_RE.
     create_intent = (
         "modellemek" in msg_ascii
         or "modelleyel" in msg_ascii
@@ -45,6 +52,7 @@ def _is_modeled_tables_question(message: str) -> bool:
         or "ods katmanina" in msg_ascii
         or "ods a tasi" in msg_ascii
         or "ods'a tasi" in msg_ascii
+        or bool(_CREATE_MAPPING_EN_RE.search(msg_ascii))
         or ("mapping" in msg_ascii and any(v in msg_ascii for v in ["olustur", "yap", "kur", "uret", "yeni"]))
         or (
             "modelle" in msg_ascii
@@ -265,7 +273,9 @@ def _is_unmapped_odi_flow_question(message: str) -> bool:
         "yapilmamis", "yapilmayan", "olmayan", "eksik", "yok",
         "unmapped", "missing", "without", "not mapped", "not modeled",
     ]) or ("yap" in msg and "mam" in msg)
-    has_create_intent = any(token in msg for token in ["olustur", "create mapping", "mapping yap", "kur", "uret"])
+    has_create_intent = any(token in msg for token in ["olustur", "create mapping", "mapping yap", "kur", "uret"]) or bool(
+        _CREATE_MAPPING_EN_RE.search(msg)
+    )
     return has_source_schema and has_target and has_table and has_flow and has_missing and not has_create_intent
 
 
@@ -289,7 +299,7 @@ def _unmapped_odi_flow_answer(message: str):
     return {
         "aciklama": (
             f"The tables in the {source_schema} schema were checked using read-only metadata. "
-            f"Of {len(rows)} source tables, {len(missing_rows)} are missing an ODI flow "
+            f"{len(missing_rows)} of {len(rows)} source tables are missing an ODI flow "
             "to the DWH ODS layer (no ODI flow to DWH). The existence of a DWH target table alone does not "
             "mean an ODI mapping exists; ODI repository references were checked as well."
         ),
@@ -362,7 +372,7 @@ def _has_recent_bulk_model_intent(message: str, history: list) -> bool:
         "modelle", "modelleyelim", "ods katmanina", "mapping olustur",
         "mapping yap", "create mapping", "olustur", "aktarim olustur",
     ])
-    return has_missing_ref and (has_bulk_ref or "tabl" in joined) and has_model_intent
+    return has_missing_ref and (has_bulk_ref or bool(_TABLE_WORD_RE.search(joined))) and has_model_intent
 
 
 def _is_pronoun_bulk_model_intent(message: str) -> bool:

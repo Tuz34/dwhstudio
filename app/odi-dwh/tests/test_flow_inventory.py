@@ -292,7 +292,7 @@ def test_api_ask_rebuilds_bulk_mapping_requests_when_session_memory_is_missing(a
         "role": "assistant",
         "content": (
             "The tables in the HR schema were checked using read-only metadata. "
-            "Of 2 source tables, 1 are missing an ODI flow to the DWH ODS layer (no ODI flow to DWH).\n\n"
+            "1 of 2 source tables is missing an ODI flow to the DWH ODS layer (no ODI flow to DWH).\n\n"
             "[HR Tables Without ODI Flow to DWH]\n"
             "Columns: SOURCE_TABLE, EXPECTED_TARGET_TABLE, TARGET_TABLE_EXISTS, SOURCE_DATASTORE_EXISTS, TARGET_DATASTORE_EXISTS, ODI_MAPPING_EXISTS, MAPPING_NAME, STATUS\n"
             "Rows:\n"

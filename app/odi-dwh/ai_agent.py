@@ -20,6 +20,11 @@ logger = logging.getLogger("dwh_app.ai_agent")
 _claude_client = None
 _claude_client_key = None
 
+# Exact-match sentinel: the only response call_ollama() returns on failure. The hybrid
+# path compares against this whole string, never a substring of a model answer.
+OLLAMA_UNAVAILABLE_RESPONSE = '{"description": "The AI service is temporarily unavailable. Please try again.", "queries": []}'
+
+
 def normalize_provider(provider: str | None = None) -> str:
     value = (provider or os.getenv("LLM_PROVIDER") or LLM_PROVIDER or "hybrid").lower()
     if value in {"hybrid", "local_first", "auto_local"}:
@@ -244,7 +249,7 @@ def call_ollama(messages: list) -> str:
         return response.json()["message"]["content"]
     except Exception as e:
         logger.error("Could not connect to Ollama: %s", e)
-        return '{"description": "The AI service is temporarily unavailable. Please try again.", "queries": []}'
+        return OLLAMA_UNAVAILABLE_RESPONSE
 
 def is_ollama_available() -> bool:
     try:
@@ -359,7 +364,7 @@ def call_llm(messages: list) -> str:
             try:
                 logger.info("LLM hybrid attempt: %s", name)
                 result = fn(messages)
-                if name != "claude" and "unavailable" in result:
+                if name != "claude" and result == OLLAMA_UNAVAILABLE_RESPONSE:
                     raise RuntimeError(result)
                 return result
             except Exception as e:
