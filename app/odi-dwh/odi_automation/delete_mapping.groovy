@@ -1,8 +1,8 @@
 /*
   ODI Mapping Deletion (Standalone Groovy SDK)
   =============================================
-  Bir ODI mapping'i SDK uzerinden guvenli siler.
-  Parametreler:
+  Safely deletes an ODI mapping through the SDK.
+  Parameters:
     -Dodi.project=TUTORIOL
     -Dodi.mapping=MAP_CUSTOMER
 */
@@ -23,16 +23,16 @@ import oracle.odi.core.persistence.transaction.ITransactionDefinition
 import oracle.odi.core.persistence.transaction.ITransactionStatus
 import oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition
 
-// ── OdiInstance Baglantisi ──────────────────────────────────────────────
+// ── OdiInstance connection ──────────────────────────────────────────────
 def odi = null
 boolean standaloneMode = false
 
 try {
     odi = odiInstance
-    println "INFO: ODI Studio baglantisi kullaniliyor."
+    println "INFO: Using the ODI Studio connection."
 } catch (MissingPropertyException e) {
     standaloneMode = true
-    println "INFO: Standalone mod — repository baglantisi kuruluyor..."
+    println "INFO: Standalone mode — opening repository connection..."
 
     String propsPath = args.length > 0 ? args[0] : "odi_connection.properties"
     Properties props = new Properties()
@@ -58,10 +58,10 @@ try {
         props.getProperty("odi_password").toCharArray()
     )
     odi.getSecurityManager().setCurrentThreadAuthentication(auth)
-    println "INFO: Repository baglantisi basarili."
+    println "INFO: Repository connection succeeded."
 }
 
-// ── Parametreleri Al ────────────────────────────────────────────────────
+// ── Read parameters ─────────────────────────────────────────────────────
 String projectName = System.getProperty("odi.project")
 String folderName  = System.getProperty("odi.folder")
 String mappingName = System.getProperty("odi.mapping")
@@ -81,7 +81,7 @@ try {
     OdiProject project = projFinder.findByCode(projectName)
     if (project == null) throw new Exception("Project not found: " + projectName)
 
-    // Folder bul
+    // Find the folder
     OdiFolder folder = null
     for (f in project.getFolders()) {
         if (f.getName().equals(folderName)) {
@@ -91,16 +91,16 @@ try {
     }
     if (folder == null) throw new Exception("Folder not found: " + folderName)
 
-    // Mapping bul (findByName: folder, name)
+    // Find the mapping (findByName: folder, name)
     Mapping mapping = mapFinder.findByName(folder, mappingName)
 
     if (mapping == null) {
-        println "WARNING: Mapping bulunamadi: ${mappingName} — zaten silinmis olabilir."
+        println "WARNING: Mapping not found: ${mappingName} — it may already have been deleted."
         txnMgr.rollback(txnStatus)
     } else {
         em.remove(mapping)
         txnMgr.commit(txnStatus)
-        println "SUCCESS: Mapping ${mappingName} silindi."
+        println "SUCCESS: Mapping ${mappingName} deleted."
     }
 
 } catch (Exception e) {
@@ -110,6 +110,6 @@ try {
 } finally {
     if (standaloneMode && odi != null) {
         odi.close()
-        println "INFO: Repository baglantisi kapatildi."
+        println "INFO: Repository connection closed."
     }
 }

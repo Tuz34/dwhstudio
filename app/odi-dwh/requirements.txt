@@ -1,7 +1,7 @@
 # ============================================================
-# DWH Studio - Python Bagimliliklari
-# Python 3.12 icin (oracledb/langgraph uyumu)
-# Kurulum: pip install -r requirements.txt
+# DWH Studio - Python dependencies
+# Python 3.12 (oracledb/langgraph compatibility)
+# Install: pip install -r requirements.txt
 # ============================================================
 
 # --- Web framework ---
@@ -9,11 +9,11 @@ flask==3.0.3
 flask-wtf==1.2.1
 flask-limiter==3.8.0
 
-# --- Veritabani ---
-oracledb==2.4.1            # Oracle 19c hedef + Oracle source (thin mode)
-pyodbc==5.1.0             # Legacy MSSQL source adapter (ENABLE_MSSQL_SOURCE=true ise)
+# --- Database ---
+oracledb==2.4.1            # Oracle 19c target + Oracle source (thin mode)
+pyodbc==5.1.0             # Legacy MSSQL source adapter (when ENABLE_MSSQL_SOURCE=true)
 
-# --- Veri isleme ---
+# --- Data processing ---
 pandas==2.2.3
 
 # --- LLM / AI ---
@@ -21,20 +21,20 @@ anthropic==0.39.0         # Cloud expert (Claude)
 langgraph==0.2.45         # Mapping pipeline (LangGraph state machine)
 typing-extensions==4.12.2
 
-# --- HTTP / yardimci ---
+# --- HTTP / helpers ---
 requests==2.32.3
 httpx==0.27.2              # anthropic==0.39.0 expects httpx proxies kwarg support
 python-dotenv==1.0.1
 tqdm==4.66.5
 
-# --- MCP (Model Context Protocol server'lari) ---
-mcp>=1.27.2              # FastMCP (mcp.server.fastmcp) iceren surum
+# --- MCP (Model Context Protocol servers) ---
+mcp>=1.27.2              # Release that includes FastMCP (mcp.server.fastmcp)
 
-# --- Dokumantasyon ---
-python-docx==1.1.2        # DWH_Automation_Mimari.docx guncelleme
+# --- Documentation ---
+python-docx==1.1.2        # DWH_Automation_Mimari.docx updates
 
 # --- Test ---
-pytest==9.0.3             # Yerel entegrasyon ve API testleri
+pytest==9.0.3             # Local integration and API tests
 
-# --- Opsiyonel (su an JSON-RAG kullaniliyor; ChromaDB FAZ 4'te) ---
+# --- Optional (JSON-RAG is used for now; ChromaDB in phase 4) ---
 # chromadb==0.5.20

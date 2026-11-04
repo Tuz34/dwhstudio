@@ -127,10 +127,10 @@ try {
     DatastoreComponent tgtComp = new DatastoreComponent(mapping, tgtDS)
 
     // ── CRITICAL FIX: Integration Type = IU (Incremental Update) ─────────────
-    // ODI 12c'de IKM Oracle Merge, fiziksel tasarimda YALNIZCA hedef component'in
-    // Integration Type'i "IU" (Incremental Update) oldugunda gorунур ve atanabilir.
-    // "CA" (Control Append/Insert) modunda sadece INSERT IKM'leri listelenir.
-    // MOS Note 2527685.1 ve 2152565.1 bu sorunu belgelemektedir.
+    // In ODI 12c, IKM Oracle Merge is visible and assignable in the physical design
+    // only when the target component Integration Type is "IU" (Incremental Update).
+    // In "CA" (Control Append/Insert) mode only INSERT IKMs are listed.
+    // MOS Notes 2527685.1 and 2152565.1 document this issue.
     boolean integrationTypeSet = false
     try {
         tgtComp.setIntegrationTypeCode("IU")
@@ -152,13 +152,13 @@ try {
                 integrationTypeSet = true
             } catch (Exception ite3) {
                 println "WARNING: Integration Type IU failed: ${ite.getClass().getSimpleName()}"
-                println "         IKM Oracle Merge gorünmeyebilir. ODI Studio'da manuel set edin."
+                println "         IKM Oracle Merge may not be visible. Set it manually in ODI Studio."
             }
         }
     }
 
-    // Opsiyonel: JOIN bileseni (SKEY lookup vb.)
-    // Parametreler: odi.join_table, odi.join_model, odi.join_condition, odi.join_type
+    // Optional: JOIN component (SKEY lookup and similar)
+    // Parameters: odi.join_table, odi.join_model, odi.join_condition, odi.join_type
     String joinTableName = System.getProperty("odi.join_table")
     String joinModelName = System.getProperty("odi.join_model") ?: tgtModName
     String joinCondition = System.getProperty("odi.join_condition")
@@ -168,97 +168,97 @@ try {
     def joinComp = null
 
     if (joinTableName != null && joinCondition != null) {
-        // Join tablosunu bul
+        // Find the join table
         OdiDataStore joinDS = ((IOdiDataStoreFinder) em.getFinder(OdiDataStore.class)).findByName(joinTableName, joinModelName)
         if (joinDS == null) throw new Exception("Join Datastore not found: " + joinTableName + " in " + joinModelName)
 
         joinSrcComp = new DatastoreComponent(mapping, joinDS)
 
-        // JoinComponent olustur
+        // Create the JoinComponent
         joinComp = new JoinComponent(mapping, "JOIN_" + joinTableName)
 
-        // Source ve Join tablosunu JoinComponent'e bagla
+        // Connect the source and join tables to the JoinComponent
         srcComp.connectTo(joinComp)
         joinSrcComp.connectTo(joinComp)
 
-        // Join condition ve tipi ata
-        // joinCondition icindeki SRC. ve JOIN. prefix'lerini gercek component adlariyla degistir
+        // Set the join condition and join type
+        // Replace SRC. and JOIN. prefixes inside joinCondition with the real component names
         String resolvedCondition = joinCondition
             .replaceAll("(?i)SRC\\.", srcComp.getName() + ".")
             .replaceAll("(?i)JOIN\\.", joinSrcComp.getName() + ".")
 
         joinComp.setJoinConditionText(resolvedCondition)
 
-        // Join tipi: LEFT_OUTER, RIGHT_OUTER, INNER, CROSS, FULL_OUTER
-        // ODI 12c: JoinComponent.JoinType inner enum'a erisim icin tam yol kullanilmali
+        // Join type: LEFT_OUTER, RIGHT_OUTER, INNER, CROSS, FULL_OUTER
+        // ODI 12c: the full path is required to reach the JoinComponent.JoinType inner enum
         boolean joinTypeSet = false
         String upperJoinType = joinType.toUpperCase()
 
-        // Yontem 1: Tam sinif yolu ile enum erisimi
+        // Method 1: enum access through the full class path
         if (!joinTypeSet) {
             try {
                 def jtClass = Class.forName("oracle.odi.domain.mapping.component.JoinComponent\$JoinType")
                 def jtEnum = Enum.valueOf(jtClass, upperJoinType)
                 joinComp.setJoinType(jtEnum)
                 joinTypeSet = true
-                println "JOIN TYPE: ${upperJoinType} (enum reflection ile atandi)"
+                println "JOIN TYPE: ${upperJoinType} (assigned via enum reflection)"
             } catch (Exception e1) {
                 println "DEBUG: Enum reflection failed: ${e1.getClass().getSimpleName()}"
             }
         }
 
-        // Yontem 2: Groovy dynamic method — setJoinType(String)
+        // Method 2: Groovy dynamic method — setJoinType(String)
         if (!joinTypeSet) {
             try {
                 joinComp.setJoinType(upperJoinType)
                 joinTypeSet = true
-                println "JOIN TYPE: ${upperJoinType} (string ile atandi)"
+                println "JOIN TYPE: ${upperJoinType} (assigned via string)"
             } catch (Exception e2) {
                 println "DEBUG: String setJoinType failed: ${e2.getClass().getSimpleName()}"
             }
         }
 
-        // Yontem 3: Property setter
+        // Method 3: property setter
         if (!joinTypeSet) {
             try {
                 joinComp.joinType = upperJoinType
                 joinTypeSet = true
-                println "JOIN TYPE: ${upperJoinType} (property setter ile atandi)"
+                println "JOIN TYPE: ${upperJoinType} (assigned via property setter)"
             } catch (Exception e3) {
                 println "DEBUG: Property setter failed: ${e3.getClass().getSimpleName()}"
             }
         }
 
         if (!joinTypeSet) {
-            println "WARNING: Join tipi atanamadi — varsayilan kullanilacak. Manuel olarak ODI Studio'dan LEFT_OUTER secin."
+            println "WARNING: Join type could not be assigned — the default will be used. Select LEFT_OUTER manually in ODI Studio."
         }
 
-        // JoinComponent'i Target'a bagla
+        // Connect the JoinComponent to the target
         joinComp.connectTo(tgtComp)
         println "JOIN: ${srcComp.getName()} LEFT JOIN ${joinSrcComp.getName()} ON ${resolvedCondition}"
     } else {
-        // Parametre: odi.filter (SKEY / UK duplicate engellemek icin KAYNAK tabloya konur)
+        // Parameter: odi.filter (placed on the SOURCE table to block SKEY / UK duplicates)
         String filterCond = System.getProperty("odi.filter")
         if (filterCond != null && filterCond.trim().length() > 0) {
             String resolvedFilter = filterCond.replaceAll("(?i)SRC\\.", srcComp.getName() + ".")
             FilterComponent filterComp = new FilterComponent(mapping, "FLT_" + srcComp.getName())
             filterComp.setFilterConditionText(resolvedFilter)
             
-            // Kaynak -> Filtre -> Hedef
+            // Source -> Filter -> Target
             srcComp.connectTo(filterComp)
             filterComp.connectTo(tgtComp)
             println "FILTER: " + resolvedFilter
         } else {
-            // Join ve Filter yoksa direkt bagla
+            // Connect directly when there is no join and no filter
             srcComp.connectTo(tgtComp)
         }
     }
 
     // ── Update Key + ORA-38104 Prevention ────────────────────────────────────
-    // IKM Oracle Merge icin iki kosul:
-    //   1) tgtComp.setUpdateKey(key) — MERGE ON clause kolonlarini belirler
-    //   2) UK kolonlari "insert-only" olmali — MERGE WHEN MATCHED SET'te olmamali
-    //      Aksi halde Oracle: ORA-38104 "Columns referenced in the ON clause cannot be updated"
+    // IKM Oracle Merge has two conditions:
+    //   1) tgtComp.setUpdateKey(key) — defines the MERGE ON clause columns
+    //   2) UK columns must be insert-only — they must not appear in MERGE WHEN MATCHED SET
+    //      Otherwise Oracle raises ORA-38104 "Columns referenced in the ON clause cannot be updated"
     def tgtBoundDS = tgtComp.getBoundDataStore()
     Set<String> ukColNames = new HashSet<>()
     Set<String> requiredUpdateKeyColumns = new LinkedHashSet<>()
@@ -280,7 +280,7 @@ try {
     }
     if (tgtBoundDS != null) {
         def keys = tgtBoundDS.getKeys()
-        // Explicit contract varsa tam kolon eslesmesini sec; aksi halde eski tercih zinciri.
+        // When an explicit contract is present, select the exact column match; otherwise use the previous preference chain.
         def uKey = requiredUpdateKeyColumns.isEmpty()
             ? (keys.find { it.getName().toUpperCase().startsWith("UK_") } ?: keys.find { true })
             : keys.find { keyColumnNames(it) == requiredUpdateKeyColumns }
@@ -288,7 +288,7 @@ try {
             tgtComp.setUpdateKey(uKey)
             println "MAPPING UPDATE KEY SET: ${uKey.getName()}"
 
-            // UK kolonlarinin isimlerini topla (ORA-38104 icin)
+            // Collect the UK column names (for ORA-38104)
             try {
                 uKey.getColumns().each { col -> ukColNames.add(col.getName().toUpperCase()) }
             } catch (Exception e) {
@@ -316,7 +316,7 @@ try {
     }
 
     // Attribute Mapping
-    // Opsiyonel: odi.expressions ile ozel kolon eslesmeleri
+    // Optional: custom column mappings through odi.expressions
     // Format: TGT_COL=EXPRESSION;TGT_COL2=EXPRESSION2
     String expressionsStr = System.getProperty("odi.expressions")
     Map<String, String> customExpressions = [:]
@@ -326,7 +326,7 @@ try {
             if (eq > 0) {
                 String key = pair.substring(0, eq).trim().toUpperCase()
                 String val = pair.substring(eq + 1).trim()
-                // SRC. ve JOIN. prefix'lerini gercek component adlariyla degistir
+                // Replace SRC. and JOIN. prefixes with the real component names
                 val = val.replaceAll("(?i)SRC\\.", srcComp.getName() + ".")
                 if (joinSrcComp != null) {
                     val = val.replaceAll("(?i)JOIN\\.", joinSrcComp.getName() + ".")
@@ -341,11 +341,11 @@ try {
         String attrName = tAttr.getName().toUpperCase()
         boolean isUkCol = ukColNames.contains(attrName)
 
-        // Oncelik 1: Ozel expression tanimlanmissa onu kullan
+        // Priority 1: use the custom expression when one is defined
         if (customExpressions.containsKey(attrName)) {
             tAttr.setExpressionText(customExpressions[attrName])
         } else {
-            // Oncelik 2: Isim eslesmeye calis (once source, sonra join tablosu)
+            // Priority 2: try to match by name (source first, then the join table)
             def sAttr = srcComp.getAttributes().find { it.getName().equalsIgnoreCase(tAttr.getName()) }
             if (sAttr != null) {
                 tAttr.setExpressionText(srcComp.getName() + "." + sAttr.getName())
@@ -354,22 +354,22 @@ try {
                 if (jAttr != null) {
                     tAttr.setExpressionText(joinSrcComp.getName() + "." + jAttr.getName())
                 } else {
-                    // Oncelik 3: Varsayilan degerler
+                    // Priority 3: default values
                     if (attrName == "INSERT_DATE" || attrName == "UPDATE_DATE") tAttr.setExpressionText("CURRENT_TIMESTAMP")
                     else if (attrName == "SOURCE_SYSTEM") tAttr.setExpressionText("'" + sourceSystemName + "'")
                     else if (attrName == "ETL_BATCH_ID") tAttr.setExpressionText("'<%=odiRef.getSession(\"SESS_NO\")%>'")
                 }
             } else {
-                // Oncelik 3: Varsayilan degerler
+                // Priority 3: default values
                 if (attrName == "INSERT_DATE" || attrName == "UPDATE_DATE") tAttr.setExpressionText("CURRENT_TIMESTAMP")
                 else if (attrName == "SOURCE_SYSTEM") tAttr.setExpressionText("'" + sourceSystemName + "'")
                 else if (attrName == "ETL_BATCH_ID") tAttr.setExpressionText("'<%=odiRef.getSession(\"SESS_NO\")%>'")
             }
         }
 
-        // ── ORA-38104 Oncesi Onlem: UK kolonu UPDATE SET'ten cikar ──────────
-        // MERGE ON clause'da kullanilan kolon WHEN MATCHED SET'e giremez.
-        // ODI'de bu, "update indicator / isUpdate" flag'inin false olmasi ile saglanir.
+        // ── ORA-38104 precaution: remove the UK column from UPDATE SET ──────
+        // A column used in the MERGE ON clause cannot enter WHEN MATCHED SET.
+        // In ODI this is done by setting the "update indicator / isUpdate" flag to false.
         if (isUkCol) {
             boolean flagSet = false
             try { tAttr.setUpdateIndicator(false); flagSet = true } catch (Exception e1) {}
@@ -393,7 +393,7 @@ try {
             if (flagSet) {
                 println "UK_COL INSERT-ONLY: ${attrName} (ORA-38104 prevention)"
             } else {
-                println "WARNING: ${attrName} UK kolonu INSERT-ONLY isaretlenemedi — ORA-38104 riski var"
+                println "WARNING: ${attrName} UK column could not be marked INSERT-ONLY — ORA-38104 risk"
             }
         }
     }
@@ -413,11 +413,11 @@ try {
     IOdiIKMFinder ikmFinder = (IOdiIKMFinder) em.getFinder(OdiIKM.class)
     IOdiLKMFinder lkmFinder = (IOdiLKMFinder) em.getFinder(OdiLKM.class)
     
-    // Opsiyonel: Exact match KM isimleri (Python'dan gonderilir)
+    // Optional: exact-match KM names (sent from Python)
     String ikmNameParam = System.getProperty("odi.ikm_name")
     String lkmNameParam = System.getProperty("odi.lkm_name")
     String truncateTargetTableParam = System.getProperty("odi.truncate_target_table")
-    // Configurable fallback zincirleri (virgul-ayrikli, config.py / .env'den gelir)
+    // Configurable fallback chains (comma-separated, supplied by config.py / .env)
     String ikmPriorityParam = System.getProperty("odi.ikm_priority", "incremental update,oracle merge,oracle update,oracle insert")
     String lkmPriorityParam = System.getProperty("odi.lkm_priority", "sql to oracle,mssql to oracle,sql to sql")
 
@@ -446,19 +446,19 @@ try {
         return true
     }
 
-    // KM listelerini bir kez yukle (performans — her findAll() repo'ya gider)
+    // Load the KM lists once (performance — every findAll() hits the repository)
     def allIkms = ikmFinder.findAll()
     def allLkms = lkmFinder.findAll()
 
-    // IKM Secimi: Exact match varsa kullan, yoksa configurable fallback zinciri
+    // IKM selection: use the exact match when present, otherwise the configurable fallback chain
     OdiIKM ikm = null
     if (ikmNameParam != null && ikmNameParam.trim().length() > 0) {
         ikm = allIkms.find { it.getName().equalsIgnoreCase(ikmNameParam.trim()) }
         if (ikm != null) println "IKM: ${ikm.getName()} (exact match)"
-        else println "WARNING: IKM exact match bulunamadi: ${ikmNameParam} — fallback zinciri denenecek"
+        else println "WARNING: IKM exact match not found: ${ikmNameParam} — fallback chain will be tried"
     }
     if (ikm == null) {
-        // Fallback zinciri config'den gelir (ODI_IKM_PRIORITY)
+        // The fallback chain comes from configuration (ODI_IKM_PRIORITY)
         ikmPriorityParam.split(",").each { keyword ->
             if (ikm == null) {
                 ikm = allIkms.find { it.getName().toLowerCase().contains(keyword.trim().toLowerCase()) }
@@ -467,12 +467,12 @@ try {
         if (ikm != null) println "IKM: ${ikm.getName()} (fallback: ${ikmPriorityParam})"
     }
 
-    // LKM Secimi: Exact match varsa kullan, yoksa configurable fallback zinciri
+    // LKM selection: use the exact match when present, otherwise the configurable fallback chain
     OdiLKM lkm = null
     if (lkmNameParam != null && lkmNameParam.trim().length() > 0) {
         lkm = allLkms.find { it.getName().equalsIgnoreCase(lkmNameParam.trim()) }
         if (lkm != null) println "LKM: ${lkm.getName()} (exact match)"
-        else println "WARNING: LKM exact match bulunamadi: ${lkmNameParam} — fallback zinciri denenecek"
+        else println "WARNING: LKM exact match not found: ${lkmNameParam} — fallback chain will be tried"
     }
     if (lkm == null) {
         lkmPriorityParam.split(",").each { keyword ->
@@ -483,8 +483,8 @@ try {
         if (lkm != null) println "LKM: ${lkm.getName()} (fallback: ${lkmPriorityParam})"
     }
 
-    // Physical node'u guvenlice bul (ODI 12c uyumlu)
-    // AP (Access Point) node da tespit edilir — LKM atamasi icin (Antigravity onerisi #4)
+    // Find the physical node safely (ODI 12c compatible)
+    // The AP (Access Point) node is also detected — for LKM assignment (Antigravity suggestion #4)
     def refreshPhysicalNodes = {
         MapPhysicalNode foundTarget = null
         MapPhysicalNode foundAp = null
@@ -492,7 +492,7 @@ try {
             if (node.getName().equalsIgnoreCase(tgtDSName) || node.getName().equalsIgnoreCase(tgtComp.getName())) {
                 foundTarget = node
             }
-            // AP node: ismi _AP ile biter veya ACCESS_POINT icerir
+            // AP node: the name ends with _AP or contains ACCESS_POINT
             if (node.getName().toUpperCase().contains("_AP") || node.getName().toUpperCase().contains("ACCESS_POINT")) {
                 foundAp = node
             }
@@ -538,10 +538,10 @@ try {
             }
         }
         if (!physItSet) {
-            println "NOTE: Physical Integration Type IU atanamadi — IKM assignment devam edecek"
+            println "NOTE: Physical Integration Type IU could not be assigned — IKM assignment will continue"
         }
 
-        // IKM: Her zaman target node'a atanir ve read-back ile dogrulanir.
+        // IKM: always assigned to the target node and verified by reading it back.
         if (ikm == null) {
             throw new Exception("IKM selection failed. Configure odi.ikm_name or ODI_IKM_PRIORITY before creating the mapping.")
         }
@@ -628,10 +628,10 @@ try {
 
         setIkmOptionIfRequested(tgtNode, "TRUNCATE_TARGET_TABLE", truncateTargetTableParam)
 
-        // LKM: Yalniz AP node varsa kaynaktan staging'e tasima gerekir.
-        // Runtime ORA-02019'i engellemek icin LKM atamasi sessiz gecilemez.
-        // IKM/staging fallback'leri physical design'i yeniden hesaplatabildigi icin
-        // AP node referansi LKM atamadan once tekrar bulunur.
+        // LKM: a source-to-staging move is required only when an AP node exists.
+        // LKM assignment cannot be skipped silently, or runtime ORA-02019 is possible.
+        // IKM/staging fallbacks can recompute the physical design, so
+        // the AP node reference is resolved again before the LKM assignment.
         physicalNodes = refreshPhysicalNodes()
         if (physicalNodes.target != null) tgtNode = physicalNodes.target
         apNode = physicalNodes.ap
@@ -687,13 +687,13 @@ try {
         }
 
         try {
-            // ODI 14c+ uyumlu: setStagingLocationName(String) kullan
-            // setStagingLocation(Location) ODI 12c'de signature uyumsuzlugu verebilir
+            // ODI 14c+ compatible: use setStagingLocationName(String)
+            // setStagingLocation(Location) can have a signature mismatch on ODI 12c
             String locName = tgtNode.getExecutionUnit().getLocation().getName()
             design.setStagingLocationName(locName)
             println "STAGING: ${locName}"
         } catch (Exception stg) {
-            // Fallback: eski yontem (ODI 12c bazi patch'lerinde calisiyor)
+            // Fallback: previous method (works on some ODI 12c patches)
             try {
                 design.setStagingLocation(tgtNode.getExecutionUnit().getLocation())
             } catch (Exception stg2) {
@@ -701,7 +701,7 @@ try {
             }
         }
     } else {
-        println "WARNING: Physical node bulunamadi, KM atamasi atlanildi"
+        println "WARNING: Physical node not found, KM assignment skipped"
     }
     
     mapping.validate() 

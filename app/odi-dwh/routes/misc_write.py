@@ -69,10 +69,10 @@ def api_export():
     df = pd.DataFrame(rows, columns=headers)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Rapor")
+        df.to_excel(writer, index=False, sheet_name="Report")
     buf.seek(0)
 
-    fname = f"rapor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    fname = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     return send_file(
         buf,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -90,7 +90,7 @@ def api_clear():
 @bp.route("/api/monitoring/dq-scores")
 @limiter.limit("10 per minute")
 def api_monitoring_dq_scores():
-    """Tablo bazli DQ skorlari. ?owner=DWH&table=SALES (table opsiyonel)."""
+    """Per-table DQ scores. ?owner=DWH&table=SALES (table is optional)."""
     app_module = get_app_module()
     try:
         owner = request.args.get("owner", "DWH").upper()
@@ -116,7 +116,7 @@ def api_monitoring_dq_scores():
 @bp.route("/api/lineage/refresh", methods=["POST"])
 @limiter.limit("3 per minute")
 def api_lineage_refresh():
-    """ODI'dan lineage verilerini gunceller."""
+    """Refresh lineage data from ODI."""
     app_module = get_app_module()
     body = request.get_json() or {}
     approval_error = app_module._approval_error(body, "lineage refresh")
@@ -133,7 +133,7 @@ def api_lineage_refresh():
 @bp.route("/api/alerts/acknowledge", methods=["POST"])
 @limiter.limit("10 per minute")
 def api_alerts_acknowledge():
-    """Tek veya toplu alert onayi."""
+    """Acknowledge one alert or all alerts."""
     app_module = get_app_module()
     body = request.get_json() or {}
     approval_error = app_module._approval_error(body, "alert acknowledgement")
@@ -158,7 +158,7 @@ def api_alerts_acknowledge():
 @bp.route("/api/alerts/check", methods=["POST"])
 @limiter.limit("5 per minute")
 def api_alerts_check():
-    """Otomatik kontrol calistir (tazelik + sema degisikligi)."""
+    """Run automatic checks (freshness and schema change)."""
     app_module = get_app_module()
     body = request.get_json() or {}
     approval_error = app_module._approval_error(body, "alert check")
@@ -235,7 +235,7 @@ def api_odi_mapping_detail():
 @bp.route("/api/airflow/run-odi", methods=["POST"])
 @limiter.limit("5 per minute")
 def api_airflow_run_odi():
-    """Airflow (Docker) uzerinden istenilen ODI senaryosunu tetikler."""
+    """Trigger the requested ODI scenario through Airflow (Docker)."""
     app_module = get_app_module()
     try:
         body = request.get_json() or {}
@@ -314,7 +314,7 @@ def api_airflow_run_mapping():
 @bp.route("/api/airflow/run-dq", methods=["POST"])
 @limiter.limit("5 per minute")
 def api_airflow_run_dq():
-    """Airflow uzerinden Data Quality validation tetikler."""
+    """Trigger Data Quality validation through Airflow."""
     app_module = get_app_module()
     body = request.get_json() or {}
     approval_error = app_module._approval_error(body, "legacy DQ run")

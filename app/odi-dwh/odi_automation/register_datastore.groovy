@@ -1,10 +1,10 @@
 /*
   ODI Datastore Registration (Standalone Groovy SDK)
   ===================================================
-  Mevcut bir ODI modeline yeni datastore (tablo) ve kolonlarini kaydeder.
-  Reverse Engineering yerine programatik olusturma yapar.
+  Registers a new datastore (table) and its columns in an existing ODI model.
+  Creates them programmatically instead of using Reverse Engineering.
 
-  Parametreler (System Properties):
+  Parameters (System Properties):
     -Dodi.model_code=DWH
     -Dodi.table_name=ODS_CUSTOMER
     -Dodi.resource_name=ODS_CUSTOMER
@@ -28,16 +28,16 @@ import oracle.odi.core.persistence.transaction.ITransactionDefinition
 import oracle.odi.core.persistence.transaction.ITransactionStatus
 import oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition
 
-// ── OdiInstance Baglantisi ──────────────────────────────────────────────
+// ── OdiInstance connection ──────────────────────────────────────────────
 def odi = null
 boolean standaloneMode = false
 
 try {
     odi = odiInstance
-    println "INFO: ODI Studio baglantisi kullaniliyor."
+    println "INFO: Using the ODI Studio connection."
 } catch (MissingPropertyException e) {
     standaloneMode = true
-    println "INFO: Standalone mod — repository baglantisi kuruluyor..."
+    println "INFO: Standalone mode — opening repository connection..."
 
     String propsPath = args.length > 0 ? args[0] : "odi_connection.properties"
     Properties props = new Properties()
@@ -63,10 +63,10 @@ try {
         props.getProperty("odi_password").toCharArray()
     )
     odi.getSecurityManager().setCurrentThreadAuthentication(auth)
-    println "INFO: Repository baglantisi basarili."
+    println "INFO: Repository connection succeeded."
 }
 
-// ── Parametreleri Al ────────────────────────────────────────────────────
+// ── Read parameters ─────────────────────────────────────────────────────
 String modelCode   = System.getProperty("odi.model_code")
 String tableName   = System.getProperty("odi.table_name")
 String resName     = System.getProperty("odi.resource_name", tableName)
@@ -86,35 +86,35 @@ try {
     IOdiModelFinder modelFinder = (IOdiModelFinder) em.getFinder(OdiModel.class)
     IOdiDataStoreFinder dsFinder = (IOdiDataStoreFinder) em.getFinder(OdiDataStore.class)
 
-    // 1. Model bul
+    // 1. Find the model
     OdiModel model = modelFinder.findByCode(modelCode)
     if (model == null) throw new Exception("Model not found: " + modelCode)
-    println "STEP 1: Model bulundu: ${model.getName()} (code=${modelCode})"
+    println "STEP 1: Model found: ${model.getName()} (code=${modelCode})"
 
-    // 2. Zaten var mi kontrol et → varsa sil ve yeniden olustur (Reverse Engineer simulasyonu)
+    // 2. Check whether it already exists; if so, delete and recreate it (Reverse Engineer simulation)
     OdiDataStore existing = dsFinder.findByName(tableName, modelCode)
     if (existing != null) {
-        println "INFO: Datastore mevcut: ${tableName} — kolonlar guncelleniyor (silinip yeniden yaratiliyor)."
+        println "INFO: Datastore exists: ${tableName} — columns are being refreshed (deleted and recreated)."
         em.remove(existing)
         txnMgr.commit(txnStatus)
         txnStatus = txnMgr.getTransaction(txnDef)
-        println "STEP 2: Eski Datastore silindi."
+        println "STEP 2: Previous datastore deleted."
     }
 
-    // 3. Datastore olustur
+    // 3. Create the datastore
     OdiDataStore ds = new OdiDataStore(model, tableName)
     ds.setDefaultAlias(tableName.length() > 30 ? tableName.substring(0, 30) : tableName)
     ds.setResourceName(resName)
     em.persist(ds)
-    println "STEP 3: Datastore olusturuldu: ${tableName}"
+    println "STEP 3: Datastore created: ${tableName}"
 
-    // 4. Kolonlari ekle
+    // 4. Add the columns
     if (columnsStr != null && columnsStr.trim().length() > 0) {
         String[] colDefs = columnsStr.split(",")
         int pos = 1
         for (colDef in colDefs) {
             String[] parts = colDef.trim().split(":")
-            String colName = parts[0].trim().toUpperCase()  // UPPERCASE zorunlu — duplicate onleme
+            String colName = parts[0].trim().toUpperCase()  // UPPERCASE required — prevents duplicates
             String dataType = parts.length > 1 ? parts[1].trim() : "VARCHAR2"
             int colLength = parts.length > 2 ? Integer.parseInt(parts[2].trim()) : 0
             int colScale = parts.length > 3 ? Integer.parseInt(parts[3].trim()) : 0
@@ -130,7 +130,7 @@ try {
                 } catch (Exception ignore) {}
             }
             if (!typeSet) {
-                println "WARNING: Kolon ${colName} icin tip atanamadi: ${dataType}"
+                println "WARNING: Could not assign a type for column ${colName}: ${dataType}"
             }
             if (typeSet) {
                 if (colLength > 0) col.setLength(colLength)
@@ -139,14 +139,14 @@ try {
             col.setPosition(pos)
             pos++
         }
-        println "STEP 4: ${colDefs.length} kolon eklendi (UPPERCASE)"
+        println "STEP 4: ${colDefs.length} columns added (UPPERCASE)"
     } else {
-        println "STEP 4: Kolon bilgisi verilmedi — bos datastore"
+        println "STEP 4: No column information was provided — empty datastore"
     }
 
     // 5. Commit
     txnMgr.commit(txnStatus)
-    println "SUCCESS: Datastore ${tableName} modele ${modelCode} eklendi ve commit edildi."
+    println "SUCCESS: Datastore ${tableName} added to model ${modelCode} and committed."
 
 } catch (Exception e) {
     try { txnMgr.rollback(txnStatus) } catch (Exception ignore) {}
@@ -155,6 +155,6 @@ try {
 } finally {
     if (standaloneMode && odi != null) {
         odi.close()
-        println "INFO: Repository baglantisi kapatildi."
+        println "INFO: Repository connection closed."
     }
 }

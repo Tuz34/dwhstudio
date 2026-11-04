@@ -1,10 +1,10 @@
 /*
   ODI Datastore Deletion (Standalone Groovy SDK)
   ===============================================
-  Belirtilen modeldeki datastore'u (tablo tanimini) ODI repository'den siler.
-  Fiziksel Oracle tablosuna dokunmaz, sadece ODI model kaydini kaldirir.
+  Deletes the datastore (table definition) in the given model from the ODI repository.
+  Does not touch the physical Oracle table; it only removes the ODI model record.
 
-  Parametreler (System Properties):
+  Parameters (System Properties):
     -Dodi.model_code=DWH
     -Dodi.table_name=DWH_ODS_PRODUCT
 */
@@ -24,16 +24,16 @@ import oracle.odi.core.persistence.transaction.ITransactionDefinition
 import oracle.odi.core.persistence.transaction.ITransactionStatus
 import oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition
 
-// ── OdiInstance Baglantisi ──────────────────────────────────────────────
+// ── OdiInstance connection ──────────────────────────────────────────────
 def odi = null
 boolean standaloneMode = false
 
 try {
     odi = odiInstance
-    println "INFO: ODI Studio baglantisi kullaniliyor."
+    println "INFO: Using the ODI Studio connection."
 } catch (MissingPropertyException e) {
     standaloneMode = true
-    println "INFO: Standalone mod — repository baglantisi kuruluyor..."
+    println "INFO: Standalone mode — opening repository connection..."
 
     String propsPath = args.length > 0 ? args[0] : "odi_connection.properties"
     Properties props = new Properties()
@@ -59,14 +59,14 @@ try {
         props.getProperty("odi_password").toCharArray()
     )
     odi.getSecurityManager().setCurrentThreadAuthentication(auth)
-    println "INFO: Repository baglantisi basarili."
+    println "INFO: Repository connection succeeded."
 }
 
-// ── Parametreleri Al ────────────────────────────────────────────────────
+// ── Read parameters ─────────────────────────────────────────────────────
 String modelCode = System.getProperty("odi.model_code")
 String tableName = System.getProperty("odi.table_name")
 
-if (!modelCode || !tableName) throw new Exception("MISSING PARAMS: odi.model_code ve odi.table_name zorunlu")
+if (!modelCode || !tableName) throw new Exception("MISSING PARAMS: odi.model_code and odi.table_name are required")
 
 println "PARAMS: model=${modelCode}, table=${tableName}"
 
@@ -82,12 +82,12 @@ try {
 
     OdiDataStore ds = dsFinder.findByName(tableName, modelCode)
     if (ds == null) {
-        println "WARNING: Datastore bulunamadi: ${tableName} in ${modelCode} — zaten silinmis olabilir."
+        println "WARNING: Datastore not found: ${tableName} in ${modelCode} — it may already have been deleted."
         txnMgr.rollback(txnStatus)
     } else {
         em.remove(ds)
         txnMgr.commit(txnStatus)
-        println "SUCCESS: Datastore '${tableName}' modelden '${modelCode}' silindi."
+        println "SUCCESS: Datastore '${tableName}' deleted from model '${modelCode}'."
     }
 
 } catch (Exception e) {
@@ -97,6 +97,6 @@ try {
 } finally {
     if (standaloneMode && odi != null) {
         odi.close()
-        println "INFO: Repository baglantisi kapatildi."
+        println "INFO: Repository connection closed."
     }
 }

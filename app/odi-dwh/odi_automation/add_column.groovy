@@ -1,16 +1,16 @@
 /*
   ODI Datastore Column Add
   ========================
-  Mevcut bir ODI datastore'a yeni kolon ekler.
+  Adds a new column to an existing ODI datastore.
 
-  Parametreler (System Properties):
+  Parameters (System Properties):
     -Dodi.model_code=DWH
     -Dodi.table_name=ODS_PRODUCTION_PRODUCT
     -Dodi.column_name=SKEY
     -Dodi.column_type=NUMBER
     -Dodi.column_length=0
     -Dodi.column_scale=0
-    -Dodi.column_position=1   (opsiyonel, yoksa sona eklenir)
+    -Dodi.column_position=1   (optional; appended at the end when omitted)
 */
 
 import oracle.odi.domain.model.OdiDataStore
@@ -55,7 +55,7 @@ int colScale      = Integer.parseInt(System.getProperty("odi.column_scale") ?: "
 int colPosition   = Integer.parseInt(System.getProperty("odi.column_position") ?: "0")
 
 if (!modelCode || !tableName || !colName) {
-    throw new Exception("MISSING PARAMS: model_code, table_name, column_name zorunlu")
+    throw new Exception("MISSING PARAMS: model_code, table_name, column_name are required")
 }
 
 println "PARAMS: model=${modelCode}, table=${tableName}, col=${colName}, type=${colType}"
@@ -68,22 +68,22 @@ try {
     IOdiDataStoreFinder dsFinder = (IOdiDataStoreFinder) em.getFinder(OdiDataStore.class)
 
     OdiDataStore ds = dsFinder.findByName(tableName, modelCode)
-    if (ds == null) throw new Exception("Datastore bulunamadi: ${tableName} in ${modelCode}")
+    if (ds == null) throw new Exception("Datastore not found: ${tableName} in ${modelCode}")
 
-    // Kolon zaten var mi kontrol et
+    // Check whether the column already exists
     def existingCol = ds.getColumns().find { it.getName().equalsIgnoreCase(colName) }
     if (existingCol != null) {
-        println "WARNING: Kolon zaten mevcut: ${colName} — atlanıyor"
+        println "WARNING: Column already exists: ${colName} — skipped"
         txnMgr.rollback(txnStatus)
     } else {
-        // Pozisyon belirle
+        // Resolve the position
         if (colPosition <= 0) {
             colPosition = ds.getColumns().size() + 1
         }
 
         OdiColumn col = new OdiColumn(ds, colName)
 
-        // Tip atama
+        // Assign the data type
         String upperType = colType.toUpperCase()
         boolean typeSet = false
         for (String tryType : [upperType, colType, colType.toLowerCase()]) {
@@ -98,13 +98,13 @@ try {
             if (colLength > 0) col.setLength(colLength)
             if (colScale > 0) col.setScale(colScale)
         } else {
-            println "WARNING: Tip atanamadi: ${colType}"
+            println "WARNING: Could not assign type: ${colType}"
         }
 
         col.setPosition(colPosition)
 
         txnMgr.commit(txnStatus)
-        println "SUCCESS: Kolon ${colName} (${colType}) datastore ${tableName}'e eklendi (pos=${colPosition})"
+        println "SUCCESS: Column ${colName} (${colType}) added to datastore ${tableName} (pos=${colPosition})"
     }
 
 } catch (Exception e) {

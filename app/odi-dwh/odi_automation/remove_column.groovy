@@ -1,9 +1,9 @@
 /*
   ODI Datastore Column Remove
   ============================
-  Mevcut bir ODI datastore'dan bir kolonu kaldirir.
+  Removes a column from an existing ODI datastore.
 
-  Parametreler (System Properties):
+  Parameters (System Properties):
     -Dodi.model_code=DWH
     -Dodi.table_name=ODS_PRODUCTION_PRODUCT
     -Dodi.column_name=SKEY
@@ -47,7 +47,7 @@ String tableName = System.getProperty("odi.table_name")
 String colName   = System.getProperty("odi.column_name")
 
 if (!modelCode || !tableName || !colName) {
-    throw new Exception("MISSING PARAMS: model_code, table_name, column_name zorunlu")
+    throw new Exception("MISSING PARAMS: model_code, table_name, column_name are required")
 }
 
 println "PARAMS: model=${modelCode}, table=${tableName}, col=${colName}"
@@ -60,16 +60,16 @@ try {
     IOdiDataStoreFinder dsFinder = (IOdiDataStoreFinder) em.getFinder(OdiDataStore.class)
 
     OdiDataStore ds = dsFinder.findByName(tableName, modelCode)
-    if (ds == null) throw new Exception("Datastore bulunamadi: ${tableName} in ${modelCode}")
+    if (ds == null) throw new Exception("Datastore not found: ${tableName} in ${modelCode}")
 
     def existingCol = ds.getColumns().find { it.getName().equalsIgnoreCase(colName) }
     if (existingCol == null) {
-        println "WARNING: Kolon bulunamadi: ${colName} in ${tableName} — zaten yok, atlanıyor"
+        println "WARNING: Column not found: ${colName} in ${tableName} — already absent, skipped"
         txnMgr.rollback(txnStatus)
     } else {
         em.remove(existingCol)
         txnMgr.commit(txnStatus)
-        println "SUCCESS: Kolon ${colName} datastore ${tableName}'den kaldirildi"
+        println "SUCCESS: Column ${colName} removed from datastore ${tableName}"
     }
 
 } catch (Exception e) {

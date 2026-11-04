@@ -1,10 +1,10 @@
 /*
   ODI Topology Setup: Physical Schema + Logical Schema + Context Mapping + Model
   ==============================================================================
-  Mevcut bir data server altina yeni physical schema, logical schema,
-  context mapping ve model olusturur.
+  Creates a new physical schema, logical schema,
+  context mapping, and model under an existing data server.
 
-  Parametreler (System Properties):
+  Parameters (System Properties):
     -Dodi.data_server=ORACLE_SOURCE
     -Dodi.schema_name=HR
     -Dodi.catalog_name=
@@ -47,7 +47,7 @@ try {
     odi.getSecurityManager().setCurrentThreadAuthentication(auth)
 }
 
-// Parametreleri oku
+// Read the parameters
 String dataServerName = System.getProperty("odi.data_server")
 String schemaName     = System.getProperty("odi.schema_name")
 String catalogName    = System.getProperty("odi.catalog_name")
@@ -59,7 +59,7 @@ String techName       = System.getProperty("odi.technology") ?: "Oracle"
 String techCode       = System.getProperty("odi.tech_code") ?: "ORACLE"
 
 if (!dataServerName || !schemaName || !lschemaName || !modelName || !modelCode) {
-    throw new Exception("MISSING PARAMS: data_server, schema_name, logical_schema, model_name, model_code zorunlu")
+    throw new Exception("MISSING PARAMS: data_server, schema_name, logical_schema, model_name, model_code are required")
 }
 
 println "PARAMS: server=${dataServerName}, schema=${schemaName}, lschema=${lschemaName}, model=${modelName}"
@@ -70,13 +70,13 @@ ITransactionStatus txnStatus = txnMgr.getTransaction(new DefaultTransactionDefin
 try {
     def em = odi.getTransactionalEntityManager()
 
-    // 1. Data Server bul
+    // 1. Find the data server
     IOdiDataServerFinder dsFinder = (IOdiDataServerFinder) em.getFinder(OdiDataServer.class)
     OdiDataServer dataServer = dsFinder.findByName(dataServerName)
-    if (dataServer == null) throw new Exception("Data server bulunamadi: " + dataServerName)
-    println "STEP 1: Data server bulundu: ${dataServerName}"
+    if (dataServer == null) throw new Exception("Data server not found: " + dataServerName)
+    println "STEP 1: Data server found: ${dataServerName}"
 
-    // 2. Technology bul
+    // 2. Find the technology
     IOdiTechnologyFinder techFinder = (IOdiTechnologyFinder) em.getFinder(OdiTechnology.class)
     OdiTechnology tech = null
     techFinder.findAll().each { t ->
@@ -84,10 +84,10 @@ try {
             tech = t
         }
     }
-    if (tech == null) throw new Exception("Technology bulunamadi: " + techName)
-    println "STEP 2: Technology bulundu: ${tech.getName()}"
+    if (tech == null) throw new Exception("Technology not found: " + techName)
+    println "STEP 2: Technology found: ${tech.getName()}"
 
-    // 3. Physical Schema olustur veya bul
+    // 3. Create or find the physical schema
     OdiPhysicalSchema pSchema = null
     dataServer.getPhysicalSchemas().each { ps ->
         if (ps.getSchemaName()?.equalsIgnoreCase(schemaName)) {
@@ -96,26 +96,26 @@ try {
     }
 
     if (pSchema != null) {
-        println "STEP 3: Physical schema zaten mevcut: ${schemaName} — atlanıyor"
+        println "STEP 3: Physical schema already exists: ${schemaName} — skipped"
     } else {
-        // ODI 12c: OdiPhysicalSchema(dataServer, schemaName, catalogName) veya setters
+        // ODI 12c: OdiPhysicalSchema(dataServer, schemaName, catalogName) or setters
         try {
             pSchema = new OdiPhysicalSchema(dataServer, schemaName, catalogName)
         } catch (Exception ce1) {
             try {
-                // Alternatif: sadece schema
+                // Alternative: schema only
                 pSchema = new OdiPhysicalSchema(dataServer)
                 pSchema.setSchemaName(schemaName)
                 try { pSchema.setCatalogName(catalogName) } catch (Exception ignore) {}
             } catch (Exception ce2) {
-                throw new Exception("Physical schema olusturulamadi: ${ce1.message} / ${ce2.message}")
+                throw new Exception("Could not create physical schema: ${ce1.message} / ${ce2.message}")
             }
         }
         em.persist(pSchema)
-        println "STEP 3: Physical schema olusturuldu: ${schemaName}"
+        println "STEP 3: Physical schema created: ${schemaName}"
     }
 
-    // 4. Logical Schema olustur veya bul
+    // 4. Create or find the logical schema
     def lsFinder = em.getFinder(OdiLogicalSchema.class)
     OdiLogicalSchema lSchema = null
     try {
@@ -123,14 +123,14 @@ try {
     } catch (Exception ignore) {}
 
     if (lSchema != null) {
-        println "STEP 4: Logical schema zaten mevcut: ${lschemaName} — atlanıyor"
+        println "STEP 4: Logical schema already exists: ${lschemaName} — skipped"
     } else {
         lSchema = new OdiLogicalSchema(tech, lschemaName)
         em.persist(lSchema)
-        println "STEP 4: Logical schema olusturuldu: ${lschemaName}"
+        println "STEP 4: Logical schema created: ${lschemaName}"
     }
 
-    // 5. Context mapping (Logical → Physical) olustur
+    // 5. Create the context mapping (logical to physical)
     IOdiContextFinder ctxFinder = (IOdiContextFinder) em.getFinder(OdiContext.class)
     OdiContext ctx = null
     ctxFinder.findAll().each { c ->
@@ -140,7 +140,7 @@ try {
     }
 
     if (ctx == null) {
-        // Development context dene
+        // Try the Development context
         ctxFinder.findAll().each { c ->
             if (c.getName()?.toLowerCase()?.contains("development") || c.getCode()?.equalsIgnoreCase("DEV")) {
                 ctx = c
@@ -152,41 +152,41 @@ try {
         try {
             OdiContextualSchemaMapping mapping = new OdiContextualSchemaMapping(ctx, lSchema, pSchema)
             em.persist(mapping)
-            println "STEP 5: Context mapping olusturuldu: ${ctx.getName()} -> ${lschemaName} -> ${schemaName}"
+            println "STEP 5: Context mapping created: ${ctx.getName()} -> ${lschemaName} -> ${schemaName}"
         } catch (Exception cme) {
             println "STEP 5: Context mapping already exists or failed: ${cme.getClass().getSimpleName()}"
         }
     } else {
-        println "WARNING: Context bulunamadi (${contextCode}) — context mapping atlanildi"
+        println "WARNING: Context not found (${contextCode}) — context mapping skipped"
     }
 
-    // 6. Model olustur veya bul
+    // 6. Create or find the model
     IOdiModelFinder modelFinder = (IOdiModelFinder) em.getFinder(OdiModel.class)
     OdiModel model = modelFinder.findByCode(modelCode)
 
     if (model != null) {
-        println "STEP 6: Model zaten mevcut: ${modelCode} — atlanıyor"
+        println "STEP 6: Model already exists: ${modelCode} — skipped"
     } else {
         // ODI 12c: OdiModel(logicalSchema, modelName, technologyCode)
-        // technologyCode = TECH_INT_NAME (orn: MICROSOFT_SQL_SERVER, ORACLE)
-        // tech.getName() bosluk icerdiginden ODI-17664 verir — techCode kullanilmali
+        // technologyCode = TECH_INT_NAME (for example MICROSOFT_SQL_SERVER, ORACLE)
+        // tech.getName() contains spaces and raises ODI-17664 — use techCode
         try {
             model = new OdiModel(lSchema, modelName, techCode)
         } catch (Exception me1) {
-            // Fallback: techCode yerine tech.getName() ile dene
+            // Fallback: try tech.getName() instead of techCode
             try {
                 model = new OdiModel(lSchema, modelName, tech.getName())
             } catch (Exception me2) {
-                throw new Exception("Model olusturulamadi: techCode=${techCode} hata=${me1.message} / techName hata=${me2.message}")
+                throw new Exception("Could not create model: techCode=${techCode} error=${me1.message} / techName error=${me2.message}")
             }
         }
         model.setCode(modelCode)
         em.persist(model)
-        println "STEP 6: Model olusturuldu: ${modelName} (code=${modelCode})"
+        println "STEP 6: Model created: ${modelName} (code=${modelCode})"
     }
 
     txnMgr.commit(txnStatus)
-    println "SUCCESS: Topology setup tamamlandi — ${dataServerName}.${schemaName} -> ${lschemaName} -> ${modelName}"
+    println "SUCCESS: Topology setup finished — ${dataServerName}.${schemaName} -> ${lschemaName} -> ${modelName}"
 
 } catch (Exception e) {
     if (txnStatus != null && !txnStatus.isCompleted()) try { txnMgr.rollback(txnStatus) } catch (ig) {}

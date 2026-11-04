@@ -36,17 +36,17 @@ try {
     def em = odi.getTransactionalEntityManager()
     IOdiDataServerFinder dsFinder = (IOdiDataServerFinder) em.getFinder(OdiDataServer.class)
     
-    // Parametrelerden sifre al
+    // Read the password from the parameters
     String serverName = System.getProperty("odi.server_name")
     String newPassword = System.getProperty("odi.new_password")
 
     if (!serverName || !newPassword) {
-        throw new Exception("MISSING PARAMS: odi.server_name ve odi.new_password zorunlu")
+        throw new Exception("MISSING PARAMS: odi.server_name and odi.new_password are required")
     }
 
     OdiDataServer ds = dsFinder.findByName(serverName)
     if (ds == null) {
-        throw new Exception("Data server bulunamadi: " + serverName)
+        throw new Exception("Data server not found: " + serverName)
     }
 
     println "UPDATE: ${serverName}"

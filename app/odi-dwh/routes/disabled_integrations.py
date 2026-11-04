@@ -8,8 +8,8 @@ bp = Blueprint("disabled_integrations", __name__)
 
 def _git_disabled_response():
     return jsonify({
-        "error": "Git/Gitea devre disi.",
-        "reason": "Sifre ve API key sizinti riski nedeniyle Git/Gitea yedekleme kullanilmiyor.",
+        "error": "Git/Gitea is disabled.",
+        "reason": "Git/Gitea backup is not used because of the risk of leaking passwords and API keys.",
     }), 410
 
 
