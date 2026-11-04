@@ -245,22 +245,17 @@ def api_airflow_run_odi():
         scen_name = str(body.get("scen_name", "MAP_CUSTOMER_TO_ODS_SCN")).strip().upper()
         if not app_module._valid_identifier(scen_name):
             return jsonify({"error": "Invalid scen_name."}), 400
-        script_path = app_module.os.path.join(
-            app_module.os.path.dirname(app_module.__file__),
-            "odi_automation",
-            "full_odi_run.py",
-        )
-        result = app_module.subprocess.run(
-            [app_module.sys.executable, script_path, scen_name],
-            capture_output=True,
-            text=True,
-            timeout=900,
-        )
-        return jsonify({
-            "stdout": app_module.redact_sensitive_text(result.stdout, max_len=12000),
-            "stderr": app_module.redact_sensitive_text(result.stderr, max_len=12000),
-            "code": result.returncode,
-        }), 200 if result.returncode == 0 else 500
+        import remote_run_contract
+        from odi_orchestrator import OdiOrchestrator
+
+        version = str(body.get("scenario_version", "001")).strip()
+        context = str(body.get("context", "GLOBAL")).strip().upper()
+        result = remote_run_contract.parse(OdiOrchestrator().run_scenario_remote(
+            approved=body.get("approved"), scenario_name=scen_name,
+            mapping_name=scen_name[:-4] if scen_name.endswith("_SCN") else "",
+            version=version, context=context,
+        ), "run")
+        return jsonify(result), 200 if result["status"] == "passed" else 502
     except app_module.subprocess.TimeoutExpired:
         return jsonify({"error": "Legacy ODI scenario run timed out."}), 504
     except Exception as exc:
@@ -287,26 +282,28 @@ def api_airflow_run_mapping():
         if not app_module._valid_version(version):
             return jsonify({"status": "error", "error": "Invalid scenario_version."}), 400
 
+        import remote_run_contract
+        from mapping_run_service import _scenario_ready
         from odi_orchestrator import OdiOrchestrator
 
         orch = OdiOrchestrator()
         scen_name = f"{mapping_name}_SCN"
 
         with groovy_approval_context(body.get("approved")):
-            gen_res = orch.generate_scenario(scen_name, mapping_name, version)
-            if "Hata:" in gen_res:
+            health = remote_run_contract.parse(orch.remote_agent_health(approved=body.get("approved")), "health")
+            if health["status"] != "passed":
+                return jsonify(health), 503
+            gen_res = orch.generate_scenario_metadata(
+                approved=body.get("approved"), scenario_name=scen_name, mapping_name=mapping_name, version=version,
+            )
+            if not _scenario_ready(gen_res, scen_name, version):
                 return jsonify({"status": "error", "error": "Scenario generation failed."}), 500
 
-            run_res = orch.run_scenario(scen_name, version)
-        if "Hata:" in run_res:
-            return jsonify({"status": "error", "error": "Scenario run failed."}), 500
-
-        return jsonify({
-            "status": "success",
-            "scenario": scen_name,
-            "version": version,
-            "log": app_module.redact_sensitive_text(run_res, max_len=12000),
-        })
+            run_res = remote_run_contract.parse(orch.run_scenario_remote(
+                approved=body.get("approved"), mapping_name=mapping_name,
+                scenario_name=scen_name, version=version,
+            ), "run")
+        return jsonify(run_res), 200 if run_res["status"] == "passed" else 502
     except Exception as exc:
         return redacted_write_error("legacy ODI mapping run", exc)
 

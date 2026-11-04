@@ -7,13 +7,14 @@ import scd2_service
 from tests.scd2_support import (
     REQUEST,
     SOURCE_COLUMNS,
-    FakeOrchestrator,
     error_payload,
     make_services,
     oracle_error,
     plan_catalog_rows,
     probe_payload,
 )
+from tests.test_remote_run_contract import RemoteFakeOrchestrator as FakeOrchestrator
+import remote_run_contract
 
 
 @pytest.fixture
@@ -322,7 +323,7 @@ def test_run_executes_scenario_and_returns_count_only_postflight(plan):
     assert "preflight" in payload and payload["raw_rows_included"] is False
     run_call = [c for c in orchestrator.calls if c[0] == "scenario_run"][0][1]
     assert run_call["scenario_name"] == "MAP_ODS_CUST_TO_DIM_CUST_SCN"
-    assert run_call["extra_allowed_scenarios"] == frozenset({"MAP_ODS_CUST_TO_DIM_CUST_SCN"})
+    assert run_call["mapping_name"] == "MAP_ODS_CUST_TO_DIM_CUST"
 
 
 def test_run_requires_approval(plan):
@@ -351,7 +352,8 @@ def test_run_failure_still_reports_postflight_counts(plan):
     orchestrator = FakeOrchestrator(
         plan,
         responses={"scd2_probe.groovy": probe_payload(mapping_exists=True, scenario_exists=True)},
-        run_result={"status": "failed", "side_effects": True, "session": {"status": "E"}},
+        run_result=remote_run_contract.result("run", status="failed", stage="run", error_code="ScenarioRunFailed",
+                                               agent=True, repository=True, may_have_started=True, session_status="ERROR"),
     )
     services = make_services(orchestrator, catalog_handler=run_catalog_handler(plan, []))
     payload, status = scd2_service.run(RUN_BODY, services, approved=True)

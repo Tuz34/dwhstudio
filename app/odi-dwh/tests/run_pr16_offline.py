@@ -37,7 +37,7 @@ def deny(*args, **kwargs):
     raise RuntimeError("OFFLINE_GUARD: database connection")
 
 
-def main():
+def main(modules=None):
     os.chdir(ROOT)
     sys.path.insert(0, str(ROOT))
     sys.dont_write_bytecode = True
@@ -88,12 +88,15 @@ def main():
         compile_only = program == "new GroovyClassLoader().parseClass(new File(args[0])); println('SDK_COMPILE_OK')"
         helpers = program.startswith('Locale.setDefault(new Locale("tr", "TR"))\n') and "CONTRACT_OK" in program
         from tests.test_e2e_scenario_ownership import SCENARIO_HARNESS, SCRIPT
+        from tests.test_remote_run_groovy import REMOTE_HARNESS, ROOT as REMOTE_ROOT
 
         sdk_scenarios = (
             allowed and len(command) == 8 and program == SCENARIO_HARNESS
             and Path(command[6]).resolve() == SCRIPT.resolve()
         )
-        if not allowed or not (syntax or compile_only or sdk_scenarios or (helpers and command[2] == oo._GROOVY_JAR)):
+        remote = (allowed and len(command) == 7 and program == REMOTE_HARNESS
+                  and Path(command[6]).resolve() == (REMOTE_ROOT / "run_scenario_remote.groovy").resolve())
+        if not allowed or not (syntax or compile_only or sdk_scenarios or remote or (helpers and command[2] == oo._GROOVY_JAR)):
             raise RuntimeError("OFFLINE_GUARD: only isolated Groovy compiler/helpers may execute")
         return original_popen(command, *args, **kwargs)
 
@@ -101,7 +104,7 @@ def main():
 
     import pytest
 
-    modules = [
+    modules = modules or [
         "test_e2e_generic_path", "test_e2e_generic_groovy", "test_e2e_round2",
         "test_e2e_repository_preflight",
         "test_e2e_scenario_ownership",

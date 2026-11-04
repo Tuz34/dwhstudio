@@ -15,6 +15,20 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+class _RemoteRunDouble:
+    def remote_agent_health(self, **kwargs):
+        from tests.test_remote_run_contract import healthy
+        return healthy()
+
+    def generate_scenario_metadata(self, **kwargs):
+        from tests.test_remote_run_contract import generated
+        return generated(kwargs["scenario_name"], kwargs["version"])
+
+    def run_scenario_remote(self, **kwargs):
+        from tests.test_remote_run_contract import done
+        return done()
+
+
 class TestHttpSecurityContracts:
     def test_app_post_endpoints_do_not_bypass_csrf(self):
         content = (PROJECT_ROOT / "app.py").read_text(encoding="utf-8")
@@ -280,7 +294,7 @@ class TestMappingRunEndpoint:
     def test_mapping_run_redacts_unhandled_exception_message(self, app_client, monkeypatch):
         import odi_orchestrator
 
-        class FakeOdiOrchestrator:
+        class FakeOdiOrchestrator(_RemoteRunDouble):
             def update_mapping(self, **_kwargs):
                 raise RuntimeError("internal credential detail must not leak")
 
@@ -319,18 +333,22 @@ class TestMappingRunEndpoint:
             def upsert_state(self, *_args, **_kwargs):
                 return None
 
-        class FakeOdiOrchestrator:
+        class FakeOdiOrchestrator(_RemoteRunDouble):
+            def remote_agent_health(self, **kwargs):
+                calls.append(("health", kwargs))
+                return super().remote_agent_health(**kwargs)
+
             def update_mapping(self, **kwargs):
                 calls.append(("update_mapping", kwargs))
-                return "OK"
+                return "SUCCESS: options updated"
 
-            def generate_scenario(self, *args, **kwargs):
-                calls.append(("generate_scenario", args, kwargs))
-                return "OK"
+            def generate_scenario_metadata(self, **kwargs):
+                calls.append(("generate_scenario", kwargs))
+                return super().generate_scenario_metadata(**kwargs)
 
-            def run_scenario(self, *args, **kwargs):
-                calls.append(("run_scenario", args, kwargs))
-                return "OK"
+            def run_scenario_remote(self, **kwargs):
+                calls.append(("run_scenario", kwargs))
+                return super().run_scenario_remote(**kwargs)
 
         monkeypatch.setattr(app_module, "MappingStateManager", FakeStateManager)
         monkeypatch.setattr(odi_orchestrator, "OdiOrchestrator", FakeOdiOrchestrator)
@@ -353,6 +371,7 @@ class TestMappingRunEndpoint:
 
         assert resp.status_code == 200
         assert calls == [
+            ("health", {"approved": True}),
             (
                 "update_mapping",
                 {
@@ -361,8 +380,10 @@ class TestMappingRunEndpoint:
                     "truncate_target_table": True,
                 },
             ),
-            ("generate_scenario", ("MAP_HR_EMPLOYEES_TO_ODS_SCN", "MAP_HR_EMPLOYEES_TO_ODS", "001"), {}),
-            ("run_scenario", ("MAP_HR_EMPLOYEES_TO_ODS_SCN", "001", "GLOBAL"), {}),
+            ("generate_scenario", {"approved": True, "scenario_name": "MAP_HR_EMPLOYEES_TO_ODS_SCN",
+                                   "mapping_name": "MAP_HR_EMPLOYEES_TO_ODS", "version": "001"}),
+            ("run_scenario", {"approved": True, "scenario_name": "MAP_HR_EMPLOYEES_TO_ODS_SCN",
+                              "mapping_name": "MAP_HR_EMPLOYEES_TO_ODS", "version": "001", "context": "GLOBAL"}),
         ]
 
     def test_mapping_run_treats_fatal_generation_output_as_failure(self, app_client, monkeypatch):
@@ -381,14 +402,14 @@ class TestMappingRunEndpoint:
             def upsert_state(self, state, thread_id=None):
                 states.append((state, thread_id))
 
-        class FakeOdiOrchestrator:
+        class FakeOdiOrchestrator(_RemoteRunDouble):
             def update_mapping(self, **_kwargs):
-                return "OK"
+                return "SUCCESS: options updated"
 
-            def generate_scenario(self, *_args, **_kwargs):
-                return "FATAL ERROR: scenario generation failed"
+            def generate_scenario_metadata(self, **_kwargs):
+                return {"status": "error"}
 
-            def run_scenario(self, *_args, **_kwargs):
+            def run_scenario_remote(self, **_kwargs):
                 pytest.fail("run_scenario must not be called after generation failure")
 
         monkeypatch.setattr(app_module, "MappingStateManager", FakeStateManager)
@@ -438,15 +459,9 @@ class TestMappingRunEndpoint:
                 alerts.append(kwargs)
                 return 101
 
-        class FakeOdiOrchestrator:
+        class FakeOdiOrchestrator(_RemoteRunDouble):
             def update_mapping(self, **_kwargs):
-                return "OK"
-
-            def generate_scenario(self, *_args, **_kwargs):
-                return "OK"
-
-            def run_scenario(self, *_args, **_kwargs):
-                return "OK"
+                return "SUCCESS: options updated"
 
         monkeypatch.setattr(app_module, "MappingStateManager", FakeStateManager)
         monkeypatch.setattr(app_module, "AlertManager", FakeAlertManager)
@@ -506,15 +521,14 @@ class TestMappingRunEndpoint:
                 alerts.append(kwargs)
                 return 202
 
-        class FakeOdiOrchestrator:
+        class FakeOdiOrchestrator(_RemoteRunDouble):
             def update_mapping(self, **_kwargs):
-                return "OK"
+                return "SUCCESS: options updated"
 
-            def generate_scenario(self, *_args, **_kwargs):
-                return "OK"
-
-            def run_scenario(self, *_args, **_kwargs):
-                return "FATAL ERROR: simulated run failure password=secret jdbc:oracle:thin:@host/service"
+            def run_scenario_remote(self, **_kwargs):
+                import remote_run_contract
+                return remote_run_contract.result("run", status="failed", stage="run", error_code="ScenarioRunFailed",
+                                                   agent=True, repository=True, may_have_started=True, session_status="ERROR")
 
         monkeypatch.setattr(app_module, "MappingStateManager", FakeStateManager)
         monkeypatch.setattr(app_module, "AlertManager", FakeAlertManager)
@@ -532,7 +546,7 @@ class TestMappingRunEndpoint:
         )
 
         body = resp.get_json()
-        assert resp.status_code == 500
+        assert resp.status_code == 502
         assert states[-1][0]["overall_status"] == "RUN_FAILED"
         assert len(alerts) == 1
         alert = alerts[0]
@@ -1499,11 +1513,11 @@ class TestSecondaryWriteErrorRedaction:
             def upsert_state(self, state, thread_id=None):
                 states.append((state, thread_id))
 
-        class FakeOdiOrchestrator:
+        class FakeOdiOrchestrator(_RemoteRunDouble):
             def update_mapping(self, **_kwargs):
                 return sensitive_detail
 
-            def generate_scenario(self, *_args, **_kwargs):
+            def generate_scenario_metadata(self, *_args, **_kwargs):
                 pytest.fail("generate_scenario must not run after failed option update")
 
         monkeypatch.setattr(app_module, "MappingStateManager", FakeStateManager)
@@ -1535,11 +1549,11 @@ class TestSecondaryWriteErrorRedaction:
 
         sensitive_detail = "Hata: password=top-secret jdbc:oracle:thin:@secret-host/service"
 
-        class FakeOdiOrchestrator:
-            def generate_scenario(self, *_args, **_kwargs):
+        class FakeOdiOrchestrator(_RemoteRunDouble):
+            def generate_scenario_metadata(self, *_args, **_kwargs):
                 return sensitive_detail
 
-            def run_scenario(self, *_args, **_kwargs):
+            def run_scenario_remote(self, *_args, **_kwargs):
                 pytest.fail("run_scenario must not run after failed generation")
 
         monkeypatch.setattr(odi_orchestrator, "OdiOrchestrator", FakeOdiOrchestrator)
@@ -3341,21 +3355,18 @@ class TestMonitoringLineageWriteEndpoints:
 
 
 class TestLegacyAirflowWriteEndpoints:
-    def test_airflow_run_odi_uses_subprocess_after_approval(self, app_client, monkeypatch):
-        import app as app_module
+    def test_airflow_run_odi_uses_remote_adapter_after_approval(self, app_client, monkeypatch):
+        import odi_orchestrator
+        from tests.test_remote_run_contract import done
 
         calls = []
 
-        class FakeCompletedProcess:
-            stdout = "ok"
-            stderr = ""
-            returncode = 0
+        class FakeOdiOrchestrator(_RemoteRunDouble):
+            def run_scenario_remote(self, **kwargs):
+                calls.append(kwargs)
+                return done()
 
-        def fake_run(args, *, capture_output, text, timeout):
-            calls.append((args, capture_output, text, timeout))
-            return FakeCompletedProcess()
-
-        monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(odi_orchestrator, "OdiOrchestrator", FakeOdiOrchestrator)
 
         resp = app_client.post(
             "/api/airflow/run-odi",
@@ -3363,27 +3374,29 @@ class TestLegacyAirflowWriteEndpoints:
         )
 
         assert resp.status_code == 200
-        assert resp.get_json() == {"stdout": "ok", "stderr": "", "code": 0}
+        assert resp.get_json() == done()
         assert len(calls) == 1
-        args, capture_output, text, timeout = calls[0]
-        assert args[-1] == "MAP_TEST_SCN"
-        assert capture_output is True
-        assert text is True
-        assert timeout == 900
+        assert calls[0] == {"approved": True, "scenario_name": "MAP_TEST_SCN", "mapping_name": "MAP_TEST",
+                            "version": "001", "context": "GLOBAL"}
 
     def test_airflow_run_mapping_uses_orchestrator_after_approval(self, app_client, monkeypatch):
         import odi_orchestrator
+        from tests.test_remote_run_contract import done
 
         calls = []
 
-        class FakeOdiOrchestrator:
-            def generate_scenario(self, scen_name, mapping_name, version):
-                calls.append(("generate", scen_name, mapping_name, version))
-                return "generated"
+        class FakeOdiOrchestrator(_RemoteRunDouble):
+            def remote_agent_health(self, **kwargs):
+                calls.append(("health",))
+                return super().remote_agent_health(**kwargs)
 
-            def run_scenario(self, scen_name, version):
-                calls.append(("run", scen_name, version))
-                return "ran"
+            def generate_scenario_metadata(self, **kwargs):
+                calls.append(("generate", kwargs["scenario_name"], kwargs["mapping_name"], kwargs["version"]))
+                return super().generate_scenario_metadata(**kwargs)
+
+            def run_scenario_remote(self, **kwargs):
+                calls.append(("run", kwargs["scenario_name"], kwargs["version"]))
+                return done()
 
         monkeypatch.setattr(odi_orchestrator, "OdiOrchestrator", FakeOdiOrchestrator)
 
@@ -3393,13 +3406,9 @@ class TestLegacyAirflowWriteEndpoints:
         )
 
         assert resp.status_code == 200
-        assert resp.get_json() == {
-            "status": "success",
-            "scenario": "MAP_TEST_SCN",
-            "version": "002",
-            "log": "ran",
-        }
+        assert resp.get_json() == done()
         assert calls == [
+            ("health",),
             ("generate", "MAP_TEST_SCN", "MAP_TEST", "002"),
             ("run", "MAP_TEST_SCN", "002"),
         ]

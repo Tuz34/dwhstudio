@@ -7,7 +7,9 @@ import subprocess
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
+import remote_run_contract
 from config import (
     GROOVY_JAR_NAME,
     JAVA_FALLBACK_PATHS,
@@ -76,6 +78,8 @@ GROOVY_ACTION_REGISTRY = {
     "repair_mapping_components.groovy": _action("repository_write"),
     "run_load_plan_remote.groovy": _action("load_plan_run"),
     "run_scenario.groovy": _action("scenario_run"),
+    "remote_agent_health.groovy": _action("read_only"),
+    "run_scenario_remote.groovy": _action("scenario_run"),
     "scd2_datastore_register.groovy": _action("repository_write"),
     "scd2_mapping_create.groovy": _action("repository_write"),
     "scd2_probe.groovy": _action("read_only"),
@@ -234,6 +238,11 @@ def groovy_approval_context(approved: bool):
         yield
     finally:
         _GROOVY_APPROVED.reset(token)
+
+
+def groovy_is_approved() -> bool:
+    """Read the existing request approval without widening its scope."""
+    return _GROOVY_APPROVED.get() is True
 
 
 _JMX_NOISE_START_RE = re.compile(r"(?i)^SEVERE:\s+Error initializing the JMX\s+FRAMEWORK\s+SPI\.?$")
@@ -476,6 +485,8 @@ class OdiOrchestrator:
 
     def run_groovy(self, script_name: str, params: dict) -> str:
         """Run one registered Groovy action behind the common safety boundary."""
+        if script_name == "run_scenario.groovy":
+            return "Hata: Legacy standalone scenario execution is disabled. error_type=LegacyRuntimeDisabled"
         spec = GROOVY_ACTION_REGISTRY.get(script_name)
         if spec is None:
             return "Hata: ODI Groovy action blocked. error_type=UnregisteredAction"
@@ -540,6 +551,12 @@ class OdiOrchestrator:
             stdout = _redact_runtime_text(result.stdout.strip())
             stderr = _redact_runtime_text(result.stderr.strip())
 
+            if script_name in remote_run_contract.SCRIPTS:
+                action = remote_run_contract.SCRIPTS[script_name]
+                if result.returncode != 0 or _groovy_output_failed(stderr):
+                    return json.dumps(remote_run_contract.transport_failure(action, "RemoteProcessFailed"))
+                return json.dumps(remote_run_contract.parse(stdout, action))
+
             if result.returncode != 0:
                 logger.error(
                     "ODI Groovy failed: action=%s error_type=GroovyProcessError exit_code=%s",
@@ -573,6 +590,10 @@ class OdiOrchestrator:
             )
             return stdout
         except subprocess.TimeoutExpired:
+            if script_name in remote_run_contract.SCRIPTS:
+                return json.dumps(remote_run_contract.transport_failure(
+                    remote_run_contract.SCRIPTS[script_name], "RemoteTimeout",
+                ))
             return "Hata: ODI Groovy action failed. error_type=TimeoutExpired"
         except FileNotFoundError:
             return "Hata: ODI Groovy action failed. error_type=JavaNotFound"
@@ -1039,13 +1060,53 @@ class OdiOrchestrator:
         return self.run_groovy("add_column.groovy", params)
 
     def run_scenario(self, name: str, version: str = "001", context: str = "GLOBAL"):
-        """Runs an existing ODI scenario."""
-        params = {
-            "odi.scenario.name": name,
-            "odi.scenario.version": version,
-            "odi.context": context,
-        }
-        return self.run_groovy("run_scenario.groovy", params)
+        """Compatibility adapter; execution is remote-only and failure text is fixed."""
+        mapping = name[:-4] if isinstance(name, str) and name.endswith("_SCN") else ""
+        result = self.run_scenario_remote(
+            approved=groovy_is_approved(), mapping_name=mapping,
+            scenario_name=name, version=version, context=context,
+        )
+        if result["status"] == "passed":
+            return "SUCCESS: Remote scenario completed. Status: DONE"
+        return "Hata: Remote scenario did not complete. error_type=" + result["error_code"]
+
+    @staticmethod
+    def _remote_configuration_ready() -> bool:
+        try:
+            endpoint = urlsplit(ODI_REST_URL or "")
+            return bool(endpoint.scheme in {"http", "https"} and endpoint.hostname
+                        and endpoint.port == 15101 and endpoint.path == "/oraclediagent"
+                        and not endpoint.query and not endpoint.fragment and endpoint.username is None
+                        and endpoint.password is None)
+        except (ValueError, TypeError):
+            return False
+
+    def remote_agent_health(self, *, approved: object = False) -> dict:
+        """Read-only isAlive gate; no caller-controlled URL, credential or startup params."""
+        if approved is not True:
+            return remote_run_contract.result("health", stage="approval", error_code="ApprovalRequired")
+        if not self._remote_configuration_ready():
+            return remote_run_contract.result("health", error_code="AgentConfigurationUnavailable")
+        with groovy_approval_context(True):
+            output = self.run_groovy("remote_agent_health.groovy", {})
+        return remote_run_contract.parse(output, "health")
+
+    def run_scenario_remote(self, *, approved: object = False, mapping_name: str,
+                            scenario_name: str, version: str, context: str = "GLOBAL") -> dict:
+        """Exact mapping ownership is checked again in the remote script before start."""
+        if approved is not True:
+            return remote_run_contract.result("run", stage="approval", error_code="ApprovalRequired")
+        identifiers = (mapping_name, scenario_name, context)
+        if (any(not isinstance(v, str) or re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", v) is None for v in identifiers)
+                or not isinstance(version, str) or re.fullmatch(r"[A-Za-z0-9_.-]{1,12}", version) is None):
+            return remote_run_contract.result("run", stage="validation", error_code="InvalidRunIdentity")
+        if not self._remote_configuration_ready():
+            return remote_run_contract.result("run", error_code="AgentConfigurationUnavailable")
+        params = {"odi.project": ODI_PROJECT, "odi.folder": ODI_FOLDER, "odi.mapping": mapping_name,
+                  "odi.scenario.name": scenario_name, "odi.scenario.version": version, "odi.context": context}
+        with groovy_approval_context(True):
+            output = self.run_groovy("run_scenario_remote.groovy", params)
+        return remote_run_contract.parse(output, "run")
 
     def run_scenario_safe(self, *,
                           approved: bool = False,
@@ -1057,7 +1118,7 @@ class OdiOrchestrator:
         scenario = str(scenario_name or "").strip().upper()
         scen_version = str(version or "").strip()
         ctx = str(context or "GLOBAL").strip().upper() or "GLOBAL"
-        if not approved:
+        if approved is not True:
             return {
                 "tool": "odi.run_scenario_safe",
                 "status": "blocked_until_approval",
@@ -1105,65 +1166,9 @@ class OdiOrchestrator:
                 ],
             }
 
-        with groovy_approval_context(approved):
-            output = str(self.run_scenario(scenario, scen_version, ctx) or "")
-        redacted = _redact_runtime_text(output)
-        upper = redacted.upper()
-        failed = (
-            upper.startswith("HATA:")
-            or "\nHATA:" in upper
-            or upper.startswith("ERROR:")
-            or "\nERROR:" in upper
-            or "FATAL ERROR" in upper
-            or "TRACEBACK" in upper
-        )
-        session_id = None
-        session_status = None
-        session_match = re.search(r"Session ID:\s*([A-Za-z0-9_.:-]+)", redacted)
-        if session_match:
-            session_id = session_match.group(1)
-        status_match = re.search(r"Status:\s*([A-Za-z0-9_.:-]+)", redacted)
-        if status_match:
-            session_status = status_match.group(1)
-
-        if failed:
-            error_line = next(
-                (
-                    line.strip()
-                    for line in redacted.splitlines()
-                    if re.search(r"\b(ODI-\d+|ORA-\d+|Caused By:|RuntimeAgent scenario execution failed)", line)
-                ),
-                next((line.strip() for line in redacted.splitlines() if line.strip()), "Scenario run failed."),
-            )
-            return {
-                "tool": "odi.run_scenario_safe",
-                "status": "failed",
-                "side_effects": True,
-                "will_run_scenario": True,
-                "repository_connection_attempted": True,
-                "scenario": {"name": scenario, "version": scen_version, "context": ctx},
-                "session": {"id": session_id, "status": session_status},
-                "error_class": error_line[:240],
-                "checks": [
-                    {"name": "scenario_allowlist", "status": "pass", "detail": "Scenario is allowlisted."},
-                    {"name": "scenario_run_completed", "status": "fail", "detail": "Scenario run returned an error."},
-                ],
-            }
-
-        return {
-            "tool": "odi.run_scenario_safe",
-            "status": "passed",
-            "side_effects": True,
-            "will_run_scenario": True,
-            "repository_connection_attempted": True,
-            "scenario": {"name": scenario, "version": scen_version, "context": ctx},
-            "session": {"id": session_id, "status": session_status},
-            "checks": [
-                {"name": "scenario_allowlist", "status": "pass", "detail": "Scenario is allowlisted."},
-                {"name": "raw_output_redacted", "status": "pass", "detail": "Wrapper returns structured evidence instead of raw runtime output."},
-                {"name": "scenario_run_completed", "status": "pass", "detail": "Scenario run wrapper did not detect an error."},
-            ],
-        }
+        mapping = scenario[:-4] if scenario.endswith("_SCN") else ""
+        return self.run_scenario_remote(approved=True, mapping_name=mapping, scenario_name=scenario,
+                                        version=scen_version, context=ctx)
 
     def run_products_ods_scenario_safe(
         self,
@@ -1200,37 +1205,11 @@ class OdiOrchestrator:
         }:
             return {**blocked, "status": "blocked_scenario_identity"}
 
-        with groovy_approval_context(True):
-            output = str(self.run_scenario(scenario, scen_version, ctx) or "")
-        redacted = _redact_runtime_text(output)
-        status_match = re.search(r"Status:\s*([A-Za-z0-9_.:-]+)", redacted)
-        session_status = status_match.group(1).upper() if status_match else None
-        upper = redacted.upper()
-        succeeded = (
-            session_status == "DONE"
-            and "SUCCESS:" in upper
-            and not upper.startswith(("HATA:", "ERROR:"))
-            and "\nHATA:" not in upper
-            and "\nERROR:" not in upper
-        )
-        if not succeeded:
-            return {
-                "status": "failed",
-                "scenario": identity,
-                "session_status": session_status,
-                "raw_output_included": False,
-                "session_id_included": False,
-                "side_effects": True,
-                "error_type": "ScenarioRunFailed",
-            }
-        return {
-            "status": "passed",
-            "scenario": identity,
-            "session_status": "DONE",
-            "raw_output_included": False,
-            "session_id_included": False,
-            "side_effects": True,
-        }
+        remote = remote_run_contract.parse(self.run_scenario_remote(
+            approved=True, mapping_name=scenario[:-4], scenario_name=scenario,
+            version=scen_version, context=ctx,
+        ), "run")
+        return {**blocked, **remote}
 
     def run_dim_product_scd2_scenario_safe(
         self,

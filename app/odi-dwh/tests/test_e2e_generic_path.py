@@ -840,6 +840,9 @@ _UNSUPPORTED = (
 
 def test_run_reports_ikm_option_unsupported_with_conflict_status(monkeypatch):
     from mapping_run_service import MappingRunOptions, execute_mapping_run
+    from tests.test_remote_run_contract import healthy
+
+    monkeypatch.setattr(OdiOrchestrator, "remote_agent_health", lambda *a, **kw: healthy())
 
     calls = []
     monkeypatch.setattr(
@@ -847,11 +850,11 @@ def test_run_reports_ikm_option_unsupported_with_conflict_status(monkeypatch):
     )
     monkeypatch.setattr(
         OdiOrchestrator,
-        "generate_scenario",
+        "generate_scenario_metadata",
         lambda self, *a, **k: calls.append("generate") or "SUCCESS",
     )
     monkeypatch.setattr(
-        OdiOrchestrator, "run_scenario", lambda self, *a, **k: calls.append("run") or "SUCCESS"
+        OdiOrchestrator, "run_scenario_remote", lambda self, *a, **k: calls.append("run") or "SUCCESS"
     )
 
     outcome = execute_mapping_run(
@@ -866,10 +869,12 @@ def test_run_reports_ikm_option_unsupported_with_conflict_status(monkeypatch):
 
 def test_run_continues_when_option_update_succeeds(monkeypatch):
     from mapping_run_service import MappingRunOptions, execute_mapping_run
+    from tests.test_remote_run_contract import healthy, generated, done
 
+    monkeypatch.setattr(OdiOrchestrator, "remote_agent_health", lambda *a, **kw: healthy())
     monkeypatch.setattr(OdiOrchestrator, "update_mapping", lambda self, **kw: "SUCCESS: ok")
-    monkeypatch.setattr(OdiOrchestrator, "generate_scenario", lambda self, *a, **k: "SUCCESS")
-    monkeypatch.setattr(OdiOrchestrator, "run_scenario", lambda self, *a, **k: "SUCCESS")
+    monkeypatch.setattr(OdiOrchestrator, "generate_scenario_metadata", lambda self, *a, **k: generated("MAP_X_SCN"))
+    monkeypatch.setattr(OdiOrchestrator, "run_scenario_remote", lambda self, *a, **k: done())
 
     outcome = execute_mapping_run(
         _FakeApp(), MappingRunOptions("MAP_X", "001", "GLOBAL", False)
