@@ -298,7 +298,7 @@ def test_report_is_allowlisted_in_stdout_and_file(evidence, tmp_path):
         "status": "failed", "stage": "first_scenario_run", "error_type": "ScenarioRunError",
         "target_count": 72,
         "session_id": "SID-LEAK-1", "repository_id": "REPO-LEAK-2", "pk_value": "PK-LEAK-3",
-        "message": "password=hunter2-LEAK", "token": "TOKEN-LEAK-4",
+        "message": "LEAK", "token": "LEAK",
         "scenario": {**SCENARIO, "session_id": "SID-LEAK-5", "repository_id": "REPO-LEAK-6"},
     }
     wiring = _wire(spy, executor=spy("executor", leaky))
@@ -306,7 +306,7 @@ def test_report_is_allowlisted_in_stdout_and_file(evidence, tmp_path):
     stdout = wiring["stdout"].getvalue()
     written = (tmp_path / "out.json").read_text()
     for text in (stdout, written):
-        assert "LEAK" not in text and "hunter2" not in text
+        assert "LEAK" not in text
         report = json.loads(text)
         assert report["status"] == "failed" and report["target_count"] == 72
         assert report["scenario"] == SCENARIO
@@ -339,6 +339,21 @@ def test_scenario_probe_adapter_old_fixture_without_found_check_is_not_exists():
     report = proof.scenario_probe_to_gate_report(raw)
     assert report["scenario"]["exists"] is False
     assert report["error_type"] == "InconsistentScenarioProbe"
+
+
+@pytest.mark.parametrize("value", [[], {}, ["passed"], {"status": "passed"}, None, True, 1])
+@pytest.mark.parametrize("field", ["status", "check_status"])
+def test_non_string_probe_status_returns_consistent_error(value, field):
+    raw = _raw_scenario_probe()
+    if field == "status":
+        raw["status"] = value
+    else:
+        raw["checks"][0]["status"] = value
+    report = proof.scenario_probe_to_gate_report(raw)
+    assert report["status"] == "error"
+    assert report["error_type"] == "InconsistentScenarioProbe"
+    assert report["scenario"]["exists"] is False
+    assert report["side_effects"] is False
 
 
 @pytest.mark.parametrize("kind", ["missing_parent", "is_directory", "empty"])

@@ -121,6 +121,7 @@ def _probe_consistent(raw: Mapping[str, Any], scenario: Mapping[str, Any]) -> bo
         and raw.get("mode") == _PROBE_MODE
         and raw.get("repository_connection_attempted") is True
         and len(found) == 1
+        and isinstance(found[0].get("status"), str)
         and found[0].get("status") in {"pass", "passed"}
         and latest == SCENARIO_VERSION
     )
@@ -150,6 +151,7 @@ def scenario_probe_to_gate_report(raw: object) -> dict[str, Any]:
     if (
         not isinstance(raw, Mapping)
         or raw.get("side_effects") is not False
+        or not isinstance(raw.get("status"), str)
         or raw.get("status") not in {"passed", "attention_required"}
         or not isinstance(scenario, Mapping)
         or scenario.get("name") != SCENARIO_NAME
