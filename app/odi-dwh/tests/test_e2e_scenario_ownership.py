@@ -139,17 +139,21 @@ def test_absent_exact_name_version_does_not_reuse_other_scenarios(scenario_resul
 
 @pytest.mark.parametrize("index", [0, 1, 2, 3, 4, 5])
 def test_actual_generator_decision_controls_real_run_pipeline(scenario_results, monkeypatch, index):
+    from tests.test_remote_run_contract import healthy, done
+
     calls = []
     payload = scenario_results[index]["payload"]
 
     def process_result(command, **kwargs):
         script = Path(command[-2]).name
         calls.append(script)
-        assert script in {"generate_scenario_metadata.groovy", "run_scenario.groovy"}
-        stdout = json.dumps(payload) if script == "generate_scenario_metadata.groovy" else "SUCCESS: synthetic run"
+        assert script in {"generate_scenario_metadata.groovy", "run_scenario_remote.groovy"}
+        stdout = json.dumps(payload) if script == "generate_scenario_metadata.groovy" else json.dumps(done())
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(OdiOrchestrator, "update_mapping", lambda *args, **kwargs: "SUCCESS")
+    monkeypatch.setattr(odi_orchestrator, "ODI_REST_URL", "http://synthetic:15101/oraclediagent")
+    monkeypatch.setattr(OdiOrchestrator, "remote_agent_health", lambda *args, **kwargs: healthy())
+    monkeypatch.setattr(OdiOrchestrator, "update_mapping", lambda *args, **kwargs: "SUCCESS: options updated")
     monkeypatch.setattr(odi_orchestrator, "_ensure_local_props_file", lambda: "SYNTHETIC_UNUSED.properties")
     monkeypatch.setattr(odi_orchestrator.subprocess, "run", process_result)
     persist = Mock()
@@ -162,7 +166,7 @@ def test_actual_generator_decision_controls_real_run_pipeline(scenario_results, 
 
     if index == 5:
         assert outcome.status_code == 200
-        assert calls == ["generate_scenario_metadata.groovy", "run_scenario.groovy"]
+        assert calls == ["generate_scenario_metadata.groovy", "run_scenario_remote.groovy"]
     else:
         assert calls == ["generate_scenario_metadata.groovy"]
         assert outcome.status_code == 400

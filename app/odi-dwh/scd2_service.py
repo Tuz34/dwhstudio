@@ -14,6 +14,7 @@ from typing import Any
 
 import oracledb
 
+import remote_run_contract
 import scd2_builder
 import scd2_odi
 import scd2_postflight
@@ -326,13 +327,17 @@ def run(
         return _invalid(exc)
 
     steps: list[dict[str, Any]] = []
+    orchestrator = services.orchestrator_factory()
+    health = remote_run_contract.parse(orchestrator.remote_agent_health(approved=True), "health")
+    steps.append({"step": "remote_agent_health", **health})
+    if health["status"] != "passed":
+        return {"status": "blocked_agent_preflight", "steps": steps}, 503
     is_scd2 = _target_is_scd2(spec, services)
     if is_scd2 is None:
         return {"status": "target_metadata_unavailable", "steps": steps}, 503
     if not is_scd2:
         return {"status": "blocked_target_not_scd2", "steps": steps}, 409
 
-    orchestrator = services.orchestrator_factory()
     probe_step = scd2_odi.probe(orchestrator, spec["probe"])
     steps.append(probe_step)
     if probe_step["status"] != "passed":
@@ -362,6 +367,8 @@ def run(
     before = scd2_postflight.collect_postflight(
         spec["target_owner"], spec["target_table"], spec["natural_key"], services.catalog_connection, source=source
     )
+    if before.get("status") != "ok":
+        return {"status": "blocked_count_preflight", "steps": steps, "preflight": before}, 503
     run_step = scd2_odi.run_scenario(
         orchestrator, spec["scenario_name"], spec["scenario_version"], spec["context"], True
     )
@@ -370,7 +377,7 @@ def run(
         spec["target_owner"], spec["target_table"], spec["natural_key"], services.catalog_connection, source=source
     )
     run_ok = run_step["status"] == "passed"
-    status = "run_completed" if run_ok else "run_failed"
+    status = "run_completed" if run_ok else "run_unknown" if run_step.get("outcome_unknown") else "run_failed"
     return (
         {
             "status": status,

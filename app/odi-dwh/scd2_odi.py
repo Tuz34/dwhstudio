@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+import remote_run_contract
 import scd2_builder
 from odi_orchestrator import groovy_approval_context
 
@@ -463,20 +464,20 @@ def run_scenario(
     approved: object,
 ) -> dict[str, Any]:
     """Run one `<mapping>_SCN` scenario through the existing safe wrapper."""
-    result = orchestrator.run_scenario_safe(
+    result = remote_run_contract.parse(orchestrator.run_scenario_remote(
         approved=approved is True,
+        mapping_name=scenario_name[:-4] if scenario_name.endswith("_SCN") else "",
         scenario_name=scenario_name,
         version=version,
         context=context,
-        extra_allowed_scenarios=frozenset({scenario_name}),
-    )
-    status = str(result.get("status") or "")
-    session = result.get("session") if isinstance(result.get("session"), Mapping) else {}
-    session_status = session.get("status")
+    ), "run")
     return _step(
         "odi_scenario_run",
-        "passed" if status == "passed" else status or "failed",
-        side_effects=result.get("side_effects") is True,
+        result["status"],
+        side_effects=result["side_effects"],
         scenario={"name": scenario_name, "version": version, "context": context},
-        session_status=session_status if isinstance(session_status, str) else None,
+        session_status=result["session_status"],
+        outcome_unknown=result["outcome_unknown"],
+        error_code=result["error_code"],
+        remote=result,
     )

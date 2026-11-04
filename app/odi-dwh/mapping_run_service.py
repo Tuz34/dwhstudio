@@ -6,6 +6,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, TypedDict
 
+import remote_run_contract
+
 
 class MappingRunSuccess(TypedDict):
     status: Literal["SUCCESS"]
@@ -13,10 +15,7 @@ class MappingRunSuccess(TypedDict):
     scenario: str
     version: str
     truncate_target_table: bool
-    message: str
-    option_log: str
-    generation_log: str
-    log: str
+    remote: dict
 
 
 class MappingRunFailure(TypedDict):
@@ -41,7 +40,7 @@ class MappingRunOptions:
 
 @dataclass(frozen=True)
 class MappingRunOutcome:
-    payload: MappingRunSuccess | MappingRunFailure | MappingRunUnsupported
+    payload: dict[str, Any]
     status_code: int
 
 
@@ -71,11 +70,25 @@ def validate_mapping_run_options(
     return MappingRunOptions(mapping_name, version, context, truncate_target_table), None
 
 
-def _is_odi_failure(output: object) -> bool:
-    upper = str(output or "").upper()
-    return any(token in upper for token in ("HATA:", "FATAL ERROR", "LKM VERIFY FAILED")) or any(
-        upper.startswith(token) or f"\n{token}" in upper for token in ("FATAL:", "ERROR:")
-    )
+def _options_updated(output: object) -> bool:
+    from odi_orchestrator import _groovy_output_failed
+
+    return (isinstance(output, str) and not _groovy_output_failed(output)
+            and any(line.startswith("SUCCESS:") for line in output.splitlines()))
+
+
+def _scenario_ready(value: object, name: str, version: str) -> bool:
+    if not isinstance(value, dict):
+        return False
+    scenario, checks = value.get("scenario"), value.get("checks")
+    return (value.get("tool") == "odi.generate_scenario_metadata"
+            and value.get("mode") == "scenario_metadata_generation"
+            and isinstance(value.get("status"), str) and value["status"] in {"passed", "already_ready"}
+            and type(value.get("side_effects")) is bool
+            and value.get("repository_connection_attempted") is True
+            and isinstance(scenario, dict) and scenario.get("name") == name and scenario.get("version") == version
+            and isinstance(checks, list) and bool(checks)
+            and all(isinstance(check, dict) and check.get("status") == "pass" for check in checks))
 
 
 def _state_payload(
@@ -238,12 +251,18 @@ def _unsupported_option_outcome(
 
 
 def execute_mapping_run(app_module: Any, options: MappingRunOptions) -> MappingRunOutcome:
-    from odi_orchestrator import OdiOrchestrator
+    from odi_orchestrator import OdiOrchestrator, groovy_is_approved
 
     batch_id = f"RUN-{uuid.uuid4().hex[:12].upper()}"
     scenario_name = f"{options.mapping_name}_SCN"
     completed_steps: list[str] = []
     orchestrator = OdiOrchestrator()
+
+    health = remote_run_contract.parse(orchestrator.remote_agent_health(approved=groovy_is_approved()), "health")
+    if health["status"] != "passed":
+        # No audit/state/option write is permitted before the health gate.
+        return MappingRunOutcome({"status": "blocked", "remote": health},
+                                 400 if health["error_code"] == "ApprovalRequired" else 503)
 
     option_result = orchestrator.update_mapping(
         mapping_name=options.mapping_name,
@@ -255,27 +274,38 @@ def execute_mapping_run(app_module: Any, options: MappingRunOptions) -> MappingR
         return _unsupported_option_outcome(
             app_module, options, batch_id, scenario_name, completed_steps, unsupported_option
         )
-    if _is_odi_failure(option_result):
+    if not _options_updated(option_result):
         return _failure_outcome(
             app_module, options, batch_id, scenario_name, "update_km", completed_steps,
-            f"Scenario option update failed: {option_result}", "Scenario option update failed.", 500,
+            "MappingOptionsFailed", "Scenario option update failed.", 500,
         )
     completed_steps.append("update_km")
 
-    generation_result = orchestrator.generate_scenario(scenario_name, options.mapping_name, options.version)
-    if _is_odi_failure(generation_result):
+    generation_result = orchestrator.generate_scenario_metadata(
+        approved=groovy_is_approved(), scenario_name=scenario_name,
+        mapping_name=options.mapping_name, version=options.version,
+    )
+    if not _scenario_ready(generation_result, scenario_name, options.version):
         return _failure_outcome(
             app_module, options, batch_id, scenario_name, "generate_scenario", completed_steps,
-            f"Scenario generation failed: {generation_result}", "Scenario generation failed.", 400,
+            "ScenarioGenerationFailed", "Scenario generation failed.", 400,
         )
     completed_steps.append("generate_scenario")
 
-    run_result = orchestrator.run_scenario(scenario_name, options.version, options.context)
-    if _is_odi_failure(run_result):
-        return _failure_outcome(
-            app_module, options, batch_id, scenario_name, "run_scenario", completed_steps,
-            f"Scenario run failed:\n{run_result}", "Scenario run failed.", 500,
+    run_result = remote_run_contract.parse(orchestrator.run_scenario_remote(
+        approved=groovy_is_approved(), mapping_name=options.mapping_name,
+        scenario_name=scenario_name, version=options.version, context=options.context,
+    ), "run")
+    if run_result["status"] != "passed":
+        _persist_run_state(
+            app_module, options, batch_id, scenario_name, "run_scenario",
+            "RUN_UNKNOWN" if run_result["outcome_unknown"] else "RUN_FAILED", completed_steps,
+            run_result["error_code"],
         )
+        _create_failure_alert(app_module, options, batch_id, scenario_name, "run_scenario",
+                              run_result["error_code"])
+        return MappingRunOutcome({"status": run_result["status"], "remote": run_result, "batch_id": batch_id},
+                                 504 if run_result["error_code"] == "RemoteTimeout" else 502)
     completed_steps.append("run_scenario")
     _persist_run_state(
         app_module, options, batch_id, scenario_name, "run_scenario", "SUCCEEDED", completed_steps
@@ -286,9 +316,6 @@ def execute_mapping_run(app_module: Any, options: MappingRunOptions) -> MappingR
         "scenario": scenario_name,
         "version": options.version,
         "truncate_target_table": options.truncate_target_table,
-        "message": f"{scenario_name} scenario ran successfully.",
-        "option_log": app_module.redact_sensitive_text(option_result, max_len=12000),
-        "generation_log": app_module.redact_sensitive_text(generation_result, max_len=12000),
-        "log": app_module.redact_sensitive_text(run_result, max_len=12000),
+        "remote": run_result,
     }
     return MappingRunOutcome(payload, 200)

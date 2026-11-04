@@ -10,11 +10,11 @@ import scd2_service
 from tests.scd2_support import (
     REQUEST,
     SOURCE_COLUMNS,
-    FakeOrchestrator,
     make_services,
     plan_catalog_rows,
     probe_payload,
 )
+from tests.test_remote_run_contract import RemoteFakeOrchestrator as FakeOrchestrator
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 if str(WORKSPACE_ROOT) not in sys.path:

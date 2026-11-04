@@ -10,13 +10,13 @@ import scd2_postflight
 from tests.scd2_support import (
     REQUEST,
     SOURCE_COLUMNS,
-    FakeOrchestrator,
     connection_factory,
     error_payload,
     mapping_payload,
     probe_payload,
     register_payload,
 )
+from tests.test_remote_run_contract import RemoteFakeOrchestrator as FakeOrchestrator
 
 
 @pytest.fixture
@@ -165,12 +165,13 @@ def test_scenario_generation_statuses(plan):
     assert kwargs["scenario_name"] == "MAP_ODS_CUST_TO_DIM_CUST_SCN" and kwargs["version"] == "001"
 
 
-def test_run_scenario_extends_the_allowlist_to_exactly_one_scenario(plan):
+def test_run_scenario_passes_exact_mapping_and_scenario_to_remote_runner(plan):
     orchestrator = FakeOrchestrator(plan)
     step = scd2_odi.run_scenario(orchestrator, plan["scenario_name"], "001", "GLOBAL", True)
     assert step["status"] == "passed"
     kwargs = orchestrator.calls[0][1]
-    assert kwargs["extra_allowed_scenarios"] == frozenset({"MAP_ODS_CUST_TO_DIM_CUST_SCN"})
+    assert kwargs["mapping_name"] == "MAP_ODS_CUST_TO_DIM_CUST"
+    assert kwargs["scenario_name"] == "MAP_ODS_CUST_TO_DIM_CUST_SCN"
     assert kwargs["approved"] is True
 
 

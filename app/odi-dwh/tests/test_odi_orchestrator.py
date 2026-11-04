@@ -1048,11 +1048,14 @@ def test_run_scenario_safe_blocks_non_allowlisted_scenario(monkeypatch):
 
 
 def test_run_scenario_safe_returns_structured_success(monkeypatch):
+    from tests.test_remote_run_contract import done
+
     orch = OdiOrchestrator()
+    monkeypatch.setattr(orch, "_remote_configuration_ready", lambda: True)
     monkeypatch.setattr(
         orch,
-        "run_scenario",
-        lambda *_args, **_kwargs: "STEP 3: Scenario completed\n  Session ID: 12345\n  Status: DONE\nSUCCESS",
+        "run_groovy",
+        lambda *_args, **_kwargs: json.dumps(done()),
     )
 
     result = orch.run_scenario_safe(
@@ -1062,16 +1065,18 @@ def test_run_scenario_safe_returns_structured_success(monkeypatch):
     )
 
     assert result["status"] == "passed"
-    assert result["will_run_scenario"] is True
-    assert result["session"] == {"id": "12345", "status": "DONE"}
+    assert result["run_may_have_started"] is True
+    assert result["session_status"] == "DONE"
+    assert "session_id" not in result
     assert "raw_output" not in result
 
 
 def test_run_scenario_safe_redacts_failure_output(monkeypatch):
     orch = OdiOrchestrator()
+    monkeypatch.setattr(orch, "_remote_configuration_ready", lambda: True)
     monkeypatch.setattr(
         orch,
-        "run_scenario",
+        "run_groovy",
         lambda *_args, **_kwargs: "ERROR: password=abc jdbc:oracle:thin:@host:1521/orcl failed",
     )
 
@@ -1081,16 +1086,17 @@ def test_run_scenario_safe_redacts_failure_output(monkeypatch):
         version="V44A",
     )
 
-    assert result["status"] == "failed"
-    assert "abc" not in result["error_class"]
-    assert "jdbc:oracle" not in result["error_class"]
+    assert result["status"] == "unknown"
+    assert "abc" not in str(result)
+    assert "jdbc:oracle" not in str(result)
 
 
-def test_run_scenario_safe_prefers_meaningful_odi_error(monkeypatch):
+def test_run_scenario_safe_does_not_return_raw_odi_error(monkeypatch):
     orch = OdiOrchestrator()
+    monkeypatch.setattr(orch, "_remote_configuration_ready", lambda: True)
     monkeypatch.setattr(
         orch,
-        "run_scenario",
+        "run_groovy",
         lambda *_args, **_kwargs: (
             "Hata: Jun 19 log line\n"
             "INFO: noisy setup\n"
@@ -1105,8 +1111,9 @@ def test_run_scenario_safe_prefers_meaningful_odi_error(monkeypatch):
         version="V45A",
     )
 
-    assert result["status"] == "failed"
-    assert result["error_class"].startswith("ODI-1217")
+    assert result["status"] == "unknown"
+    assert result["error_code"] == "RemoteOutputInvalid"
+    assert "ODI-1217" not in str(result) and "ORA-02019" not in str(result)
 
 
 def test_create_load_plan_metadata_blocks_without_approval(monkeypatch):

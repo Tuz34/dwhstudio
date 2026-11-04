@@ -2,11 +2,12 @@ from __future__ import annotations
 
 
 def test_products_runner_blocks_truthy_approval_before_runtime(monkeypatch):
+    import odi_orchestrator
     from odi_orchestrator import OdiOrchestrator
 
     orch = OdiOrchestrator()
     called = []
-    monkeypatch.setattr(orch, "run_scenario", lambda *args, **kwargs: called.append((args, kwargs)))
+    monkeypatch.setattr(odi_orchestrator.subprocess, "run", lambda *args, **kwargs: called.append((args, kwargs)))
 
     result = orch.run_products_ods_scenario_safe(
         approved="yes",
@@ -21,11 +22,12 @@ def test_products_runner_blocks_truthy_approval_before_runtime(monkeypatch):
 
 
 def test_products_runner_blocks_wrong_scope_and_identity_before_runtime(monkeypatch):
+    import odi_orchestrator
     from odi_orchestrator import OdiOrchestrator
 
     orch = OdiOrchestrator()
     called = []
-    monkeypatch.setattr(orch, "run_scenario", lambda *args, **kwargs: called.append((args, kwargs)))
+    monkeypatch.setattr(odi_orchestrator.subprocess, "run", lambda *args, **kwargs: called.append((args, kwargs)))
 
     wrong_scope = orch.run_products_ods_scenario_safe(
         approved=True,
@@ -49,15 +51,10 @@ def test_products_runner_blocks_wrong_scope_and_identity_before_runtime(monkeypa
 
 def test_products_runner_returns_fixed_success_without_session_identifier(monkeypatch):
     from odi_orchestrator import OdiOrchestrator
+    from tests.test_remote_run_contract import done, mock_process
 
     orch = OdiOrchestrator()
-    called = []
-
-    def fake_run(name, version, context):
-        called.append((name, version, context))
-        return "Session ID: 12345\nStatus: DONE\nSUCCESS: Scenario completed successfully."
-
-    monkeypatch.setattr(orch, "run_scenario", fake_run)
+    called = mock_process(monkeypatch)
     result = orch.run_products_ods_scenario_safe(
         approved=True,
         approval_scope="odi68_products_ods_scenario_run_and_rerun_proof",
@@ -67,32 +64,32 @@ def test_products_runner_returns_fixed_success_without_session_identifier(monkey
     )
 
     assert result == {
-        "status": "passed",
+        **done(),
         "scenario": {
             "name": "MAP_SH_PRODUCTS_TO_ODS_SCN",
             "version": "001",
             "context": "GLOBAL",
         },
-        "session_status": "DONE",
         "raw_output_included": False,
         "session_id_included": False,
-        "side_effects": True,
     }
-    assert called == [("MAP_SH_PRODUCTS_TO_ODS_SCN", "001", "GLOBAL")]
-    assert "12345" not in str(result)
+    assert called == ["run_scenario_remote.groovy"]
+    assert "session_id" not in result
 
 
 def test_products_runner_fails_closed_on_error_or_incomplete_success(monkeypatch):
     from odi_orchestrator import OdiOrchestrator
+    from tests.test_remote_run_contract import mock_process
 
     orch = OdiOrchestrator()
     outputs = [
         "Hata: ODI Groovy action failed. error_type=GroovyProcessError",
         "Status: RUNNING",
+        "Session ID: 12345\nStatus: DONE\nSUCCESS: Scenario completed successfully.",
     ]
 
     for output in outputs:
-        monkeypatch.setattr(orch, "run_scenario", lambda *_args, value=output, **_kwargs: value)
+        called = mock_process(monkeypatch, stdout=output)
         result = orch.run_products_ods_scenario_safe(
             approved=True,
             approval_scope="odi68_products_ods_scenario_run_and_rerun_proof",
@@ -101,10 +98,13 @@ def test_products_runner_fails_closed_on_error_or_incomplete_success(monkeypatch
             context="GLOBAL",
         )
 
-        assert result["status"] == "failed"
-        assert result["error_type"] == "ScenarioRunFailed"
+        assert result["status"] == "unknown"
+        assert result["error_code"] == "RemoteOutputInvalid"
+        assert result["outcome_unknown"] is True
         assert result["raw_output_included"] is False
         assert result["session_id_included"] is False
+        assert called == ["run_scenario_remote.groovy"]
+        assert "12345" not in str(result)
         assert output not in str(result)
 
 
