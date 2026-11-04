@@ -267,16 +267,28 @@ def api_preview(table_name):
 @bp.route("/api/source/preview/<path:table_name>")
 def api_source_preview(table_name):
     app_module = get_app_module()
-    if not re.match(r"^[A-Za-z0-9_$]+\.[A-Za-z0-9_$]+$", table_name):
+    from source_connector import (
+        SourceSchemaNotAllowed,
+        get_source_connector,
+        parse_qualified_source_name,
+        require_source_schema,
+    )
+
+    try:
+        owner, table = parse_qualified_source_name(table_name)
+        require_source_schema(owner)
+    except SourceSchemaNotAllowed:
+        return jsonify({"error": "Source schema is not allowed."}), 403
+    except ValueError:
         return jsonify({"error": "Invalid table name format."}), 400
     try:
-        from source_connector import get_source_connector
-
-        df = get_source_connector().sample_data(table_name, 3)
+        df = get_source_connector().sample_data(f"{owner}.{table}", 3)
         return jsonify({
             "columns": list(df.columns),
             "rows": app_module.df_to_jsonable(df),
         })
+    except SourceSchemaNotAllowed:
+        return jsonify({"error": "Source schema is not allowed."}), 403
     except Exception as exc:
         return redacted_error("Schema read", exc)
 

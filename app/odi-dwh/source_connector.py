@@ -21,6 +21,7 @@ Interface methods (based on current db.py usage):
     type_to_oracle(src_type)     -> str         (Oracle target type)
 """
 import logging
+import re
 from abc import ABC, abstractmethod
 from functools import lru_cache
 
@@ -30,6 +31,77 @@ import config
 from exceptions import DatabaseQueryError
 
 logger = logging.getLogger("dwh_app.source_connector")
+
+# Oracle identifier shape. Checked before any SQL is built. Quoted identifiers
+# are used only after this match; values such as the row limit stay bound.
+_SOURCE_IDENTIFIER_RE = re.compile(r"^[A-Z0-9_$#]{1,30}$")
+_SOURCE_SCHEMA_DENIED = "Source schema is not allowed."
+
+
+class SourceSchemaNotAllowed(Exception):
+    """The requested owner is outside the configured source schema allowlist."""
+
+    def __init__(self) -> None:
+        super().__init__(_SOURCE_SCHEMA_DENIED)
+
+
+def normalize_source_identifier(value: str) -> str:
+    """Return an uppercase identifier, or raise before any SQL is built."""
+    text = (value or "").strip().upper()
+    if _SOURCE_IDENTIFIER_RE.fullmatch(text) is None:
+        raise ValueError("Invalid source identifier.")
+    return text
+
+
+def parse_qualified_source_name(table_name: str) -> tuple[str, str]:
+    """Split OWNER.TABLE and validate both identifiers. Never echo the raw text."""
+    parts = (table_name or "").split(".")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError("Invalid source identifier.")
+    return normalize_source_identifier(parts[0]), normalize_source_identifier(parts[1])
+
+
+def _configured_schema_name(item: object) -> str | None:
+    try:
+        return normalize_source_identifier(str(item))
+    except ValueError:
+        return None
+
+
+def configured_source_schemas() -> frozenset[str]:
+    """Return configured source schema names, ignoring invalid entries.
+
+    An empty result means nothing was configured. It is not an open allowlist:
+    require_source_schema fails closed to HR and SH in that case.
+    """
+    raw_values = getattr(config, "SOURCE_ORACLE_SCHEMAS", None) or []
+    return frozenset(
+        name for item in raw_values if (name := _configured_schema_name(item)) is not None
+    )
+
+
+def require_source_schema(owner: str) -> str:
+    """Single choke point for source-preview schema authorization.
+
+    A configured allowlist is closed. An empty SOURCE_ORACLE_SCHEMAS value
+    fails closed to the historical HR and SH default used by ai_helpers.
+    """
+    normalized = normalize_source_identifier(owner)
+    allowed = configured_source_schemas() or frozenset({"HR", "SH"})
+    if normalized not in allowed:
+        logger.info("Source schema preview rejected for a sanitized identifier.")
+        raise SourceSchemaNotAllowed()
+    return normalized
+
+
+def _coerce_row_limit(limit: int, default: int = 100) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return default
+    if value < 1:
+        return default
+    return value
 
 
 def _display_dsn(dsn: str | None) -> str:
@@ -231,8 +303,14 @@ class OracleSourceConnector(SourceConnector):
 
     def sample_data(self, table_name: str, limit: int = 100) -> pd.DataFrame:
         schema, tname = self._split(table_name, self.schemas[0] if self.schemas else "HR")
-        sql = f'SELECT * FROM "{schema.upper()}"."{tname.upper()}" FETCH FIRST {int(limit)} ROWS ONLY'
-        return self.execute_select(sql)
+        schema_name = require_source_schema(schema)
+        table_ident = normalize_source_identifier(tname)
+        row_limit = _coerce_row_limit(limit)
+        sql = (
+            f'SELECT * FROM "{schema_name}"."{table_ident}" '
+            "FETCH FIRST :preview_limit ROWS ONLY"
+        )
+        return self.execute_select(sql, {"preview_limit": row_limit})
 
     def execute_select(self, sql: str, params=None) -> pd.DataFrame:
         conn = self._connect()
@@ -366,7 +444,13 @@ class MssqlSourceConnector(SourceConnector):
 
     def sample_data(self, table_name: str, limit: int = 100) -> pd.DataFrame:
         schema, tname = self._split(table_name, "dbo")
-        return self.execute_select(f"SELECT TOP {int(limit)} * FROM [{schema}].[{tname}]")
+        schema_name = require_source_schema(schema)
+        table_ident = normalize_source_identifier(tname)
+        row_limit = _coerce_row_limit(limit)
+        return self.execute_select(
+            f"SELECT TOP (?) * FROM [{schema_name}].[{table_ident}]",
+            (row_limit,),
+        )
 
     def execute_select(self, sql: str, params=None) -> pd.DataFrame:
         try:
