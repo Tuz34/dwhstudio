@@ -76,7 +76,7 @@ TABLE SELECTION RULES (CRITICAL):
     Example: DWH_FLAT_FILE_V1 does NOT have PRODUCTID. Do not use it for product joins.
 15. "ODS" tables contain the true source data; prefer them over FLAT_FILE tables.
 16. REFER TO PREVIOUS ACTIONS: If the conversation history shows you just suggested or created a mapping, "the table" or "that table" refers to the TARGET table of that mapping.
-17. Use the past mapping run records section of the RAG context (its header is emitted verbatim by the RAG module and currently reads "GEÇMİŞ MAPPING ÇALIŞTIRMA KAYITLARI", i.e. "PAST MAPPING RUN RECORDS") to identify which tables were recently modeled.
+17. Use the "PAST MAPPING RUN RECORDS" section of the RAG context to identify which tables were recently modeled.
 18. If a user asks to "select from the table" after a mapping creation, use the target table (e.g., ODS_PRODUCTION_PRODUCT) in the SELECT query.
 19. Always prefer ODS tables found in the RAG context over generic guesses.
 20. If you are unsure about the context, check the conversation history for the most recent table name mentioned.

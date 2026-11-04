@@ -1081,7 +1081,7 @@ def node_privacy_classifier(state: OrchestratorState) -> dict[str, Any]:
     privacy = "restricted" if any(p in prompt.upper() for p in sensitive_patterns) else "metadata_only"
     warnings = list(state.get("warnings", []))
     if privacy == "restricted":
-        warnings.append("Prompt credential/secret benzeri ifade iceriyor; cloud review kapali tutulmali.")
+        warnings.append("Prompt contains credential/secret-like text; cloud review must stay disabled.")
     return {
         "privacy_level": privacy,
         "warnings": warnings,

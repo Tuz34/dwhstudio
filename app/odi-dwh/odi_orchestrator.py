@@ -314,7 +314,7 @@ class OdiOrchestrator:
     def _build_classpath(self) -> str:
         """Builds the ODI SDK + OJDBC + Groovy classpath."""
         sep = ";"
-        # odi-core.jar buyuk jar (29MB) — mapping, project, domain siniflari
+        # odi-core.jar is a large jar (29MB) — mapping, project, and domain classes
         odi_core = os.path.join(_ODI_SDK_LIB, "odi-core.jar")
         # All JARs under sdk/lib (wildcard)
         sdk_wildcard = os.path.join(_ODI_SDK_LIB, "*")
@@ -523,7 +523,7 @@ class OdiOrchestrator:
 
         Args:
             mapping_name: Existing mapping name.
-            operation: Operasyon tipi (update_expression, update_filter, update_km, rename).
+            operation: Operation type (update_expression, update_filter, update_km, rename).
             new_mapping_name: New mapping name (for rename).
             expressions: Column mapping dictionary (for update_expression).
                 Example: {"NAMEE": "Product.Name", "UPDATE_DATE": "SYSDATE"}

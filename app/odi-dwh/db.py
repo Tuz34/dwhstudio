@@ -215,7 +215,7 @@ def get_mssql_table_comment(table_name: str) -> str:
 
 
 def get_table_schema(table_name: str) -> pd.DataFrame:
-    # Split the DWH.TABLO_ADI format
+    # Split the DWH.TABLE_NAME format
     if '.' in table_name:
         owner, tname = table_name.split('.', 1)
     else:

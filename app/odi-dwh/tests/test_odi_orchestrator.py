@@ -1052,7 +1052,7 @@ def test_run_scenario_safe_returns_structured_success(monkeypatch):
     monkeypatch.setattr(
         orch,
         "run_scenario",
-        lambda *_args, **_kwargs: "STEP 3: Senaryo tamamlandi\n  Session ID: 12345\n  Status: DONE\nSUCCESS",
+        lambda *_args, **_kwargs: "STEP 3: Scenario completed\n  Session ID: 12345\n  Status: DONE\nSUCCESS",
     )
 
     result = orch.run_scenario_safe(

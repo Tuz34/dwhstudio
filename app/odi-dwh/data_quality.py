@@ -582,7 +582,7 @@ class DataQualityManager:
                     result.add_violation(rule, violation_count)
                     level = logger.warning if rule.severity == "ERROR" else logger.info
                     level(
-                        "❌ %s.%s — %s: %d ihlal (%s)",
+                        "❌ %s.%s — %s: %d violations (%s)",
                         owner, table_name, rule.rule_name, violation_count, rule.severity
                     )
                 else:
@@ -789,7 +789,7 @@ class DataQualityManager:
                     result.add_violation(rule, violation_count)
                     level = logger.warning if rule.severity == "ERROR" else logger.info
                     level(
-                        "ERR_ INSERT: %s.%s — %s: %d ihlal",
+                        "ERR_ INSERT: %s.%s — %s: %d violations",
                         owner, table_name, rule.rule_name, violation_count
                     )
 

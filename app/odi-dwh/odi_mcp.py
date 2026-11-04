@@ -14,7 +14,7 @@ def execute_odi_select(sql: str) -> pd.DataFrame:
     conn = oracledb.connect(user=ODI_REPO_USER, password=ODI_REPO_PASSWORD, dsn=ODI_REPO_DSN or ORACLE_DSN)
     try:
         df = pd.read_sql(sql, conn)
-        # datetime tipindeki verileri string yap
+        # Convert datetime values to strings
         for col in df.select_dtypes(include=['datetime64', 'datetimetz']).columns:
             df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
         return df
