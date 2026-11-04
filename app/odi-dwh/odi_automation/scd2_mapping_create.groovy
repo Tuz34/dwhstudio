@@ -34,6 +34,7 @@ import oracle.odi.domain.runtime.scenario.finder.IOdiScenarioFinder
 
 final String TOOL = "odi.scd2_mapping_create"
 final String MODE = "generic_absent_only_scd2_mapping_creation"
+final List<String> AUDIT_OVERWRITE_COLUMNS = ["INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"]
 final String TARGET_IKM = "IKM Oracle Slowly Changing Dimension"
 final String LKM_NAME = "LKM SQL to Oracle (Built-In)"
 final java.util.regex.Pattern ID = ~/^[A-Z0-9_#]{1,30}$/
@@ -54,7 +55,7 @@ def safeFlags = {
 
 // Fixed allowlisted reason codes or the exception class simple name; the exception
 // message is never returned (it could carry repository values).
-final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable", "ProjectFolderUnavailable", "MappingAlreadyExists", "ScenarioAlreadyExists", "SourceDatastoreUnavailable", "TargetDatastoreUnavailable", "SourceColumnsMissing", "ScdRoleContractMismatch", "IkmUnavailable", "LkmUnavailable", "IkmIntegrationTypeMismatch", "IntegrationTypeMismatch", "SourceAttributeUnavailable", "UnmappedTargetAttribute", "TargetPhysicalNodeUnavailable", "StagingLocationUnavailable", "TargetNodeLostAfterReset", "IkmAssignmentMismatch", "LkmAssignmentMismatch", "LkmDbLinkRemains", "MappingCoverageMismatch"] as Set
+final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable", "ProjectFolderUnavailable", "MappingAlreadyExists", "ScenarioAlreadyExists", "SourceDatastoreUnavailable", "TargetDatastoreUnavailable", "SourceColumnsMissing", "ScdRoleContractMismatch", "IkmUnavailable", "LkmUnavailable", "IkmIntegrationTypeMismatch", "IntegrationTypeMismatch", "SourceAttributeUnavailable", "UnmappedTargetAttribute", "TargetPhysicalNodeUnavailable", "StagingLocationUnavailable", "TargetNodeLostAfterReset", "IkmAssignmentMismatch", "LkmAssignmentMismatch", "LkmDbLinkRemains", "MappingCoverageMismatch", "IkmOptionMismatch"] as Set
 def reasonCode = { Exception e ->
     String message = e.getMessage()
     if (e instanceof IllegalStateException && message != null && REASON_CODES.contains(message)) {
@@ -170,7 +171,8 @@ try {
         END_TIMESTAMP: ["EFFECTIVE_TO"],
         CURRENT_RECORD_FLAG: ["CURRENT_FLAG"],
         ADD_ROW_ON_CHANGE: tracked,
-        OVERWRITE_ON_CHANGE: overwrite,
+        // The registrar also marks the four fixed audit columns OVERWRITE_ON_CHANGE.
+        OVERWRITE_ON_CHANGE: overwrite + AUDIT_OVERWRITE_COLUMNS,
     ]
     expectedRoles.each { String roleName, List<String> expectedColumns ->
         List<String> actual = target.getColumns().findAll { it.getScdType()?.name() == roleName }

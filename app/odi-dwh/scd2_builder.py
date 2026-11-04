@@ -95,6 +95,17 @@ def identifier_list(value: object, code: str) -> list[str]:
     return _identifier_list(value, code)
 
 
+def _timestamp_plan_type(data_type: str) -> str:
+    """TIMESTAMP(n) -> bare TIMESTAMP for the default precision 6, TIMESTAMP(n) for 0..9, else rejected."""
+    match = re.fullmatch(r"TIMESTAMP\(([0-9]+)\)", data_type)
+    if match is None:
+        return "TIMESTAMP"  # e.g. WITH (LOCAL) TIME ZONE variants keep the previous behaviour
+    precision = int(match.group(1))
+    if precision > 9:
+        raise Scd2PlanError("invalid_timestamp_precision")
+    return "TIMESTAMP" if precision == 6 else f"TIMESTAMP({precision})"
+
+
 def normalize_source_columns(
     columns: Iterable[Mapping[str, object]],
 ) -> list[dict[str, Any]]:
@@ -108,7 +119,7 @@ def normalize_source_columns(
         data_type = re.sub(r"\s+", "", str(item.get("data_type") or "").upper())
         data_type = re.sub(r"(\d)(BYTE|CHAR)\)", r"\1 \2)", data_type)
         if data_type.startswith("TIMESTAMP(") and ")" in data_type:
-            data_type = "TIMESTAMP"
+            data_type = _timestamp_plan_type(data_type)
         if not IDENTIFIER_RE.fullmatch(name) or name in seen or not data_type:
             raise Scd2PlanError("invalid_source_columns")
         seen.add(name)

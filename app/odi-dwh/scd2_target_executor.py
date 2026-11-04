@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -42,6 +43,9 @@ def _full_type(
     """
     base = str(data_type or "").upper()
     if base.startswith("TIMESTAMP"):
+        match = re.fullmatch(r"TIMESTAMP\(([0-9])\)", base)
+        if match is not None and match.group(1) != "6":
+            return f"TIMESTAMP({match.group(1)})"
         return "TIMESTAMP"
     if base in {"VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"}:
         semantics = str(char_used or "").upper()

@@ -232,9 +232,15 @@ try {
         }
         ordered.each { column ->
             // Read-back: registered lengths must match the plan and stay inside the Oracle masks.
-            String code = column.getDataTypeCode()
+            String code = column.getDataType()?.getCode()
             Integer actualLength = column.getLength()
-            if (actualLength != expectedLengths[column.getName()] ||
+            Integer wantedLength = expectedLengths[column.getName()]
+            if (code == "NUMBER") {
+                // Bare NUMBER is the 0/-127 sentinel; the SDK reports its length as null or 0.
+                actualLength = actualLength ?: 0
+                wantedLength = wantedLength ?: 0
+            }
+            if (actualLength != wantedLength ||
                 (code == "TIMESTAMP" && (actualLength == null || actualLength < 0 || actualLength > 9)) ||
                 (code == "NUMBER" && actualLength != null && actualLength > 38)) {
                 throw new IllegalStateException("ColumnMetadataMismatch")

@@ -293,3 +293,31 @@ def test_audit_columns_are_overwrite_on_change_and_core_roles_unchanged():
     assert roles[plan["surrogate_key"]["column"]] == "SURROGATE_KEY"
     assert "NONE" not in roles.values()
     assert plan["overwrite_attributes"] == []  # audit columns are not user overwrite attributes
+
+
+def _plan_with_timestamp(data_type):
+    cols = [c for c in small_columns() if c["name"] != "UPDATED_ON"]
+    cols.append({"name": "UPDATED_ON", "data_type": data_type, "nullable": True})
+    return build_scd2_plan(request(tracked_columns=["CUST_NAME", "UPDATED_ON"]), cols)
+
+
+def test_plan_keeps_non_default_timestamp_precision_through_ddl_and_registration():
+    plan = _plan_with_timestamp("TIMESTAMP(3)")
+    types = {c["name"]: c["data_type"] for c in plan["target_columns"]}
+    assert types["UPDATED_ON"] == "TIMESTAMP(3)"
+    assert scd2_builder.oracle_ddl_type("TIMESTAMP(3)") == "TIMESTAMP(3)"
+    assert _column_type_map(plan)["UPDATED_ON"] == "TIMESTAMP_3"
+    assert _column_type_map(_plan_with_timestamp("TIMESTAMP(6)"))["UPDATED_ON"] == "TIMESTAMP_6"
+
+
+def test_plan_rejects_timestamp_precision_above_nine():
+    with pytest.raises(Scd2PlanError) as info:
+        _plan_with_timestamp("TIMESTAMP(50)")
+    assert info.value.code == "invalid_timestamp_precision"
+
+
+def test_catalog_timestamp_precision_round_trips():
+    import scd2_target_executor as ex
+
+    assert ex._full_type("TIMESTAMP(3)", 11, None, None) == "TIMESTAMP(3)"
+    assert ex._full_type("TIMESTAMP(6)", 11, None, None) == "TIMESTAMP"

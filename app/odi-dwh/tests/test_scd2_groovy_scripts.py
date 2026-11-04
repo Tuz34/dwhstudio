@@ -250,7 +250,7 @@ def test_register_scripts_set_timestamp_precision_and_read_back_lengths():
     assert generic.index("ColumnMetadataMismatch") < generic.index("txnMgr.commit(txnStatus)")
     fixed = read("dim_product_scd2_datastore_register.groovy")
     assert fixed.count('dataType: "TIMESTAMP", length: 6,') == 2
-    assert "actualLength > 9" in fixed
+    assert "actualLength != 6" in fixed
 
 
 def test_register_script_gives_audit_columns_overwrite_behaviour():
@@ -264,4 +264,15 @@ def test_mapping_script_turns_flow_and_static_control_off_and_reads_back():
     assert '"FLOW_CONTROL", "STATIC_CONTROL"' in text
     assert "getIKMOptionValue(optionName)?.setValue(false)" in text
     assert "IkmOptionMismatch" in text
-    assert text.index("setValue(false)") < text.index("IkmOptionMismatch") < text.index("txnMgr.commit(txnStatus)")
+    assert text.index("setValue(false)") < text.rindex("IkmOptionMismatch") < text.index("txnMgr.commit(txnStatus)")
+
+
+def test_round2_groovy_review_fixes():
+    reg = read("scd2_datastore_register.groovy")
+    assert "getDataTypeCode()" not in reg.split("Read-back")[1]
+    assert "column.getDataType()?.getCode()" in reg
+    assert "actualLength ?: 0" in reg and "wantedLength ?: 0" in reg  # bare NUMBER sentinel
+    mapping = read("scd2_mapping_create.groovy")
+    assert "overwrite + AUDIT_OVERWRITE_COLUMNS" in mapping
+    assert '"IkmOptionMismatch"]' in mapping  # structured-error allowlist
+    assert "actualLength != 6" in read("dim_product_scd2_datastore_register.groovy")

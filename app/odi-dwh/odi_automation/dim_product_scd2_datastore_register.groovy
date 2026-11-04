@@ -188,7 +188,7 @@ try {
             }
             Integer actualLength = column.getLength()
             if (definition.dataType == "TIMESTAMP" &&
-                (actualLength == null || actualLength < 0 || actualLength > 9)) {
+                actualLength != 6) {
                 throw new IllegalStateException("Created column metadata does not match fixed contract")
             }
         }
