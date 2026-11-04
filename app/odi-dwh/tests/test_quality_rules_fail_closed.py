@@ -65,15 +65,18 @@ class RecordingCursor:
 
 
 class RecordingConnection:
-    def __init__(self, cursor: RecordingCursor):
+    def __init__(self, cursor: RecordingCursor, commit_error: BaseException | None = None):
         self._cursor = cursor
         self.committed = False
         self.rolled_back = False
+        self._commit_error = commit_error
 
     def cursor(self):
         return self._cursor
 
     def commit(self):
+        if self._commit_error is not None:
+            raise self._commit_error
         self.committed = True
 
     def rollback(self):
@@ -172,11 +175,11 @@ def test_supported_not_null_violation_still_fails(app_client, monkeypatch):
     assert rule["rule_type"] == "not_null"
 
 
-def _patch_autofix_executor(monkeypatch, effects, sync):
+def _patch_autofix_executor(monkeypatch, effects, sync, commit_error: BaseException | None = None):
     import reconciliator
 
     cursor = RecordingCursor(effects)
-    connection = RecordingConnection(cursor)
+    connection = RecordingConnection(cursor, commit_error=commit_error)
     monkeypatch.setattr(reconciliator, "get_connection", lambda: connection)
     monkeypatch.setattr(
         reconciliator,
@@ -291,6 +294,118 @@ def test_autofix_all_columns_succeeding_is_success(app_client, monkeypatch):
         _ADD_COLUMN_SQL.format(column="COL_A"),
         _ADD_COLUMN_SQL.format(column="COL_B"),
     ]
+
+
+def test_validate_and_insert_unknown_rule_is_unsupported(monkeypatch):
+    import data_quality
+
+    _patch_quality_connection(monkeypatch)
+    rule = data_quality.QualityRule(
+        rule_name="STATUS_REGEX",
+        column="STATUS_CODE",
+        rule_type="regex",
+        severity="WARNING",
+    )
+    with data_quality.DataQualityManager() as manager:
+        monkeypatch.setattr(manager, "create_error_table", lambda *_args, **_kwargs: None)
+        result = manager.validate_and_insert_errors("DWH", "ODS_STATUS", custom_rules=[rule])
+
+    summary = result.summary()
+    recorded = summary["rules"][0]
+    assert recorded["status"] == "unsupported"
+    assert recorded["passed"] is False
+    assert recorded["rule_type"] == "regex"
+    assert summary["passed"] is False
+    assert summary["status"] == "failed"
+
+
+def test_ora_01430_is_applied_already_present_not_added(app_client, monkeypatch):
+    sync_calls = []
+
+    def sync(owner, table):
+        sync_calls.append((owner, table))
+        return {"ok": True, "message": "synced"}
+
+    connection, cursor = _patch_autofix_executor(
+        monkeypatch,
+        [_oracle_error(f"ORA-01430: column being added already exists {SECRET}"), None],
+        sync,
+    )
+
+    response = _post_autofix(app_client)
+    body = response.get_json()
+
+    assert response.status_code == 200
+    assert body["status"] == "success"
+    assert body["added_columns"] == ["COL_B"]
+    assert body["columns"][0] == {
+        "column": "COL_A",
+        "status": "applied",
+        "already_present": True,
+    }
+    assert body["columns"][1] == {"column": "COL_B", "status": "applied"}
+    assert SECRET not in response.get_data(as_text=True)
+    assert "ORA-01430" not in response.get_data(as_text=True)
+    assert sync_calls == [("DWH", "ODS_HR_EMPLOYEES")]
+    assert connection.committed is True
+    assert cursor.statements == [
+        _ADD_COLUMN_SQL.format(column="COL_A"),
+        _ADD_COLUMN_SQL.format(column="COL_B"),
+    ]
+
+
+def test_autofix_commit_failure_after_applied_columns_is_partial(app_client, monkeypatch):
+    def sync(_owner, _table):
+        raise AssertionError("mapping sync must not run when the commit failed")
+
+    connection, cursor = _patch_autofix_executor(
+        monkeypatch,
+        [None, None],
+        sync,
+        commit_error=_oracle_error(f"ORA-03113 {SECRET}"),
+    )
+
+    response = _post_autofix(app_client)
+    body = response.get_json()
+
+    assert response.status_code == 200
+    assert body["status"] == "partial"
+    assert body["added_columns"] == ["COL_A", "COL_B"]
+    assert [item["status"] for item in body["columns"]] == ["applied", "applied"]
+    assert "already_present" not in body["columns"][0]
+    assert "Applied COL_A, COL_B." in body["error"]
+    assert "Failed" not in body["error"]
+    assert SECRET not in response.get_data(as_text=True)
+    assert connection.committed is False
+    assert connection.rolled_back is True
+    assert cursor.statements == [
+        _ADD_COLUMN_SQL.format(column="COL_A"),
+        _ADD_COLUMN_SQL.format(column="COL_B"),
+    ]
+
+
+def test_autofix_sync_failure_after_apply_is_partial(app_client, monkeypatch):
+    def sync(_owner, _table):
+        return {
+            "error": f"ODI mapping synchronization failed. {SECRET}",
+            "error_type": "ReconciliationError",
+        }
+
+    connection, _cursor = _patch_autofix_executor(monkeypatch, [None, None], sync)
+
+    response = _post_autofix(app_client)
+    body = response.get_json()
+    text = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert body["status"] == "partial"
+    assert body["sync_failed"] is True
+    assert body["added_columns"] == ["COL_A", "COL_B"]
+    assert [item["status"] for item in body["columns"]] == ["applied", "applied"]
+    assert "Applied COL_A, COL_B." in body["error"]
+    assert "ODI mapping synchronization failed." in body["error"]
+    assert SECRET not in text
+    assert connection.committed is True
 
 
 def test_single_column_autofix_still_hides_driver_text():

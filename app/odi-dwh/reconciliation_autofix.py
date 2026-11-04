@@ -79,6 +79,8 @@ def _public_columns(outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     public: list[dict[str, Any]] = []
     for item in outcomes:
         column_result = {"column": item["column"], "status": item["status"]}
+        if item.get("already_present"):
+            column_result["already_present"] = True
         if item["status"] == "failed":
             column_result["error"] = item.get("error") or _COLUMN_DDL_FAILED
             column_result["error_type"] = item.get("error_type") or "Error"
@@ -101,6 +103,7 @@ def _autofix_batch_status(outcomes: list[dict[str, Any]], *, committed: bool) ->
         return "partial"
     if failed or not applied:
         return "failed"
+    # Reachable when commit() raises after every column DDL succeeded (those stay applied).
     if not committed:
         return "partial"
     return "success"

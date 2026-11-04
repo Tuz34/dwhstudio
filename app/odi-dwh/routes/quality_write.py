@@ -70,6 +70,8 @@ def _safe_error_type(value: object) -> str | None:
 def _sanitized_autofix_column(item: dict) -> dict:
     status = item.get("status")
     public = {"column": item.get("column"), "status": status}
+    if item.get("already_present") is True:
+        public["already_present"] = True
     if status != "failed":
         return public
     error = item.get("error")
@@ -220,6 +222,12 @@ def api_quality_autofix_column():
 @bp.route("/api/quality/autofix-all-columns", methods=["POST"])
 @limiter.limit("5 per minute")
 def api_quality_autofix_all_columns():
+    """Return HTTP 200 with status success, partial, or failed.
+
+    Partial and failed batches used to be HTTP 500. Clients that key off HTTP
+    status must read the JSON status field. DqDashboard.jsx checks res.error
+    and still surfaces the failure text.
+    """
     app_module = get_app_module()
     body = request.get_json() or {}
     approval_error = app_module._approval_error(body, "quality all-column autofix")
