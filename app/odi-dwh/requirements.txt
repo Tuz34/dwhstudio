@@ -1,0 +1,40 @@
+# ============================================================
+# DWH Studio - Python Bagimliliklari
+# Python 3.12 icin (oracledb/langgraph uyumu)
+# Kurulum: pip install -r requirements.txt
+# ============================================================
+
+# --- Web framework ---
+flask==3.0.3
+flask-wtf==1.2.1
+flask-limiter==3.8.0
+
+# --- Veritabani ---
+oracledb==2.4.1            # Oracle 19c hedef + Oracle source (thin mode)
+pyodbc==5.1.0             # Legacy MSSQL source adapter (ENABLE_MSSQL_SOURCE=true ise)
+
+# --- Veri isleme ---
+pandas==2.2.3
+
+# --- LLM / AI ---
+anthropic==0.39.0         # Cloud expert (Claude)
+langgraph==0.2.45         # Mapping pipeline (LangGraph state machine)
+typing-extensions==4.12.2
+
+# --- HTTP / yardimci ---
+requests==2.32.3
+httpx==0.27.2              # anthropic==0.39.0 expects httpx proxies kwarg support
+python-dotenv==1.0.1
+tqdm==4.66.5
+
+# --- MCP (Model Context Protocol server'lari) ---
+mcp>=1.27.2              # FastMCP (mcp.server.fastmcp) iceren surum
+
+# --- Dokumantasyon ---
+python-docx==1.1.2        # DWH_Automation_Mimari.docx guncelleme
+
+# --- Test ---
+pytest==9.0.3             # Yerel entegrasyon ve API testleri
+
+# --- Opsiyonel (su an JSON-RAG kullaniliyor; ChromaDB FAZ 4'te) ---
+# chromadb==0.5.20

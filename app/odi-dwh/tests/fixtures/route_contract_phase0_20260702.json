@@ -1,0 +1,1256 @@
+{
+  "route_count": 104,
+  "routes": [
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "index",
+      "line": 36,
+      "methods": [
+        "GET"
+      ],
+      "path": "/",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_ai_orchestrate",
+      "line": 109,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/ai/orchestrate",
+      "rate_limit": "20 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_ai_tools",
+      "line": 10,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/ai/tools",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_airflow_run_dq",
+      "line": 535,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/airflow/run-dq",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_airflow_run_mapping",
+      "line": 492,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/airflow/run-mapping",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_airflow_run_odi",
+      "line": 457,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/airflow/run-odi",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_alerts",
+      "line": 404,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/alerts",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_alerts_acknowledge",
+      "line": 124,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/alerts/acknowledge",
+      "rate_limit": "10 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_alerts_check",
+      "line": 145,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/alerts/check",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_alerts_history",
+      "line": 415,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/alerts/history",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_ask",
+      "line": 184,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/ask",
+      "rate_limit": "20 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_auth_login",
+      "line": 15,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/auth/login",
+      "rate_limit": "10 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_auth_logout",
+      "line": 46,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/auth/logout",
+      "rate_limit": "",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_auth_status",
+      "line": 10,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/auth/status",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_clear",
+      "line": 84,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/clear",
+      "rate_limit": "",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_config_llm",
+      "line": 18,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/config/llm",
+      "rate_limit": "10 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_control_tower_evidence",
+      "line": 12,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/control-tower/evidence",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_dba_backup_status",
+      "line": 120,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/dba/backup-status",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_dba_invalid_objects",
+      "line": 99,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/dba/invalid-objects",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_dba_locks",
+      "line": 56,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/dba/locks",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_dba_object_privileges",
+      "line": 87,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/dba/object-privileges",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_dba_privileges",
+      "line": 76,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/dba/privileges",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_dba_redo_status",
+      "line": 110,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/dba/redo-status",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_dba_sessions",
+      "line": 45,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/dba/sessions",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_dba_tablespace",
+      "line": 66,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/dba/tablespace",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_dba_top_sql",
+      "line": 131,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/dba/top-sql",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_dba_wait_events",
+      "line": 143,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/dba/wait-events",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_deployment_security_profile",
+      "line": 25,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/deployment/security-profile",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_environment",
+      "line": 16,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/environment",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_execute",
+      "line": 20,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/execute",
+      "rate_limit": "30 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_export",
+      "line": 63,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/export",
+      "rate_limit": "",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_git_log",
+      "line": 22,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/git/log",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_git_status",
+      "line": 17,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/git/status",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_incremental_execute",
+      "line": 100,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/incremental/execute",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_incremental_preflight",
+      "line": 314,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/incremental/preflight",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_lineage",
+      "line": 154,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/lineage/<table_name>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_lineage_impact",
+      "line": 165,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/lineage/impact/<source_table>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_lineage_refresh",
+      "line": 112,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/lineage/refresh",
+      "rate_limit": "3 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_lineage_usage",
+      "line": 179,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/lineage/usage/<table_name>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_local_analyst_summarize",
+      "line": 64,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/local-analyst/summarize",
+      "rate_limit": "20 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_mapping_log",
+      "line": 393,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/mapping-log/<batch_id>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_mapping_analyze_prompt",
+      "line": 44,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/mapping/analyze-prompt",
+      "rate_limit": "20 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_mapping_compare",
+      "line": 316,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/mapping/compare/<mapping_name>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_mapping_delete",
+      "line": 173,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/mapping/delete",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_mapping_generate",
+      "line": 79,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/mapping/generate",
+      "rate_limit": "10 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_mapping_generate_graph",
+      "line": 392,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/mapping/generate-graph",
+      "rate_limit": "10 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_mapping_graph_info",
+      "line": 332,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/mapping/graph-info",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_mapping_run",
+      "line": 197,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/mapping/run",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_mapping_runs",
+      "line": 363,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/mapping/runs",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_mapping_snapshot",
+      "line": 18,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/mapping/snapshot",
+      "rate_limit": "10 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_mapping_snapshots",
+      "line": 304,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/mapping/snapshots/<mapping_name>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_mapping_state",
+      "line": 379,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/mapping/state/<mapping_name>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_mapping_target_preflight",
+      "line": 60,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/mapping/target-preflight",
+      "rate_limit": "20 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_mapping_update",
+      "line": 149,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/mapping/update",
+      "rate_limit": "10 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_validate_expression",
+      "line": 128,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/mapping/validate-expression",
+      "rate_limit": "30 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_monitoring_dq_scores",
+      "line": 91,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/monitoring/dq-scores",
+      "rate_limit": "10 per minute",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_monitoring_etl_metrics",
+      "line": 34,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/monitoring/etl-metrics",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_monitoring_freshness",
+      "line": 14,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/monitoring/freshness",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_monitoring_tablespace",
+      "line": 24,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/monitoring/tablespace",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_source_schema",
+      "line": 229,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/mssql/schema/<path:table_name>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_odi_kms",
+      "line": 585,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/odi/kms",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_odi_lineage",
+      "line": 575,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/odi/lineage",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_odi_mapping_detail",
+      "line": 191,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/odi/mapping_detail",
+      "rate_limit": "60 per minute",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_odi_mappings",
+      "line": 437,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/odi/mappings",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_odi_scenarios",
+      "line": 427,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/odi/scenarios",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_odi_session_suggestion",
+      "line": 171,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/odi/session_suggestion",
+      "rate_limit": "",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_odi_sessions",
+      "line": 161,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/odi/sessions",
+      "rate_limit": "60 per minute",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_preview",
+      "line": 248,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/preview/<path:table_name>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_project_hub",
+      "line": 27,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/project_hub",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_quality_autofix_all_columns",
+      "line": 137,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/quality/autofix-all-columns",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_quality_autofix_column",
+      "line": 114,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/quality/autofix-column",
+      "rate_limit": "10 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_quality_create_all_err",
+      "line": 202,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/quality/create-all-error-tables",
+      "rate_limit": "3 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_quality_create_err",
+      "line": 183,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/quality/create-error-table",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_quality_reconcile",
+      "line": 97,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/quality/reconcile",
+      "rate_limit": "30 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_quality_sync_mapping",
+      "line": 163,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/quality/sync-mapping",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_quality_validate",
+      "line": 61,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/quality/validate",
+      "rate_limit": "30 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_quality_validate_insert",
+      "line": 220,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/quality/validate-insert",
+      "rate_limit": "10 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_rag_knowledge",
+      "line": 130,
+      "methods": [
+        "DELETE",
+        "GET",
+        "POST"
+      ],
+      "path": "/api/rag_knowledge",
+      "rate_limit": "10 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_rollback",
+      "line": 429,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/rollback/<batch_id>",
+      "rate_limit": "3 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_schema_changes",
+      "line": 285,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/schema-changes",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_detect_schema_changes",
+      "line": 66,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/schema-changes/detect",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_schema",
+      "line": 215,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/schema/<path:table_name>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_schema_change_apply_db",
+      "line": 27,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/schema/change/apply-db",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_schema_change_preflight",
+      "line": 15,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/schema/change/preflight",
+      "rate_limit": "20 per minute",
+      "risk": "write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_schema_change_reconcile_scenario",
+      "line": 53,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/schema/change/reconcile-scenario",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_schema_change_sync_odi",
+      "line": 41,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/schema/change/sync-odi",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_schema_drift",
+      "line": 110,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/schema/drift",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_schema_findings",
+      "line": 123,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/schema/findings",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_schema_findings_export",
+      "line": 135,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/schema/findings/export",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_schema_impact",
+      "line": 98,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/schema/impact",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_schema_pk_parity",
+      "line": 194,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/schema/pk-parity",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_schema_source_target_findings",
+      "line": 179,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/schema/source-target/findings",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_schemas",
+      "line": 36,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/schemas",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_security_audit",
+      "line": 17,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/security/audit",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": true,
+      "csrf_exempt": false,
+      "function": "api_skey_create",
+      "line": 242,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/skey/create",
+      "rate_limit": "5 per minute",
+      "risk": "persistent_write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_skey_expression",
+      "line": 259,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/skey/expression",
+      "rate_limit": "",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_source_preview",
+      "line": 268,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/source/preview/<path:table_name>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_source_schema",
+      "line": 229,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/source/schema/<path:table_name>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_status",
+      "line": 13,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/status",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_tables",
+      "line": 45,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/tables",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_watermarks",
+      "line": 299,
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/watermarks",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "api_watermark_delta",
+      "line": 80,
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/watermarks/delta",
+      "rate_limit": "",
+      "risk": "write"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "serve_react_assets",
+      "line": 49,
+      "methods": [
+        "GET"
+      ],
+      "path": "/assets/<path:path>",
+      "rate_limit": "",
+      "risk": "read"
+    },
+    {
+      "approval_required": false,
+      "csrf_exempt": false,
+      "function": "legacy_index",
+      "line": 41,
+      "methods": [
+        "GET"
+      ],
+      "path": "/legacy",
+      "rate_limit": "",
+      "risk": "read"
+    }
+  ],
+  "source": "flask_url_map_plus_appsec_endpoint_matrix"
+}

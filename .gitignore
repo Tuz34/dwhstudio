@@ -1,0 +1,15 @@
+.env
+.env.*
+*.properties
+!*.properties.example
+logs/
+rag_database.json
+project_hub.json
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+CLAUDE.md
+.claude/
+.tmp_*
