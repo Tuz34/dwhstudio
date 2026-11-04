@@ -29,6 +29,26 @@ ODS_BACKUP_ROW_COUNT = 0
 logger = logging.getLogger("dwh_app.dim_product_scd2_backup_creator")
 
 
+def verify_retained_dim_product_backup(
+    connection_factory: Callable[[], Any],
+    *,
+    owner: str = BACKUP_OWNER,
+    source_table: str = SOURCE_TABLE,
+    backup_table: str = BACKUP_TABLE,
+    expected_column_count: int = EXPECTED_COLUMN_COUNT,
+    expected_row_count: int = EXPECTED_ROW_COUNT,
+    require_absent: bool = False,
+) -> dict[str, Any]:
+    """Export the separate read-only retained verifier without changing the creator."""
+    from dim_product_scd2_retained_backup_verifier import verify_retained_dim_product_backup as verify
+
+    return verify(
+        connection_factory, owner=owner, source_table=source_table,
+        backup_table=backup_table, expected_column_count=expected_column_count,
+        expected_row_count=expected_row_count, require_absent=require_absent,
+    )
+
+
 class BackupVerificationError(RuntimeError):
     """Raised when a fixed-object metadata or count invariant fails."""
 

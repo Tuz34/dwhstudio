@@ -26,15 +26,20 @@ def _scenario() -> dict[str, str]:
     }
 
 
-def _base(status: str) -> dict[str, Any]:
+def _base(status: str, *, retained_backup: bool = False) -> dict[str, Any]:
     return {
         "mode": "fixed_dim_product_scd2_scenario_run_and_rerun_proof",
         "status": status,
         "scenario": _scenario(),
         "scenario_run_attempt_count": 0,
         "successful_scenario_run_count": 0,
-        "named_backup_retained": False,
-        "backup_may_exist": False,
+        "named_backup_retained": None if retained_backup else False,
+        "backup_may_exist": retained_backup,
+        "backup_mode": "retained_verification" if retained_backup else "absent_only_creation",
+        "backup_creation_attempted": False,
+        "backup_verification_attempted": False,
+        "backup_created_absent_only": False,
+        "backup_reused_verified": False,
         "automatic_rollback_performed": False,
         "persistent_action_attempted": False,
         "manual_recovery_review_required": False,
@@ -54,17 +59,25 @@ def _failure(
     successes: int = 0,
     backup_attempted: bool = False,
     backup_verified: bool = False,
+    retained_backup: bool = False,
+    backup_verification_attempted: bool = False,
 ) -> dict[str, Any]:
     return {
-        **_base("failed"),
+        **_base("failed", retained_backup=retained_backup),
         "stage": stage,
         "error_type": error_type,
         "scenario_run_attempt_count": attempts,
         "successful_scenario_run_count": successes,
-        "named_backup_retained": True if backup_verified else (None if backup_attempted else False),
-        "backup_may_exist": backup_attempted,
+        "named_backup_retained": True if backup_verified else (
+            None if backup_attempted or retained_backup else False
+        ),
+        "backup_may_exist": backup_attempted or retained_backup,
+        "backup_creation_attempted": backup_attempted,
+        "backup_verification_attempted": backup_verification_attempted,
+        "backup_created_absent_only": backup_verified and not retained_backup,
+        "backup_reused_verified": backup_verified and retained_backup,
         "persistent_action_attempted": backup_attempted or attempts > 0,
-        "manual_recovery_review_required": backup_attempted or attempts > 0,
+        "manual_recovery_review_required": backup_attempted or backup_verification_attempted or attempts > 0,
     }
 
 
@@ -96,7 +109,25 @@ def scenario_runner(**kwargs: Any) -> Mapping[str, Any]:
 # 26-column / 72-row copy, check the ODS backup is untouched (24 columns,
 # 0 rows) and return exactly the proof shape accepted by
 # ``dim_product_scd2_scenario_backup._proof_matches`` with no raw rows, keys or
-# secrets. No reusable connection-free helper exists, so none is provided here.
+# secrets. With retained_backup=True the caller must instead supply
+# verify_retained_dim_product_backup bound to a dedicated connection factory;
+# the gate passes require_absent=False and accepts only verified_retained proof.
+
+
+def _scenario_error_type(report: Mapping[str, Any] | None) -> str:
+    """Preserve fixed diagnostic codes only; never copy arbitrary callback data."""
+    value = report.get("error_type") if isinstance(report, Mapping) else None
+    if (
+        isinstance(report, Mapping)
+        and report.get("status") == "failed"
+        and type(value) is str
+        and value in {
+            "AgentConfigurationUnavailable", "AgentUnavailable",
+            "ScenarioRunFailed", "InvalidScenarioRunOutput",
+        }
+    ):
+        return value
+    return "ScenarioRunError"
 
 
 def _run_matches(report: Mapping[str, Any] | None) -> bool:
@@ -155,16 +186,19 @@ def execute_dim_product_scd2_scenario_run_and_rerun_proof(
     candidate_probe: Callable[[], Mapping[str, Any]],
     backup_creator: Callable[..., Mapping[str, Any]],
     scenario_runner: Callable[..., Mapping[str, Any]],
+    retained_backup: bool = False,
 ) -> dict[str, Any]:
-    """Run only after fresh count proof and an absent-only named backup gate."""
+    """Run after fresh counts and the default absent-only or opt-in retained gate."""
+    if type(retained_backup) is not bool:
+        return _base("blocked_retained_backup_type")
     if executor_review_status != "approved":
-        return _base("blocked_pending_executor_review")
+        return _base("blocked_pending_executor_review", retained_backup=retained_backup)
     if approved is not True:
-        return _base("blocked_until_exact_run_approval")
+        return _base("blocked_until_exact_run_approval", retained_backup=retained_backup)
     if approval_scope != RUN_APPROVAL_SCOPE:
-        return _base("blocked_run_approval_scope")
+        return _base("blocked_run_approval_scope", retained_backup=retained_backup)
     if scenario_generation_review_status != "approved":
-        return _base("blocked_scenario_generation_review")
+        return _base("blocked_scenario_generation_review", retained_backup=retained_backup)
 
     status, first_preflight = _probe_readiness(
         mapping_probe,
@@ -175,20 +209,30 @@ def execute_dim_product_scd2_scenario_run_and_rerun_proof(
         approval_scope=approval_scope,
     )
     if status == "failed":
-        return _failure("fresh_read_only_preflight", "PreflightError")
+        return _failure("fresh_read_only_preflight", "PreflightError", retained_backup=retained_backup)
     if status != "ready_for_separate_scenario_run_executor":
-        return _base("blocked_run_readiness")
+        return _base("blocked_run_readiness", retained_backup=retained_backup)
 
     backup = run_dim_product_scd2_named_backup_gate(
-        first_preflight, backup_creator=backup_creator
+        first_preflight, backup_creator=backup_creator, retained_backup=retained_backup
     )
     if backup.get("status") != "passed":
-        if backup.get("backup_creation_attempted") is False:
-            return _base("blocked_named_backup_gate")
+        if (
+            backup.get("backup_creation_attempted") is False
+            and backup.get("backup_verification_attempted") is False
+        ):
+            return _base("blocked_named_backup_gate", retained_backup=retained_backup)
         return _failure(
-            "named_backup_gate", "BackupGateError", backup_attempted=True
+            "named_backup_gate", "BackupGateError", backup_attempted=not retained_backup,
+            retained_backup=retained_backup, backup_verification_attempted=retained_backup,
         )
 
+    backup_state = {
+        "backup_attempted": not retained_backup,
+        "backup_verified": True,
+        "retained_backup": retained_backup,
+        "backup_verification_attempted": retained_backup,
+    }
     run_args = {
         "approved": True,
         "approval_scope": RUN_APPROVAL_SCOPE,
@@ -199,8 +243,8 @@ def execute_dim_product_scd2_scenario_run_and_rerun_proof(
     first_run = _call(scenario_runner, **run_args)
     if not _run_matches(first_run):
         return _failure(
-            "first_scenario_run", "ScenarioRunError", attempts=1,
-            backup_attempted=True, backup_verified=True,
+            "first_scenario_run", _scenario_error_type(first_run), attempts=1,
+            **backup_state,
         )
 
     status, first_postflight = _probe_readiness(
@@ -214,14 +258,14 @@ def execute_dim_product_scd2_scenario_run_and_rerun_proof(
     if status != "ready_for_separate_scenario_run_executor":
         return _failure(
             "first_count_only_postflight", "PostflightError", attempts=1,
-            successes=1, backup_attempted=True, backup_verified=True,
+            successes=1, **backup_state,
         )
 
     second_run = _call(scenario_runner, **run_args)
     if not _run_matches(second_run):
         return _failure(
-            "second_scenario_run", "ScenarioRunError", attempts=2,
-            successes=1, backup_attempted=True, backup_verified=True,
+            "second_scenario_run", _scenario_error_type(second_run), attempts=2,
+            successes=1, **backup_state,
         )
 
     status, second_postflight = _probe_readiness(
@@ -244,10 +288,14 @@ def execute_dim_product_scd2_scenario_run_and_rerun_proof(
     ):
         return _failure(
             "second_count_only_postflight", "PostflightError", attempts=2,
-            successes=2, backup_attempted=True, backup_verified=True,
+            successes=2, **backup_state,
         )
     return {
-        **_base("passed"),
+        **_base("passed", retained_backup=retained_backup),
+        "backup_creation_attempted": not retained_backup,
+        "backup_verification_attempted": retained_backup,
+        "backup_created_absent_only": not retained_backup,
+        "backup_reused_verified": retained_backup,
         "scenario_run_attempt_count": 2,
         "successful_scenario_run_count": 2,
         "named_backup_retained": True,

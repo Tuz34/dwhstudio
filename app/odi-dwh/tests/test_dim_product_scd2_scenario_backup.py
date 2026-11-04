@@ -71,13 +71,14 @@ class _Creator:
         return self.result
 
 
-def _gate(preflight=None, creator=None):
+def _gate(preflight=None, creator=None, *, retained_backup=False):
     from dim_product_scd2_scenario_backup import run_dim_product_scd2_named_backup_gate
 
     creator = _Creator() if creator is None else creator
     result = run_dim_product_scd2_named_backup_gate(
         _preflight() if preflight is None else preflight,
         backup_creator=creator,
+        retained_backup=retained_backup,
     )
     return result, creator
 
@@ -252,3 +253,121 @@ def test_backup_gate_sanitizes_unexpected_exception_type():
     assert result["manual_recovery_review_required"] is True
     assert "sensitive-value" not in str(result)
     assert "DriverError" not in str(result)
+
+
+def _retained_proof():
+    proof = _proof()
+    proof["side_effects"] = False
+    del proof["backup"]["created_absent_only"]
+    proof["backup"].update({
+        "verified_retained": True,
+        "metadata_matches": True,
+        "surrogate_key_null_count": 0,
+        "surrogate_key_duplicate_group_count": 0,
+        "source_minus_backup_count": 0,
+        "backup_minus_source_count": 0,
+    })
+    return proof
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", "false", [], {}, 0.0])
+def test_retained_flag_requires_exact_bool_before_callback(value):
+    result, creator = _gate(retained_backup=value)
+    assert result["status"] == "blocked_retained_backup_type"
+    assert creator.calls == []
+    assert result["backup_creation_attempted"] is False
+
+
+def test_retained_gate_uses_read_only_contract_and_honest_flags():
+    result, verifier = _gate(creator=_Creator(_retained_proof()), retained_backup=True)
+    assert result["status"] == "passed"
+    assert verifier.calls[0] == {
+        "owner": "DWH", "source_table": "DIM_PRODUCT", "backup_table": "ODI68_DIM_PRODUCT_BKP",
+        "expected_column_count": 26, "expected_row_count": 72, "require_absent": False,
+    }
+    assert result["backup_creation_attempted"] is False
+    assert result["backup_verification_attempted"] is True
+    assert result["backup_mode"] == "retained_verification"
+    assert result["backup_reused_verified"] is True
+    assert result["backup_created_absent_only"] is False
+    assert result["named_backup_retained"] is True
+    assert result["side_effects_may_have_occurred"] is False
+    assert result["manual_recovery_review_required"] is False
+
+
+@pytest.mark.parametrize("retained,proof", [(False, _retained_proof()), (True, _proof())])
+def test_proofs_cannot_be_interchanged_between_modes(retained, proof):
+    result, _ = _gate(creator=_Creator(proof), retained_backup=retained)
+    assert result["status"] == "failed"
+    assert result["backup_creation_attempted"] is (not retained)
+    assert result["backup_reused_verified"] is False
+
+
+def _mutated_retained_proofs():
+    valid = _retained_proof()
+    # Missing/extra keys are refused at every proof boundary.
+    for path in [(), ("backup",), ("ods_backup",)]:
+        target = valid[path[0]] if path else valid
+        for key in target:
+            proof = deepcopy(valid)
+            container = proof[path[0]] if path else proof
+            del container[key]
+            yield proof
+        proof = deepcopy(valid)
+        container = proof[path[0]] if path else proof
+        container["raw_rows"] = "sensitive-value"
+        yield proof
+        # Exercise strict booleans, numeric counts, source/owner/table identities.
+        for key, value in target.items():
+            if isinstance(value, dict):
+                replacements = [None, []]
+            elif type(value) is bool:
+                replacements = [not value, int(value), str(value)]
+            elif type(value) is int:
+                replacements = [value + 1, True, float(value), str(value), -1]
+            else:
+                replacements = ["sensitive-value", None]
+            for replacement in replacements:
+                proof = deepcopy(valid)
+                container = proof[path[0]] if path else proof
+                container[key] = replacement
+                yield proof
+
+
+@pytest.mark.parametrize("proof", list(_mutated_retained_proofs()))
+def test_retained_gate_rejects_malformed_proof_without_leaking_or_claiming_creation(proof):
+    result, verifier = _gate(creator=_Creator(proof), retained_backup=True)
+    assert result["status"] == "failed"
+    assert len(verifier.calls) == 1
+    assert result["backup_creation_attempted"] is False
+    assert result["backup_verification_attempted"] is True
+    assert result["backup_reused_verified"] is False
+    assert result["backup_may_exist"] is True
+    assert result["named_backup_retained"] is None
+    assert result["manual_recovery_review_required"] is True
+    assert result["side_effects_may_have_occurred"] is False
+    assert result["automatic_restore_performed"] is False
+    assert "sensitive-value" not in repr(result)
+
+
+def test_retained_callback_exception_keeps_backup_uncertain_and_is_sanitized():
+    def broken(**kwargs):
+        raise RuntimeError("sensitive-value")
+
+    result, _ = _gate(creator=broken, retained_backup=True)
+    assert result["status"] == "failed"
+    assert result["backup_creation_attempted"] is False
+    assert result["backup_may_exist"] is True
+    assert result["named_backup_retained"] is None
+    assert "sensitive-value" not in repr(result)
+
+
+def test_retained_mode_still_requires_fresh_valid_preflight_and_callable():
+    preflight = _preflight()
+    preflight["candidate_count"] = 1
+    result, verifier = _gate(preflight, _Creator(_retained_proof()), retained_backup=True)
+    assert result["status"] == "blocked_candidate_preflight"
+    assert verifier.calls == []
+    result, _ = _gate(creator=False, retained_backup=True)
+    assert result["status"] == "blocked_backup_creator"
+    assert result["backup_verification_attempted"] is False
