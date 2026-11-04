@@ -118,6 +118,11 @@ def plan_preview(body: Mapping[str, Any], services: Scd2Services) -> tuple[dict[
     )
 
 
+def _km_extra(mapping: Mapping[str, Any] | None, mismatches: list[str]) -> dict[str, Any]:
+    details = scd2_odi.km_mismatch_details(mapping) if "mapping_knowledge_modules" in mismatches else None
+    return {"km_mismatch": details} if details else {}
+
+
 def _generate_response(
     status: str,
     plan: Mapping[str, Any] | None,
@@ -207,7 +212,8 @@ def generate(
     mismatches = scd2_odi.existing_mismatches(plan, probe_step)
     if mismatches:
         return _generate_response(
-            "blocked_existing_object_mismatch", plan, steps, 409, mismatches=mismatches
+            "blocked_existing_object_mismatch", plan, steps, 409, mismatches=mismatches,
+            **_km_extra(probe_step["mapping"], mismatches),
         )
 
     ddl = scd2_target_executor.execute_target_ddl(
@@ -354,7 +360,10 @@ def run(
          "target_model": spec["target_model"], "target_table": spec["target_table"]},
     )
     if mismatches:
-        return {"status": "blocked_existing_object_mismatch", "mismatches": mismatches, "steps": steps}, 409
+        return {
+            "status": "blocked_existing_object_mismatch", "mismatches": mismatches, "steps": steps,
+            **_km_extra(probe_step["mapping"], mismatches),
+        }, 409
     version = _select_version(spec["scenario_version"], probe_step["scenario_versions"])
     if version is None:
         return {

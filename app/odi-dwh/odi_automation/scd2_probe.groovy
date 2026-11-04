@@ -200,12 +200,14 @@ try {
             String integrationType = targets.size() == 1 ? targets[0].getIntegrationType() : null
             String ikmName = null
             List<String> lkmNames = []
+            int accessPointCount = 0
             try {
                 MapPhysicalDesign design = mapping.getPhysicalDesign(0)
                 def tNode = design.getPhysicalNodes().find { it.isTargetNode() }
                 ikmName = tNode?.getTargetComponentKMName()
-                lkmNames = design.getPhysicalNodes().findAll { it.isAPNode() }
-                    .collect { it.getXKMName() }.findAll { it }.unique().sort()
+                def apNodes = design.getPhysicalNodes().findAll { it.isAPNode() }
+                accessPointCount = apNodes.size()
+                lkmNames = apNodes.collect { it.getXKMName() }.findAll { it }.unique().sort()
             } catch (Exception ignoredPhysical) {
                 ikmName = null
             }
@@ -219,6 +221,7 @@ try {
                 integration_type: integrationType,
                 target_ikm: ikmName,
                 lkm_names: lkmNames,
+                access_point_count: accessPointCount,
                 target_attribute_count: targets.size() == 1 ? targets[0].getAttributes().size() : 0,
                 mapped_attribute_count: targets.size() == 1 ?
                     targets[0].getAttributes().count { it.getExpression() != null } : 0,

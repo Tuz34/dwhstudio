@@ -54,7 +54,7 @@ def safeFlags = {
 
 // Fixed allowlisted reason codes or the exception class simple name; the exception
 // message is never returned (it could carry repository values).
-final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable", "ProjectFolderUnavailable", "MappingAlreadyExists", "ScenarioAlreadyExists", "SourceDatastoreUnavailable", "TargetDatastoreUnavailable", "SourceColumnsMissing", "ScdRoleContractMismatch", "IkmUnavailable", "LkmUnavailable", "IkmIntegrationTypeMismatch", "IntegrationTypeMismatch", "SourceAttributeUnavailable", "UnmappedTargetAttribute", "TargetPhysicalNodeUnavailable", "StagingLocationUnavailable", "TargetNodeLostAfterReset", "IkmAssignmentMismatch", "LkmAssignmentMismatch", "MappingCoverageMismatch"] as Set
+final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable", "ProjectFolderUnavailable", "MappingAlreadyExists", "ScenarioAlreadyExists", "SourceDatastoreUnavailable", "TargetDatastoreUnavailable", "SourceColumnsMissing", "ScdRoleContractMismatch", "IkmUnavailable", "LkmUnavailable", "IkmIntegrationTypeMismatch", "IntegrationTypeMismatch", "SourceAttributeUnavailable", "UnmappedTargetAttribute", "TargetPhysicalNodeUnavailable", "StagingLocationUnavailable", "TargetNodeLostAfterReset", "IkmAssignmentMismatch", "LkmAssignmentMismatch", "LkmDbLinkRemains", "MappingCoverageMismatch"] as Set
 def reasonCode = { Exception e ->
     String message = e.getMessage()
     if (e instanceof IllegalStateException && message != null && REASON_CODES.contains(message)) {
@@ -251,13 +251,24 @@ try {
     if (!TARGET_IKM.equalsIgnoreCase(targetNode.getTargetComponentKMName())) {
         throw new IllegalStateException("IkmAssignmentMismatch")
     }
-    List<MapPhysicalNode> accessPoints = design.getPhysicalNodes().findAll { it.isAPNode() }
-    accessPoints.each { node ->
-        node.setXKM(lkm)
-        if (!LKM_NAME.equalsIgnoreCase(node.getXKMName())) {
-            throw new IllegalStateException("LkmAssignmentMismatch")
-        }
+    // Access-point nodes are re-read from the final physical design (after the last reset/staging call)
+    // so the built-in LKM is forced on every one of them; ODI otherwise defaults cross-server APs to a DB-Link LKM.
+    def readAccessPoints = { design.getAllAPNodes() as List<MapPhysicalNode> }
+    def lkmOk = { MapPhysicalNode n -> LKM_NAME.equalsIgnoreCase(n.getLKMName()) }
+    readAccessPoints().each { node -> node.setLKM(lkm) }
+    mapping.validate()
+    List<MapPhysicalNode> accessPoints = readAccessPoints()
+    if (accessPoints.any { !lkmOk(it) }) {
+        accessPoints.each { node -> node.setLKM(lkm) }
+        accessPoints = readAccessPoints()
     }
+    if (accessPoints.any { it.getLKMName()?.toUpperCase()?.contains("DB LINK") }) {
+        throw new IllegalStateException("LkmDbLinkRemains")
+    }
+    if (accessPoints.any { !lkmOk(it) }) {
+        throw new IllegalStateException("LkmAssignmentMismatch")
+    }
+    // Same-server mappings legitimately have zero access points (and therefore no LKM).
 
     int attributeCount = targetComponent.getAttributes().size()
     int mappedCount = targetComponent.getAttributes().count { it.getExpression() != null }

@@ -187,6 +187,7 @@ _MAPPING_KEYS = frozenset(
         "integration_type",
         "target_ikm",
         "lkm_names",
+        "access_point_count",
         "target_attribute_count",
         "mapped_attribute_count",
     }
@@ -249,7 +250,7 @@ def _probe_details(result: Mapping[str, Any]) -> dict[str, Any] | None:
         source_components = [_component(item) for item in source_components_raw]
         counts_ok = all(
             type(mapping[key]) is int and mapping[key] >= 0
-            for key in ("target_count", "target_attribute_count", "mapped_attribute_count")
+            for key in ("target_count", "target_attribute_count", "mapped_attribute_count", "access_point_count")
         )
         text_ok = all(mapping[key] is None or isinstance(mapping[key], str) for key in ("target_table", "integration_type", "target_ikm"))
         if lkms is None or sources is None or any(item is None for item in source_components) or not counts_ok or not text_ok:
@@ -259,6 +260,28 @@ def _probe_details(result: Mapping[str, Any]) -> dict[str, Any] | None:
         "scenario_versions": versions,
         "target_datastore": {"columns": clean_columns, "primary_key": pk, "alternate_key": ak},
         "mapping": mapping,
+    }
+
+
+def _lkms_ok(mapping: Mapping[str, Any]) -> bool:
+    """No access point means no LKM is required (same-server mapping); otherwise only the built-in LKM is accepted."""
+    if mapping["access_point_count"] == 0:
+        return not mapping["lkm_names"]
+    return bool(mapping["lkm_names"]) and set(mapping["lkm_names"]) == {LKM_NAME}
+
+
+def km_mismatch_details(mapping: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Class-only KM names (no repository ids) so a tester can see which KM differs."""
+    if mapping is None or "mapping_knowledge_modules" not in mapping_mismatches(
+        mapping, {"source_table": None, "source_model": None, "target_table": None, "target_model": None}
+    ):
+        return None
+    return {
+        "expected_ikm": IKM_NAME,
+        "found_ikm": mapping["target_ikm"],
+        "expected_lkm": LKM_NAME if mapping["access_point_count"] else None,
+        "found_lkms": list(mapping["lkm_names"]),
+        "access_point_count": mapping["access_point_count"],
     }
 
 
@@ -284,7 +307,7 @@ def mapping_mismatches(
         found.append("mapping_source")
     if mapping["integration_type"] not in {"SCD", "SLOWLY_CHANGING_DIMENSION"}:
         found.append("mapping_integration_type")
-    if mapping["target_ikm"] != IKM_NAME or not mapping["lkm_names"] or set(mapping["lkm_names"]) != {LKM_NAME}:
+    if mapping["target_ikm"] != IKM_NAME or not _lkms_ok(mapping):
         found.append("mapping_knowledge_modules")
     if mapping["mapped_attribute_count"] != mapping["target_attribute_count"] or (
         expected_attributes is not None and mapping["target_attribute_count"] != expected_attributes
