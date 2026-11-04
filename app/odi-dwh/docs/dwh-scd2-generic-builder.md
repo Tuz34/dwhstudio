@@ -72,6 +72,21 @@ message naming the missing user, with no DDL executed. A `SELECT` grant to
 `APP_USER` (needed so the app's own count-only postflight can read the target)
 is opt-in with `"grant_select_to_app_user": true` in the request.
 
+Two cases skip the grants instead of failing:
+
+- `ODI_EXEC_GRANTS_ENABLED=false` (env, default `true`): use this when ODI
+  executes as the target owners themselves (for example DWH for DWH targets and
+  DM for DM targets) and there is no separate execution user. The executor then
+  skips the `ALL_USERS` grantee check and all grant statements (also in the
+  repair path for an existing table), and the plan preview and result report
+  `grants_skipped_by_config: true`.
+- When the grantee equals the target owner (case-insensitive) a grant would raise
+  ORA-01749, so it is skipped and `grants_skipped_owner_is_grantee: true` is
+  reported.
+
+Both flags are booleans only; no identities beyond the already-reported
+owner and table are added.
+
 ## Existing objects
 
 Existing target tables, datastores and mappings are verified against the

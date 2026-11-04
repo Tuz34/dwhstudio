@@ -112,6 +112,7 @@ def plan_preview(body: Mapping[str, Any], services: Scd2Services) -> tuple[dict[
             },
             "odi_expressions": scd2_builder.odi_expressions(plan),
             "write_operations_attempted": [],
+            **scd2_builder.grant_skip_flags(plan),
         },
         200,
     )

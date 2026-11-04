@@ -317,3 +317,100 @@ def test_default_exec_user_comes_from_config(monkeypatch):
 
     monkeypatch.setattr(config, "ODI_EXEC_USER", "CFG_EXEC")
     assert scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)["options"]["exec_user"] == "CFG_EXEC"
+
+
+def test_grants_disabled_by_config_issue_no_grant_sql_and_no_user_check(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", False)
+    plan = scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)
+    log = []
+    result = executor.execute_target_ddl(
+        plan, approved=True, connection_factory=connection_factory(log, handler_for(plan, users={"ODI_EXEC": 0}))
+    )
+    assert result["status"] == "created"
+    assert result["grants_skipped_by_config"] is True
+    assert result["grants_applied"] == 0 and result["grants_failed"] == 0
+    assert result["write_operations_attempted"] == ["create_sequence", "create_target"]
+    assert not any(sql.startswith("GRANT") or "ALL_USERS" in sql for sql in log)
+    assert any(sql.startswith("CREATE TABLE") for sql in log)
+
+
+def test_grants_disabled_by_config_also_skips_repair_grants(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", False)
+    plan = scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)
+    log = []
+    result = executor.execute_target_ddl(
+        plan,
+        approved=True,
+        connection_factory=connection_factory(log, handler_for(plan, table_exists=1, sequence_exists=0, grants=[])),
+    )
+    assert result["status"] == "repaired_incomplete_target" and result["repaired"] == ["sequence"]
+    assert result["sequence_created"] is True and result["grants_skipped_by_config"] is True
+    assert result["write_operations_attempted"] == ["create_sequence"]
+    assert any(sql.startswith("CREATE SEQUENCE") for sql in log)
+    assert not any(sql.startswith("GRANT") or "ALL_USERS" in sql or "ALL_TAB_PRIVS" in sql for sql in log)
+
+
+def test_plan_preview_reports_grants_skipped_by_config(monkeypatch):
+    import config
+    import scd2_service
+    from tests.scd2_support import make_services
+
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", False)
+    services = make_services(None)
+    payload, status = scd2_service.plan_preview({**REQUEST, "source_columns": SOURCE_COLUMNS}, services)
+    assert status == 200 and payload["status"] == "planned"
+    assert payload["grants_skipped_by_config"] is True
+    assert payload["ddl"]["grants"] == []
+
+
+def test_grantee_equal_to_owner_is_skipped_not_granted():
+    plan = scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS, exec_user="dm")
+    log = []
+    result = executor.execute_target_ddl(
+        plan, approved=True, connection_factory=connection_factory(log, handler_for(plan))
+    )
+    assert result["status"] == "created"
+    assert result["grants_skipped_owner_is_grantee"] is True
+    assert "grants_skipped_by_config" not in result
+    assert not any(sql.startswith("GRANT") for sql in log)
+    assert not any("ALL_USERS" in sql for sql in log)
+
+
+def test_default_enabled_has_no_skip_flags(plan):
+    assert scd2_builder.grant_skip_flags(plan) == {}
+    result = executor.execute_target_ddl(
+        plan, approved=True, connection_factory=connection_factory([], handler_for(plan))
+    )
+    assert "grants_skipped_by_config" not in result and "grants_skipped_owner_is_grantee" not in result
+
+
+def test_reader_opt_in_with_grants_disabled_issues_nothing(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", False)
+    plan = scd2_builder.build_scd2_plan({**REQUEST, "grant_select_to_app_user": True}, SOURCE_COLUMNS)
+    assert plan["options"]["grant_select_to_app_user"] is True
+    log = []
+    result = executor.execute_target_ddl(
+        plan, approved=True, connection_factory=connection_factory(log, handler_for(plan))
+    )
+    assert result["status"] == "created" and result["grants_skipped_by_config"] is True
+    assert not any(sql.startswith("GRANT") or "ALL_USERS" in sql for sql in log)
+
+
+def test_reader_opt_in_with_owner_as_grantee_emits_only_reader_grant():
+    plan = scd2_builder.build_scd2_plan(
+        {**REQUEST, "grant_select_to_app_user": True}, SOURCE_COLUMNS, exec_user="DM"
+    )
+    log = []
+    result = executor.execute_target_ddl(
+        plan, approved=True, connection_factory=connection_factory(log, handler_for(plan))
+    )
+    assert result["status"] == "created" and result["grants_skipped_owner_is_grantee"] is True
+    grants = [sql for sql in log if sql.startswith("GRANT")]
+    assert grants == ['GRANT SELECT ON "DM"."DIM_CUSTOMER" TO APP_USER']
+    assert result["grants_applied"] == 1
