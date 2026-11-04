@@ -81,7 +81,21 @@ class FakeAppendCursor:
         self.rowcount = connection.rowcount
 
     def execute(self, sql, params=None):
+        sql_upper = " ".join(sql.upper().split())
+        if "FOR UPDATE" in sql_upper:
+            self._row = (1,)
+            self.connection.locks.append("row")
+            return
+        if sql_upper.startswith("LOCK TABLE"):
+            self.connection.locks.append("table")
+            return
+        if sql_upper.startswith("SELECT MAX("):
+            self._row = (self.connection.target_max,)
+            return
         self.connection.executed.append((sql, params or {}))
+
+    def fetchone(self):
+        return self._row
 
     def close(self):
         self.connection.closed_cursors += 1
@@ -90,6 +104,8 @@ class FakeAppendCursor:
 class FakeAppendConnection:
     def __init__(self, rowcount=1):
         self.rowcount = rowcount
+        self.target_max = "2026-06-19"
+        self.locks = []
         self.executed = []
         self.commits = 0
         self.rollbacks = 0
@@ -109,7 +125,8 @@ class FakeWatermarkWriter:
     def __init__(self):
         self.calls = []
 
-    def update_watermark(self, owner, table_name, extract_date=None, extract_value=None, row_count=None):
+    def update_watermark(self, owner, table_name, extract_date=None, extract_value=None, row_count=None,
+                         conn=None, commit=True):
         self.calls.append(
             {
                 "owner": owner,
@@ -119,11 +136,27 @@ class FakeWatermarkWriter:
                 "row_count": row_count,
             }
         )
+        self.last_conn = conn
+        self.last_commit = commit
 
 
 class FailingWatermarkWriter:
-    def update_watermark(self, owner, table_name, extract_date=None, extract_value=None, row_count=None):
+    def update_watermark(self, owner, table_name, extract_date=None, extract_value=None, row_count=None,
+                         conn=None, commit=True):
         raise RuntimeError("simulated audit write failure with internal details")
+
+
+def _patch_gates(monkeypatch, *, golden="passed", dq="passed"):
+    monkeypatch.setattr(
+        watermark_manager,
+        "run_live_regressions",
+        lambda specs, **_kw: {"status": golden, "results": [{"key_differences": ["secret"]}]},
+    )
+    monkeypatch.setattr(
+        watermark_manager,
+        "run_post_load_dq_gate",
+        lambda specs, **_kw: {"status": dq, "results": []},
+    )
 
 
 def test_incremental_preflight_reports_hr_blocker_without_raw_rows():
@@ -384,7 +417,8 @@ def test_incremental_execution_request_allows_executor_after_approval_and_new_wi
     assert request["reason"] == "approved request passed rerun guard and is ready for the live executor"
 
 
-def test_execute_incremental_append_writes_server_side_and_advances_watermark_after_gates():
+def test_execute_incremental_append_writes_server_side_and_advances_watermark_after_gates(monkeypatch):
+    _patch_gates(monkeypatch)
     specs = [watermark_manager.default_incremental_strategy_specs()["SH_SALES_ODS"]]
     source_conn = FakeIncrementalConnection(
         tables={
@@ -411,11 +445,8 @@ def test_execute_incremental_append_writes_server_side_and_advances_watermark_af
         report["results"][0],
         approved=True,
         target_conn=target_write_conn,
+        source_conn=object(),
         watermark_writer=watermark_writer,
-        post_load_gate_results={
-            "post_load_golden_record_passed": True,
-            "post_load_dq_passed": True,
-        },
     )
 
     assert result["status"] == "executed"
@@ -431,6 +462,8 @@ def test_execute_incremental_append_writes_server_side_and_advances_watermark_af
     assert params == {"last_watermark": datetime(2026, 6, 19)}
     assert target_write_conn.commits == 1
     assert target_write_conn.rollbacks == 0
+    assert watermark_writer.last_conn is target_write_conn
+    assert watermark_writer.last_commit is False
     assert watermark_writer.calls == [
         {
             "owner": "INCREMENTAL_STRATEGY",
@@ -442,7 +475,8 @@ def test_execute_incremental_append_writes_server_side_and_advances_watermark_af
     ]
 
 
-def test_execute_incremental_append_rolls_back_and_skips_watermark_when_post_gate_fails():
+def test_execute_incremental_append_rolls_back_and_skips_watermark_when_post_gate_fails(monkeypatch):
+    _patch_gates(monkeypatch, golden="attention_required")
     specs = [watermark_manager.default_incremental_strategy_specs()["SH_SALES_ODS"]]
     source_conn = FakeIncrementalConnection(
         tables={
@@ -469,11 +503,8 @@ def test_execute_incremental_append_rolls_back_and_skips_watermark_when_post_gat
         report["results"][0],
         approved=True,
         target_conn=target_write_conn,
+        source_conn=object(),
         watermark_writer=watermark_writer,
-        post_load_gate_results={
-            "post_load_golden_record_passed": False,
-            "post_load_dq_passed": True,
-        },
     )
 
     assert result["status"] == "rolled_back_post_load_gate_failed"
@@ -485,7 +516,8 @@ def test_execute_incremental_append_rolls_back_and_skips_watermark_when_post_gat
     assert watermark_writer.calls == []
 
 
-def test_execute_incremental_append_reports_watermark_failure_without_raw_details_after_commit():
+def test_execute_incremental_append_rolls_back_append_when_watermark_update_fails(monkeypatch):
+    _patch_gates(monkeypatch)
     specs = [watermark_manager.default_incremental_strategy_specs()["SH_SALES_ODS"]]
     source_conn = FakeIncrementalConnection(
         tables={
@@ -511,25 +543,20 @@ def test_execute_incremental_append_reports_watermark_failure_without_raw_detail
         report["results"][0],
         approved=True,
         target_conn=target_write_conn,
+        source_conn=object(),
         watermark_writer=FailingWatermarkWriter(),
-        post_load_gate_results={
-            "post_load_golden_record_passed": True,
-            "post_load_dq_passed": True,
-        },
     )
 
-    assert result["status"] == "executed_watermark_update_failed"
-    assert result["will_execute"] is True
-    assert result["rows_appended"] == 1
+    assert result["status"] == "rolled_back_watermark_update_failed"
+    assert result["will_execute"] is False
+    assert result["rows_appended"] == 0
     assert result["watermark_update_attempted"] is True
     assert result["watermark_update_status"] == "failed"
     assert result["watermark_error_type"] == "RuntimeError"
-    assert result["safe_to_retry"] is False
-    assert result["requires_manual_reconciliation"] is True
-    assert result["recovery_action"] == "Verify target metadata/counts and repair the watermark before another execution request."
+    assert result["safe_to_retry"] is True
     assert "simulated audit write failure" not in str(result)
-    assert target_write_conn.commits == 1
-    assert target_write_conn.rollbacks == 0
+    assert target_write_conn.commits == 0
+    assert target_write_conn.rollbacks == 1
     assert result["raw_rows_included"] is False
     assert result["pk_values_included"] is False
 

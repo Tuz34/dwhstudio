@@ -9,6 +9,27 @@ from routes.error_responses import redacted_error, redacted_write_error
 bp = Blueprint("schema_write", __name__)
 limiter = get_app_module().limiter
 
+# Post-load gate outcomes are computed server-side only; any caller-supplied
+# gate assertion is rejected (security finding #4).
+_CALLER_GATE_KEYS = (
+    "post_load_gate_results",
+    "post_load_golden_record_passed",
+    "post_load_dq_passed",
+)
+_CALLER_GATE_REJECTION = "Post-load gate results are computed server-side and cannot be supplied by the caller."
+
+
+def _open_incremental_source_connection():
+    import oracledb
+
+    import config
+
+    return oracledb.connect(
+        user=config.SOURCE_ORACLE_USER,
+        password=config.SOURCE_ORACLE_PASSWORD,
+        dsn=config.SOURCE_ORACLE_DSN,
+    )
+
 
 @bp.route("/api/schema/change/preflight", methods=["POST"])
 @limiter.limit("20 per minute")
@@ -112,8 +133,13 @@ def api_incremental_execute():
 
     app_module = get_app_module()
     body = request.get_json() or {}
+    if any(key in body for key in _CALLER_GATE_KEYS):
+        return jsonify({"error": _CALLER_GATE_REJECTION}), 400
     try:
         spec_name = app_module._validate_incremental_spec_name(body.get("spec_name"))
+    except ValueError as exc:
+        return redacted_error("Schema request rejected", exc, status=400)
+    try:
         report = app_module.run_configured_incremental_strategy_preflight([spec_name])
         preflight_result = (report.get("results") or [{}])[0]
         execution_request = app_module.build_incremental_execution_request(
@@ -129,23 +155,20 @@ def api_incremental_execute():
         if execution_request.get("status") != "ready_for_executor":
             return jsonify(response_base)
 
-        gate_results = app_module._post_load_gate_results(body)
-        if not app_module._post_load_gates_confirmed(gate_results):
-            return jsonify({
-                **response_base,
-                "error": "post_load_gate_results must confirm golden record and DQ gates before live append execution.",
-            }), 400
-
         target_conn = app_module._open_incremental_target_connection()
         try:
-            with app_module.WatermarkManager() as watermark_writer:
-                execution = app_module.execute_incremental_append(
-                    preflight_result,
-                    approved=True,
-                    target_conn=target_conn,
-                    watermark_writer=watermark_writer,
-                    post_load_gate_results=gate_results,
-                )
+            source_conn = _open_incremental_source_connection()
+            try:
+                with app_module.WatermarkManager() as watermark_writer:
+                    execution = app_module.execute_incremental_append(
+                        preflight_result,
+                        approved=True,
+                        target_conn=target_conn,
+                        source_conn=source_conn,
+                        watermark_writer=watermark_writer,
+                    )
+            finally:
+                source_conn.close()
         finally:
             target_conn.close()
 
@@ -155,8 +178,6 @@ def api_incremental_execute():
             "raw_rows_included": False,
             "secret_printed": False,
         })
-    except ValueError as exc:
-        return redacted_error("Schema request rejected", exc, status=400)
     except Exception as exc:
         app_module.logger.error("Incremental execution failed: %s", type(exc).__name__)
         return jsonify({
