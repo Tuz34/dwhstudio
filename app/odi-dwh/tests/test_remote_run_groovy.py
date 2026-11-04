@@ -1,5 +1,6 @@
 """Compile and execute extracted pure closures with fake invokers only."""
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -82,7 +83,16 @@ def test_remote_compile_only(name):
 
 
 def test_pure_remote_protocol_with_fake_invoker():
-    result = subprocess.run([oo._JAVA_BIN, "-cp", oo.OdiOrchestrator()._build_classpath(),
+    required = (Path(oo._JAVA_BIN), Path(oo._GROOVY_JAR), Path(oo._ODI_SDK_LIB) / "odi-core.jar")
+    if not all(path.is_file() for path in required):
+        pytest.skip("Local Java/Groovy/ODI SDK runtime unavailable.")
+    # The production builder currently emits Windows separators; Java needs the host separator.
+    entries = oo.OdiOrchestrator()._build_classpath().split(";")
+    if not all(Path(entry).parent.is_dir() if Path(entry).name == "*" else Path(entry).is_file()
+               for entry in entries):
+        pytest.skip("Local ODI SDK classpath dependencies unavailable.")
+    classpath = os.pathsep.join(entries)
+    result = subprocess.run([oo._JAVA_BIN, "-cp", classpath,
                              "groovy.ui.GroovyMain", "-e", REMOTE_HARNESS,
                              str(ROOT / "run_scenario_remote.groovy")],
                             capture_output=True, text=True, timeout=90, check=False)
