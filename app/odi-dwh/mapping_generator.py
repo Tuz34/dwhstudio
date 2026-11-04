@@ -1173,7 +1173,7 @@ class MappingGenerator:
                 )
                 results["src_result"] = src_result
 
-                if "Hata:" in src_result and "zaten mevcut" not in src_result.lower():
+                if "hata:" in src_result.lower():
                     logger.warning("Source datastore registration warning: %s", src_result)
                 else:
                     self._add_log("register_datastores", "SUCCESS",
@@ -1242,7 +1242,7 @@ class MappingGenerator:
                 if key_kwargs and not self._register_key_passed(tgt_result):
                     key_failure = "ODI update key registration failed for the target datastore."
 
-                if "Hata:" in tgt_result and "zaten mevcut" not in tgt_result.lower():
+                if "hata:" in tgt_result.lower():
                     logger.warning("Target datastore registration warning: %s", tgt_result)
                 else:
                     self._add_log("register_datastores", "SUCCESS",

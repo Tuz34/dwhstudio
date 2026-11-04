@@ -147,7 +147,7 @@ def _repository_step_status(result: dict) -> tuple[str, str]:
     combined = " | ".join(part for part in (src_result, tgt_result) if part)
     lowered = combined.lower()
 
-    if "warning:" in lowered or ("hata:" in lowered and "zaten mevcut" not in lowered):
+    if "warning:" in lowered or "hata:" in lowered:
         return "WARNING", combined[:240]
     return "SUCCESS", combined[:240] or "ODI datastores checked"
 
