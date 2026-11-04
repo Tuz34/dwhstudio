@@ -52,6 +52,15 @@ import oracle.odi.core.OdiInstance
 import oracle.odi.core.security.Authentication
 import oracle.odi.core.persistence.transaction.*
 
+// Raised when the selected IKM has no such option. Reported as a status, not a failure.
+class IkmOptionUnsupported extends RuntimeException {
+    final String optionName
+    IkmOptionUnsupported(String optionName) {
+        super("IKM option unsupported")
+        this.optionName = optionName
+    }
+}
+
 // ── CONNECTION ──────────────────────────────────────────────────────────────
 def odi = null
 boolean standaloneMode = false
@@ -431,7 +440,13 @@ try {
             String normalized = normalizeBooleanParam(rawValue, "odi.truncate_target_table")
             def optionValue = node.getIKMOptionValue(optionName)
             if (optionValue == null) {
-                throw new Exception("IKM option not found on ${node.getName()}: ${optionName}")
+                if (normalized == "false") {
+                    // Nothing to switch off: the IKM does not have the option.
+                    println "IKM OPTION ABSENT: ${optionName} -> ${node.getName()} (requested false, nothing to change)"
+                    return false
+                }
+                // Requested true on an IKM without the option: report it as a status, not a throw.
+                throw new IkmOptionUnsupported(optionName)
             }
             optionValue.setValue(Boolean.valueOf(normalized))
             def verifyValue = node.getIKMOptionValue(optionName)
@@ -653,6 +668,10 @@ try {
         println "SUCCESS: No changes needed for mapping '${mName}'."
     }
 
+} catch (IkmOptionUnsupported unsupported) {
+    // Expected condition, not a failure: the selected IKM has no such option. Nothing was changed.
+    if (txnStatus != null && !txnStatus.isCompleted()) try { txnMgr.rollback(txnStatus) } catch (ig) {}
+    println '{"status":"ikm_option_unsupported","action":"update_mapping","option":"' + unsupported.optionName + '"}'
 } catch (Exception e) {
     if (txnStatus != null && !txnStatus.isCompleted()) try { txnMgr.rollback(txnStatus) } catch (ig) {}
     println '{"status":"error","action":"update_mapping","error_type":"' + e.getClass().getSimpleName() + '"}'

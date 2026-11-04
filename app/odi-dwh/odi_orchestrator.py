@@ -162,8 +162,40 @@ def groovy_approval_context(approved: bool):
         _GROOVY_APPROVED.reset(token)
 
 
+_JMX_NOISE_START_RE = re.compile(r"(?i)^SEVERE:.*JMX\s+FRAMEWORK\s+SPI")
+_JMX_NOISE_DETAIL_RE = re.compile(
+    r"(?i)(javax[./]management[./]j2ee|^\s+at\s|^\s*\.\.\.\s+\d+\s+more"
+    r"|^caused by:|^[\w.$]+(exception|error))"
+)
+_LOG_HEADER_RE = re.compile(r"^[A-Z][a-z]{2} \d{1,2}, \d{4} .*(AM|PM)\s+\S+")
+
+
+def _strip_known_jmx_noise(text: str) -> str:
+    """Drop only the known JMX framework SPI SEVERE block from Java output.
+
+    The block is the log header, the SEVERE line naming the JMX framework SPI and
+    its stack trace (missing javax.management.j2ee classes). Every other line,
+    including any other SEVERE line, is kept so it can still classify the output.
+    """
+    lines = str(text or "").splitlines()
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if _JMX_NOISE_START_RE.match(stripped):
+            if kept and _LOG_HEADER_RE.match(kept[-1].strip()):
+                kept.pop()
+            index += 1
+            while index < len(lines) and _JMX_NOISE_DETAIL_RE.search(lines[index]):
+                index += 1
+            continue
+        kept.append(lines[index])
+        index += 1
+    return "\n".join(kept)
+
+
 def _groovy_output_failed(text: str) -> bool:
-    output = str(text or "").strip()
+    output = _strip_known_jmx_noise(text).strip()
     if not output:
         return False
     upper = output.upper()
@@ -262,6 +294,8 @@ _JAVA_BIN    = _resolve_java_bin(_JAVA_HOME)
 _ODI_SDK_LIB   = os.path.join(_ODI_MW_HOME, "odi", "sdk", "lib")
 _OJDBC_JAR     = os.path.join(_ODI_MW_HOME, "oracle_common", "modules", "oracle.jdbc", OJDBC_JAR_NAME)
 _GROOVY_JAR    = os.path.join(_ODI_MW_HOME, "oracle_common", "modules", "thirdparty", GROOVY_JAR_NAME)
+# Provides javax.management.j2ee.statistics.*; without it the ODI SDK logs a JMX SEVERE trace.
+_J2EE_JAR      = os.path.join(_ODI_MW_HOME, "oracle_common", "modules", "javax.management.j2ee.jar")
 _PROPS_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "odi_automation", "odi_connection.properties")
 _LOCAL_PROPS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "odi_automation", "odi_connection.local.properties")
 _PROPS_PLACEHOLDER = "<set-in-local-generated-file>"
@@ -320,7 +354,11 @@ class OdiOrchestrator:
         sdk_wildcard = os.path.join(_ODI_SDK_LIB, "*")
         # eclipselink — required for JPA/persistence
         eclipselink = os.path.join(_ODI_MW_HOME, "oracle_common", "modules", "oracle.toplink", "eclipselink.jar")
-        return sep.join([odi_core, _OJDBC_JAR, _GROOVY_JAR, sdk_wildcard, eclipselink])
+        entries = [odi_core, _OJDBC_JAR, _GROOVY_JAR, sdk_wildcard, eclipselink]
+        # Optional jar: skipped silently when the installation does not ship it.
+        if _J2EE_JAR and os.path.exists(_J2EE_JAR):
+            entries.append(_J2EE_JAR)
+        return sep.join(entries)
 
     def run_groovy(self, script_name: str, params: dict) -> str:
         """Run one registered Groovy action behind the common safety boundary."""
@@ -440,7 +478,8 @@ class OdiOrchestrator:
                          filter_condition: str = None,
                          truncate_target_table: bool | None = None,
                          replace_existing_mapping: bool = False,
-                         required_update_key_columns: list[str] | None = None):
+                         required_update_key_columns: list[str] | None = None,
+                         integration_type: str | None = None):
         """Creates a new ODI mapping with create_mapping.groovy.
 
         Args:
@@ -456,6 +495,7 @@ class OdiOrchestrator:
             truncate_target_table: IKM Oracle Insert option override. If None, the script default remains unchanged.
             required_update_key_columns: Mapping creation must fail unless the
                 target datastore exposes an update key with exactly these columns.
+            integration_type: IU (default in the script) or CONTROL_APPEND.
         """
         params = {
             "odi.project": ODI_PROJECT,
@@ -487,6 +527,8 @@ class OdiOrchestrator:
             params["odi.filter"] = filter_condition
         if truncate_target_table is not None:
             params["odi.truncate_target_table"] = "true" if truncate_target_table else "false"
+        if integration_type:
+            params["odi.integration_type"] = str(integration_type).strip().upper()
         if required_update_key_columns:
             params["odi.required_update_key_columns"] = ",".join(
                 str(name).strip().upper() for name in required_update_key_columns
@@ -791,7 +833,11 @@ class OdiOrchestrator:
             }
 
     def register_datastore(self, model_code: str, table_name: str, columns: list[dict],
-                            resource_name: str = None) -> str:
+                            resource_name: str = None,
+                            key_columns: list[str] | None = None,
+                            key_name: str | None = None,
+                            key_type: str | None = None,
+                            key_only: bool = False) -> str:
         """Registers a new datastore and its columns in the ODI model.
 
         Args:
@@ -799,6 +845,10 @@ class OdiOrchestrator:
             table_name: Datastore name (e.g. ODS_CUSTOMER, Customer)
             columns: Column list — each item {"name": str, "type": str, "length": int, "scale": int}
             resource_name: Physical table name (default: table_name)
+            key_columns: Optional ODI key columns (registered as a datastore key).
+            key_name: ODI key name (the database constraint name).
+            key_type: ALTERNATE_KEY (update key) or PRIMARY_KEY.
+            key_only: Only add the key to an existing datastore; never recreate it.
         """
         # Build the column string: NAME:TYPE:LENGTH:SCALE,...
         col_parts = []
@@ -816,6 +866,12 @@ class OdiOrchestrator:
             "odi.resource_name": resource_name or table_name,
             "odi.columns": ",".join(col_parts),
         }
+        if key_columns:
+            params["odi.key_columns"] = ",".join(str(name).strip().upper() for name in key_columns)
+            params["odi.key_name"] = key_name or ""
+            params["odi.key_type"] = key_type or "ALTERNATE_KEY"
+            if key_only:
+                params["odi.key_only"] = "true"
         return self.run_groovy("register_datastore.groovy", params)
 
     def delete_datastore(self, model_code: str, table_name: str) -> str:

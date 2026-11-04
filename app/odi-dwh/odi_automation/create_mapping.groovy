@@ -72,6 +72,13 @@ try {
     String tgtModName = System.getProperty("odi.tgt_model") ?: "DWH"
     String sourceSystemName = System.getProperty("odi.source_system") ?: "ORACLE_SAMPLE_SCHEMAS"
     String requiredUpdateKeyColumnsStr = System.getProperty("odi.required_update_key_columns")
+    // Integration type: IU (default, incremental update) or CONTROL_APPEND (insert-style IKM only).
+    String integrationTypeParam = (System.getProperty("odi.integration_type") ?: "IU").trim().toUpperCase()
+    if (!(integrationTypeParam in ["IU", "CONTROL_APPEND"])) {
+        throw new Exception("Invalid odi.integration_type")
+    }
+    boolean controlAppend = integrationTypeParam == "CONTROL_APPEND"
+    String physItCode = controlAppend ? "CA" : "IU"
     String replaceExistingRaw = System.getProperty("odi.replace_existing_mapping", "false")
     if (!(replaceExistingRaw.equalsIgnoreCase("true") || replaceExistingRaw.equalsIgnoreCase("false"))) {
         throw new Exception("Invalid boolean for odi.replace_existing_mapping")
@@ -153,8 +160,23 @@ try {
     // only when the target component Integration Type is "IU" (Incremental Update).
     // In "CA" (Control Append/Insert) mode only INSERT IKMs are listed.
     // MOS Notes 2527685.1 and 2152565.1 document this issue.
-    boolean integrationTypeSet = false
-    try {
+    if (controlAppend) {
+        // Resolve the append constant defensively; fail closed if the SDK does not expose it.
+        def appendType = null
+        ["INTEGRATION_TYPE_APPEND", "INTEGRATION_TYPE_CONTROL_APPEND"].each { constName ->
+            if (appendType == null) {
+                try { appendType = DatastoreComponent."${constName}" } catch (Throwable ignoredConst) {}
+            }
+        }
+        if (appendType == null) throw new Exception("Control append integration type is unavailable")
+        tgtComp.setIntegrationType(appendType)
+        if (!appendType.equals(tgtComp.getIntegrationType())) {
+            throw new Exception("Target integration type verify failed")
+        }
+        println "INTEGRATION TYPE VERIFY: ${tgtComp.getIntegrationType()}"
+    }
+    boolean integrationTypeSet = controlAppend
+    if (!controlAppend) try {
         tgtComp.setIntegrationTypeCode("IU")
         println "INTEGRATION TYPE: IU (Incremental Update) → ${tgtDSName}"
         integrationTypeSet = true
@@ -300,7 +322,7 @@ try {
         } catch (Exception ignored) {}
         return names
     }
-    if (tgtBoundDS != null) {
+    if (tgtBoundDS != null && !controlAppend) {
         def keys = tgtBoundDS.getKeys()
         // When an explicit contract is present, select the exact column match; otherwise use the previous preference chain.
         def uKey = requiredUpdateKeyColumns.isEmpty()
@@ -441,6 +463,13 @@ try {
     String truncateTargetTableParam = System.getProperty("odi.truncate_target_table")
     // Configurable fallback chains (comma-separated, supplied by config.py / .env)
     String ikmPriorityParam = System.getProperty("odi.ikm_priority", "incremental update,oracle merge,oracle update,oracle insert")
+    if (controlAppend) {
+        // Control append is insert-only: never fall back to a merge or update IKM.
+        ikmPriorityParam = ikmPriorityParam.split(",").findAll { kw ->
+            String lowered = kw.trim().toLowerCase()
+            !(lowered.contains("merge") || lowered.contains("update"))
+        }.join(",")
+    }
     String lkmPriorityParam = System.getProperty("odi.lkm_priority", "sql to oracle,mssql to oracle,sql to sql")
 
     def normalizeBooleanParam = { rawValue, propName ->
@@ -531,13 +560,13 @@ try {
         // (Logical DatastoreComponent.setIntegrationTypeCode does not exist in ODI 12c)
         boolean physItSet = false
         try {
-            tgtNode.setIntegrationTypeCode("IU")
-            println "PHYS INTEGRATION TYPE: IU -> ${tgtNode.getName()}"
+            tgtNode.setIntegrationTypeCode(physItCode)
+            println "PHYS INTEGRATION TYPE: ${physItCode} -> ${tgtNode.getName()}"
             physItSet = true
         } catch (Exception pit1) {
             try {
-                tgtNode.integrationTypeCode = "IU"
-                println "PHYS INTEGRATION TYPE: IU via property -> ${tgtNode.getName()}"
+                tgtNode.integrationTypeCode = physItCode
+                println "PHYS INTEGRATION TYPE: ${physItCode} via property -> ${tgtNode.getName()}"
                 physItSet = true
             } catch (Exception pit2) {
                 // Reflection: search all fields for integration-related name
@@ -548,8 +577,8 @@ try {
                             if (!physItSet && f.getName().toLowerCase().contains("integrat")) {
                                 try {
                                     f.setAccessible(true)
-                                    f.set(tgtNode, "IU")
-                                    println "PHYS INTEGRATION TYPE: IU forced via field ${f.getName()}"
+                                    f.set(tgtNode, physItCode)
+                                    println "PHYS INTEGRATION TYPE: ${physItCode} forced via field ${f.getName()}"
                                     physItSet = true
                                 } catch (Exception ignore) {}
                             }
@@ -560,12 +589,22 @@ try {
             }
         }
         if (!physItSet) {
-            println "NOTE: Physical Integration Type IU could not be assigned — IKM assignment will continue"
+            println "NOTE: Physical Integration Type ${physItCode} could not be assigned — IKM assignment will continue"
         }
 
         // IKM: always assigned to the target node and verified by reading it back.
         if (ikm == null) {
             throw new Exception("IKM selection failed. Configure odi.ikm_name or ODI_IKM_PRIORITY before creating the mapping.")
+        }
+        // Fail closed: a merge/update IKM without an update key would silently insert only,
+        // and control append must never run a merge/update IKM.
+        String selectedIkmLower = ikm.getName().toLowerCase()
+        boolean updateStyleIkm = selectedIkmLower.contains("merge") || selectedIkmLower.contains("update")
+        if (controlAppend && updateStyleIkm) {
+            throw new Exception("Control append cannot use a merge or update IKM")
+        }
+        if (!controlAppend && updateStyleIkm && ukColNames.isEmpty()) {
+            throw new Exception("Update key is required for a merge or update IKM")
         }
         boolean ikmSet = false
         MapPhysicalNode ikmAssignedNode = tgtNode

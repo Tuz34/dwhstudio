@@ -44,15 +44,27 @@ def addCheck = { String name, String status, String detail, Map metadata = [:] -
     checks << check
 }
 
-def scenarioByNameVersion = { IOdiScenarioFinder finder, String scenarioName, String version ->
+// Every version of a scenario name. findLatestByName alone only sees the newest
+// version, which made an older existing version look absent (ODI-15034).
+def scenariosByName = { IOdiScenarioFinder finder, String scenarioName ->
     try {
-        def latest = finder.findLatestByName(scenarioName)
-        if (latest != null && latest.getVersion()?.equalsIgnoreCase(version)) {
-            return latest
+        def found = finder.findByName(scenarioName)
+        if (found != null) {
+            return found.findAll { it != null }.toList()
         }
-        return null
     } catch (Throwable ignored) {
-        return null
+        // fall through to the full scan
+    }
+    try {
+        return finder.findAll().findAll { it != null && scenarioName.equalsIgnoreCase(it.getName()) }.toList()
+    } catch (Throwable ignored) {
+        return []
+    }
+}
+
+def scenarioByNameVersion = { IOdiScenarioFinder finder, String scenarioName, String version ->
+    return scenariosByName(finder, scenarioName).find {
+        it.getVersion()?.equalsIgnoreCase(version)
     }
 }
 
@@ -155,13 +167,18 @@ try {
     }
 
     IOdiScenarioFinder scenFinder = (IOdiScenarioFinder) em.getFinder(OdiScenario.class)
-    def existingExact = scenarioByNameVersion(scenFinder, scenarioName, scenarioVersion)
+    def allVersions = scenariosByName(scenFinder, scenarioName)
+    def existingExact = allVersions.find { it.getVersion()?.equalsIgnoreCase(scenarioVersion) }
     def existingLatest = scenFinder.findLatestByName(scenarioName)
+    String latestVersion = existingLatest?.getVersion()
+    // Both outcomes are acceptable: an existing version is reported as already_ready
+    // below, an absent one is generated. The check records which case applies.
     addCheck(
         "scenario_exact_absent_or_ready",
-        existingExact == null ? "pass" : "pass",
+        "pass",
         existingExact == null ? "Requested scenario version is absent." : "Requested scenario version already exists.",
-        [scenario: scenarioName, version: scenarioVersion]
+        [scenario: scenarioName, version: scenarioVersion, exists: existingExact != null,
+         version_count: allVersions.size(), latest_version: latestVersion]
     )
 
     if (checks.any { it.status == "fail" }) {
@@ -186,7 +203,7 @@ try {
             mode: "scenario_metadata_generation",
             side_effects: false,
             repository_connection_attempted: true,
-            scenario: [name: scenarioName, version: scenarioVersion, latest_version: existingLatest?.getVersion()],
+            scenario: [name: scenarioName, version: scenarioVersion, latest_version: latestVersion],
             checks: checks
         ]
         println JsonOutput.toJson(payload)
@@ -239,13 +256,14 @@ try {
     addCheck("scenario_generated", "pass", "Scenario metadata generated and committed.", [scenario: scenarioName, version: scenarioVersion])
     addCheck("forbidden_operations_not_called", "pass", "No remove, target DDL, data load, scenario start, or load plan start is used by this script.")
 
+    def newLatest = scenFinder.findLatestByName(scenarioName)
     def payload = [
         tool: "odi.generate_scenario_metadata",
         status: "passed",
         mode: "scenario_metadata_generation",
         side_effects: true,
         repository_connection_attempted: true,
-        scenario: [name: scenarioName, version: scenarioVersion],
+        scenario: [name: scenarioName, version: scenarioVersion, latest_version: newLatest?.getVersion()],
         checks: checks
     ]
     println JsonOutput.toJson(payload)

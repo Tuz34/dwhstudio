@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, TypedDict
@@ -22,6 +24,13 @@ class MappingRunFailure(TypedDict):
     batch_id: str
 
 
+class MappingRunUnsupported(TypedDict):
+    status: Literal["ikm_option_unsupported"]
+    option: str
+    error: str
+    batch_id: str
+
+
 @dataclass(frozen=True)
 class MappingRunOptions:
     mapping_name: str
@@ -32,7 +41,7 @@ class MappingRunOptions:
 
 @dataclass(frozen=True)
 class MappingRunOutcome:
-    payload: MappingRunSuccess | MappingRunFailure
+    payload: MappingRunSuccess | MappingRunFailure | MappingRunUnsupported
     status_code: int
 
 
@@ -180,6 +189,54 @@ def _failure_outcome(
     return MappingRunOutcome({"error": public_error, "batch_id": batch_id}, status_code)
 
 
+def _json_line(line: str) -> dict[str, Any] | None:
+    stripped = line.strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _unsupported_ikm_option(output: object) -> str | None:
+    """Return the option name when update_mapping reported ikm_option_unsupported."""
+    for line in str(output or "").splitlines():
+        payload = _json_line(line)
+        if payload is not None and payload.get("status") == "ikm_option_unsupported":
+            option = str(payload.get("option") or "TRUNCATE_TARGET_TABLE")
+            return option if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", option) else "TRUNCATE_TARGET_TABLE"
+    return None
+
+
+def _unsupported_option_outcome(
+    app_module: Any,
+    options: MappingRunOptions,
+    batch_id: str,
+    scenario_name: str,
+    completed_steps: list[str],
+    option: str,
+) -> MappingRunOutcome:
+    message = (
+        f"The mapping's IKM does not expose the {option} option. "
+        "Run with truncate_target_table=false or change the IKM."
+    )
+    _persist_run_state(
+        app_module, options, batch_id, scenario_name, "update_km", "RUN_FAILED",
+        completed_steps, message,
+    )
+    return MappingRunOutcome(
+        {
+            "status": "ikm_option_unsupported",
+            "option": option,
+            "error": message,
+            "batch_id": batch_id,
+        },
+        409,
+    )
+
+
 def execute_mapping_run(app_module: Any, options: MappingRunOptions) -> MappingRunOutcome:
     from odi_orchestrator import OdiOrchestrator
 
@@ -193,6 +250,11 @@ def execute_mapping_run(app_module: Any, options: MappingRunOptions) -> MappingR
         operation="update_km",
         truncate_target_table=options.truncate_target_table,
     )
+    unsupported_option = _unsupported_ikm_option(option_result)
+    if unsupported_option is not None:
+        return _unsupported_option_outcome(
+            app_module, options, batch_id, scenario_name, completed_steps, unsupported_option
+        )
     if _is_odi_failure(option_result):
         return _failure_outcome(
             app_module, options, batch_id, scenario_name, "update_km", completed_steps,
