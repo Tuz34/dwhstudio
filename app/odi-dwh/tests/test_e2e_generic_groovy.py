@@ -16,6 +16,7 @@ import pytest
 
 GROOVY_ROOT = Path(__file__).resolve().parents[1] / "odi_automation"
 SCRIPTS = (
+    "mapping_preflight.groovy",
     "generate_scenario_metadata.groovy",
     "register_datastore.groovy",
     "create_mapping.groovy",
@@ -65,6 +66,25 @@ def test_changed_scripts_parse(name):
     assert "GROOVY_SYNTAX_OK" in completed.stdout
 
 
+@pytest.mark.parametrize("name", SCRIPTS)
+def test_changed_scripts_sdk_compile_only(name):
+    import odi_orchestrator
+    from odi_orchestrator import OdiOrchestrator
+
+    java = Path(odi_orchestrator._JAVA_BIN)
+    sdk = Path(odi_orchestrator._ODI_SDK_LIB) / "odi-core.jar"
+    if not (java.is_file() and sdk.is_file() and Path(odi_orchestrator._GROOVY_JAR).is_file()):
+        pytest.skip("Local SDK/Groovy compiler unavailable.")
+    command = [
+        str(java), "-cp", OdiOrchestrator()._build_classpath(), "groovy.ui.GroovyMain", "-e",
+        "new GroovyClassLoader().parseClass(new File(args[0])); println('SDK_COMPILE_OK')",
+        str(GROOVY_ROOT / name),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "SDK_COMPILE_OK" in completed.stdout
+
+
 # --- Scenario version check (Defect A) ---------------------------------------
 
 
@@ -84,7 +104,8 @@ def test_scenario_exact_check_is_not_a_tautology_and_reports_latest_version():
     assert 'existingExact == null ? "pass" : "pass"' not in text
     assert "latest_version" in text
     # already_ready and passed envelopes both expose latest_version.
-    assert text.count("latest_version: ") >= 3
+    assert text.count("latest_version: ") == 2
+    assert "scenario_exact_absent_or_ready" not in text
     already_ready = text[text.index('status: "already_ready"'):]
     assert "latest_version: latestVersion" in already_ready[:400]
     assert "latest_version: newLatest" in text
@@ -159,6 +180,9 @@ def test_create_mapping_control_append_is_verified_and_insert_only():
     assert "Control append cannot use a merge or update IKM" in text
     assert "if (tgtBoundDS != null && !controlAppend)" in text
     assert 'physItCode = controlAppend ? "CA" : "IU"' in text
+    assert "ikmPriorityParam" not in text
+    assert 'System.getProperty("odi.ikm_priority"' not in text
+    assert 'selectExactIkm(allIkms, ikmNameParam, System.getProperty("odi.approved_ikms"),' in text
 
 
 def test_create_mapping_keeps_iu_update_key_contract():
@@ -190,3 +214,205 @@ def test_update_mapping_false_on_absent_option_is_a_noop():
 
     assert 'if (normalized == "false")' in text
     assert "IKM OPTION ABSENT" in text
+
+
+def _run_isolated_helpers(program: str) -> None:
+    """Only extracted pure helpers plus fake objects; never evaluate a live script body."""
+    command = _syntax_command(GROOVY_ROOT / "create_mapping.groovy")
+    if command is None:
+        pytest.skip("Standalone Groovy runtime unavailable.")
+    program = 'Locale.setDefault(new Locale("tr", "TR"))\n' + program
+    # Replace the parse expression and remove its file argument. No ODI SDK in the classpath.
+    completed = subprocess.run(
+        command[:-2] + [program + "\nprintln 'CONTRACT_OK'"],
+        capture_output=True, text=True, timeout=90, check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "CONTRACT_OK" in completed.stdout
+
+
+def test_exact_ikm_helper_never_falls_back_behaviorally():
+    text = _text("create_mapping.groovy")
+    helper = text[text.index("def selectExactIkm ="):text.index("def selectUpdateKey =")]
+    _run_isolated_helpers(helper + r'''
+def approved = "IKM Oracle Merge,IKM Oracle Insert"
+def merge = new Expando(getName: { "IKM Oracle Merge" })
+def insert = new Expando(getName: { "IKM Oracle Insert" })
+def custom = new Expando(getName: { "IKM Oracle Merge Custom" })
+assert selectExactIkm([merge, insert], "ikm oracle merge", approved).is(merge)
+for (args in [
+    [[insert], "IKM Oracle Merge", approved],
+    [[custom], "IKM Oracle Merge Custom", approved],
+    [[merge, insert], null, approved],
+    [[merge, merge], "IKM Oracle Merge", approved],
+    [[merge], "IKM Oracle Merge", "IKM Oracle Insert"]
+]) {
+    boolean blocked = false
+    try { selectExactIkm(*args) } catch (IllegalArgumentException | IllegalStateException expected) { blocked = true }
+    assert blocked
+}
+''')
+
+
+def test_update_key_helper_binds_only_active_matching_type_behaviorally():
+    text = _text("create_mapping.groovy")
+    helper = text[text.index("def selectUpdateKey ="):text.index("def odi = null")]
+    _run_isolated_helpers(helper + r'''
+enum Kind { PRIMARY_KEY, ALTERNATE_KEY, INDEX }
+def key = { name, kind, active, inDb, columns ->
+    new Expando(getName: { name }, getKeyType: { kind }, isActive: { active },
+        isInDatabase: { inDb }, getColumns: { columns.collect { col -> new Expando(getName: { col }) } })
+}
+def wrong = key("A_PK", Kind.PRIMARY_KEY, true, true, ["ID"])
+def inactive = key("B_UK", Kind.ALTERNATE_KEY, false, true, ["ID"])
+def metadataOnly = key("C_UK", Kind.ALTERNATE_KEY, true, false, ["ID"])
+def otherColumns = key("D_UK", Kind.ALTERNATE_KEY, true, true, ["ID", "OTHER"])
+def wanted = key("Z_UK", Kind.ALTERNATE_KEY, true, true, ["ID"])
+assert selectUpdateKey([wrong, inactive, metadataOnly, otherColumns, wanted], ["ID"] as Set, "ALTERNATE_KEY").is(wanted)
+assert selectUpdateKey([wanted, wrong], ["ID"] as Set, "PRIMARY_KEY").is(wrong)
+for (keys in [[], [wrong], [inactive], [metadataOnly], [otherColumns]]) {
+    boolean blocked = false
+    try { selectUpdateKey(keys, ["ID"] as Set, "ALTERNATE_KEY") }
+    catch (IllegalStateException expected) { blocked = true }
+    assert blocked
+}
+''')
+
+
+def test_register_key_rejects_inactive_or_wrong_type_without_mutation_behaviorally():
+    text = _text("register_datastore.groovy")
+    helper = text[text.index("    def registerKey ="):text.index("    // 1. Find the model")]
+    _run_isolated_helpers(r'''
+class OdiColumn { String name }
+class OdiDataStore { List columns = []; List keys = [] }
+class OdiKey {
+    enum KeyType { PRIMARY_KEY, ALTERNATE_KEY }
+    String name
+    KeyType keyType
+    boolean active
+    boolean inDatabase
+    List columns = []
+    OdiKey(OdiDataStore ds, String name) { this.name = name; ds.keys.add(this) }
+    void addColumn(OdiColumn col) { columns.add(col) }
+    boolean isInDatabase() { return inDatabase }
+    void setInDatabase(boolean value) { inDatabase = value }
+}
+def keyName = "UK_TEST"
+def keyColumnsStr = "ID"
+def keyTypeStr = "ALTERNATE_KEY"
+def persisted = []
+def em = new Expando(persist: { persisted.add(it) })
+''' + helper + r'''
+for (caseName in ["inactive", "notInDb", "wrongType", "wrongColumns", "valid", "missing"]) {
+    def id = new OdiColumn(name: "ID")
+    def ds = new OdiDataStore(columns: [id])
+    def existing = caseName == "missing" ? null : new OdiKey(ds, keyName)
+    if (existing != null) {
+        existing.keyType = caseName == "wrongType" ? OdiKey.KeyType.PRIMARY_KEY : OdiKey.KeyType.ALTERNATE_KEY
+        existing.active = caseName != "inactive"
+        existing.inDatabase = caseName != "notInDb"
+        existing.columns = caseName == "wrongColumns" ? [] : [id]
+    }
+    int before = persisted.size()
+    boolean blocked = false
+    try {
+        def result = registerKey(ds)
+        assert result.active && result.in_database && result.key_type == "ALTERNATE_KEY"
+        assert result.created == (caseName == "missing")
+    } catch (Exception expected) {
+        if (caseName in ["valid", "missing"]) throw expected
+        blocked = true
+    }
+    assert blocked == !(caseName in ["valid", "missing"])
+    assert persisted.size() == before + (caseName == "missing" ? 1 : 0)
+    if (existing != null) {
+        assert existing.active == (caseName != "inactive")
+        assert existing.inDatabase == (caseName != "notInDb")
+        assert existing.keyType == (caseName == "wrongType" ? OdiKey.KeyType.PRIMARY_KEY : OdiKey.KeyType.ALTERNATE_KEY)
+    }
+}
+def id = new OdiColumn(name: "id")
+def ds = new OdiDataStore(columns: [id])
+def wrong = new OdiKey(ds, "PK_OTHER")
+wrong.keyType = OdiKey.KeyType.PRIMARY_KEY
+wrong.active = true
+wrong.inDatabase = true
+wrong.columns = [id]
+def right = new OdiKey(ds, "UK_OTHER")
+right.keyType = OdiKey.KeyType.ALTERNATE_KEY
+right.active = true
+right.inDatabase = true
+right.columns = [id]
+int before = persisted.size()
+def result = registerKey(ds)
+assert result.name == "UK_OTHER" && !result.created
+assert persisted.size() == before
+''')
+
+
+def test_repository_preflight_helpers_are_exact_and_physical_behaviorally():
+    text = _text("mapping_preflight.groovy")
+    helpers = text[text.index("def inspectIkm ="):text.index("def odi = null")]
+    _run_isolated_helpers(helpers + r'''
+def km = { name, id -> new Expando(getName: { name }, getInternalId: { id }) }
+assert inspectIkm([], "IKM Oracle Merge").code == "ikm_missing"
+assert inspectIkm([km("IKM Oracle Merge", 1), km("ikm oracle merge", 2)], "IKM Oracle Merge").code == "ikm_ambiguous"
+assert inspectIkm([km("IKM Oracle Merge Custom", 1)], "IKM Oracle Merge").code == "ikm_missing"
+assert inspectIkm([km("IKM Oracle Merge", 7)], "IKM Oracle Merge").ikm_id == "7"
+def model = { code, owner, resource, id ->
+    def ds = new Expando(getName: { code + "_ALIAS" }, getResourceName: { resource },
+        getInternalId: { id }, isShortcut: { false })
+    def physical = owner == null ? null : new Expando(getSchemaName: { owner })
+    def logical = new Expando(getPhysicalSchema: { ctx -> assert ctx == "GLOBAL"; physical })
+    new Expando(getCode: { code }, getLogicalSchema: { logical }, getDataStores: { resource ? [ds] : [] },
+        getTechnology: { new Expando(getName: { "Oracle" }) })
+}
+def wrong = model("ORACLE_ODS", "DWH", "ODS_TEST", 1)
+def right = model("AUDIT_MODEL", "AUDIT_USER", "ODS_TEST", 42)
+def result = inspectSource([wrong, right], "AUDIT_USER", "ODS_TEST", "GLOBAL", "GLOBAL")
+assert result.status == "passed" && result.source.model_code == "AUDIT_MODEL"
+assert result.source.physical_schema == "AUDIT_USER" && result.source.datastore_id == "42"
+assert inspectSource([wrong], "AUDIT_USER", "ODS_TEST", "GLOBAL", "GLOBAL").code == "source_identity_missing"
+assert inspectSource([right, right], "AUDIT_USER", "ODS_TEST", "GLOBAL", "GLOBAL").code == "source_identity_ambiguous"
+assert inspectSource([right], "AUDIT_USER", "ODS_TEST", null, "GLOBAL").code == "source_identity_unverified"
+def unresolved = model("UNKNOWN", null, "ODS_TEST", 9)
+assert inspectSource([right, unresolved], "AUDIT_USER", "ODS_TEST", "GLOBAL", "GLOBAL").code == "source_identity_unverified"
+def qualifiedOther = model("WRONG", "AUDIT_USER", "DWH.ODS_TEST", 9)
+assert !inspectSource([qualifiedOther], "AUDIT_USER", "ODS_TEST", "GLOBAL", "GLOBAL").source.datastore_exists
+def absent = inspectSource([model("AUDIT_MODEL", "AUDIT_USER", null, null)], "AUDIT_USER", "ODS_TEST", "GLOBAL", "GLOBAL")
+assert absent.status == "passed" && !absent.source.datastore_exists && absent.source.datastore_id == null
+def collision = model("AUDIT_MODEL", "AUDIT_USER", "OTHER_RESOURCE", 44)
+collision.getDataStores()[0].getName = { "ODS_TEST" }
+assert inspectSource([collision], "AUDIT_USER", "ODS_TEST", "GLOBAL", "GLOBAL").code == "source_identity_unverified"
+''')
+
+
+def test_binding_rejects_identity_drift_behaviorally():
+    text = _text("create_mapping.groovy")
+    ikm = text[text.index("def selectExactIkm ="):text.index("def selectUpdateKey =")]
+    source = text[text.index("def verifySourceBinding ="):text.index("def odi = null")]
+    _run_isolated_helpers(ikm + source + r'''
+def km = new Expando(getName: { "IKM Oracle Merge" }, getInternalId: { 8 })
+boolean blocked = false
+try { selectExactIkm([km], "IKM Oracle Merge", "IKM Oracle Merge", "7") }
+catch (IllegalStateException expected) { blocked = true }
+assert blocked
+for (spec in [["AUDIT_USER", "ODS_TEST", 42, false], ["DWH", "ODS_TEST", 42, true],
+              ["AUDIT_USER", "OTHER", 42, true], ["AUDIT_USER", "ODS_TEST", 43, true]]) {
+    def logical = new Expando(getPhysicalSchema: { ctx -> new Expando(getSchemaName: { spec[0] }) })
+    def ds = new Expando(getModel: { new Expando(getLogicalSchema: { logical }) },
+        getResourceName: { spec[1] }, getInternalId: { spec[2] }, isShortcut: { false })
+    blocked = false
+    try { verifySourceBinding(ds, "AUDIT_USER", "ODS_TEST", "GLOBAL", "42") }
+    catch (IllegalStateException expected) { blocked = true }
+    assert blocked == spec[3]
+}
+''')
+
+
+def test_repository_preflight_has_no_write_or_data_operations():
+    text = _text("mapping_preflight.groovy")
+    for forbidden in (".persist(", ".remove(", ".commit(", ".getTransaction(", "createStatement", "executeQuery",
+                      "getConnectionSettings", "getJdbcUrl", "getUserName", "getMessage()", "printStackTrace"):
+        assert forbidden not in text
+    assert '"mapping_preflight.groovy"' in (GROOVY_ROOT.parent / "odi_orchestrator.py").read_text(encoding="utf-8")

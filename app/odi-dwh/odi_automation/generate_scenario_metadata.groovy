@@ -171,15 +171,22 @@ try {
     def existingExact = allVersions.find { it.getVersion()?.equalsIgnoreCase(scenarioVersion) }
     def existingLatest = scenFinder.findLatestByName(scenarioName)
     String latestVersion = existingLatest?.getVersion()
-    // Both outcomes are acceptable: an existing version is reported as already_ready
-    // below, an absent one is generated. The check records which case applies.
-    addCheck(
-        "scenario_exact_absent_or_ready",
-        "pass",
-        existingExact == null ? "Requested scenario version is absent." : "Requested scenario version already exists.",
-        [scenario: scenarioName, version: scenarioVersion, exists: existingExact != null,
-         version_count: allVersions.size(), latest_version: latestVersion]
-    )
+    // Ownership must be checked on the requested version, not the latest one.
+    if (existingExact != null) {
+        def requestedMappingId = mapping?.getInternalId()
+        def sourceMappingId = existingExact.getSourceMappingId()
+        boolean sameMapping = requestedMappingId != null && sourceMappingId != null &&
+            sourceMappingId.toString() == requestedMappingId.toString()
+        addCheck(
+            "scenario_exact_mapping_owner",
+            sameMapping ? "pass" : "fail",
+            sameMapping ? "Requested scenario version belongs to the mapping." :
+                "Requested scenario version ownership is missing or does not match the mapping.",
+            [scenario: scenarioName, version: scenarioVersion]
+        )
+    }
+    // An existing version is reported as already_ready below and an absent one is
+    // generated; neither outcome is a check, so no constant "pass" entry is emitted here.
 
     if (checks.any { it.status == "fail" }) {
         def payload = [

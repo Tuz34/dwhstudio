@@ -14,6 +14,50 @@ import oracle.odi.core.config.*
 import oracle.odi.core.OdiInstance
 import oracle.odi.core.security.Authentication
 import oracle.odi.core.persistence.transaction.*
+import oracle.odi.domain.topology.OdiContext
+
+def selectExactIkm = { allIkms, String requested, String approvedNames, String requiredId = null ->
+    Set<String> approved = (approvedNames ?: "").split(",").collect { it.trim().toLowerCase(Locale.ROOT) } as Set
+    if (!requested?.trim() || !approved.contains(requested.trim().toLowerCase(Locale.ROOT))) {
+        throw new IllegalArgumentException("An exact approved odi.ikm_name is required")
+    }
+    def matches = allIkms.findAll { it.getName().equalsIgnoreCase(requested.trim()) }
+    if (matches.size() != 1) {
+        println '{"status":"error","action":"create_mapping","error_code":"ikm_not_found_or_ambiguous"}'
+        throw new IllegalStateException("Requested IKM was not found uniquely in the repository")
+    }
+    if (requiredId != null && matches[0].getInternalId()?.toString() != requiredId) {
+        throw new IllegalStateException("Repository IKM identity changed after preflight")
+    }
+    return matches[0]
+}
+
+def selectUpdateKey = { keys, Set<String> requiredColumns, String requiredType ->
+    if (requiredType != null && !(requiredType in ["PRIMARY_KEY", "ALTERNATE_KEY"])) {
+        throw new IllegalArgumentException("Invalid required update key type")
+    }
+    def matches = keys.findAll { key ->
+        String kind = key.getKeyType().name()
+        Set<String> columns = key.getColumns().collect { it.getName().toUpperCase(Locale.ROOT) } as Set
+        key.isActive() && key.isInDatabase() && (kind in ["PRIMARY_KEY", "ALTERNATE_KEY"]) &&
+            (requiredType == null || kind == requiredType) &&
+            (requiredColumns.isEmpty() || columns == requiredColumns)
+    }
+    if (matches.isEmpty() && !requiredColumns.isEmpty()) {
+        throw new IllegalStateException("Required update key is missing or mismatched (type, active, database, columns)")
+    }
+    return matches.sort { it.getName() }.find { true }
+}
+
+def verifySourceBinding = { source, String owner, String resource, context, String requiredId ->
+    def physical = source.getModel().getLogicalSchema()?.getPhysicalSchema(context)
+    String actualResource = source.getResourceName()?.toUpperCase(Locale.ROOT)
+    if (context == null || source.isShortcut() || !physical?.getSchemaName()?.equalsIgnoreCase(owner) ||
+        !(actualResource in [resource, owner + "." + resource]) ||
+        (requiredId != null && source.getInternalId()?.toString() != requiredId)) {
+        throw new IllegalStateException("Source physical identity changed or is unverified")
+    }
+}
 
 def odi = null
 boolean standaloneMode = false
@@ -72,8 +116,9 @@ try {
     String tgtModName = System.getProperty("odi.tgt_model") ?: "DWH"
     String sourceSystemName = System.getProperty("odi.source_system") ?: "ORACLE_SAMPLE_SCHEMAS"
     String requiredUpdateKeyColumnsStr = System.getProperty("odi.required_update_key_columns")
+    String requiredUpdateKeyType = System.getProperty("odi.required_update_key_type")
     // Integration type: IU (default, incremental update) or CONTROL_APPEND (insert-style IKM only).
-    String integrationTypeParam = (System.getProperty("odi.integration_type") ?: "IU").trim().toUpperCase()
+    String integrationTypeParam = (System.getProperty("odi.integration_type") ?: "IU").trim().toUpperCase(Locale.ROOT)
     if (!(integrationTypeParam in ["IU", "CONTROL_APPEND"])) {
         throw new Exception("Invalid odi.integration_type")
     }
@@ -110,9 +155,6 @@ try {
         }
     }
     
-    Mapping mapping = new Mapping(persistedName, folder)
-    em.persist(mapping)
-    
     // Custom helper to find datastore robustly
     def findDsRobust = { emObj, dsName, modName ->
         def finder = (IOdiDataStoreFinder) emObj.getFinder(OdiDataStore.class)
@@ -148,9 +190,18 @@ try {
 
     OdiDataStore srcDS = findDsRobust(em, srcDSName, srcModName)
     if (srcDS == null) throw new Exception("Source Datastore not found: " + srcDSName + " in " + srcModName)
+    String requiredSourceOwner = System.getProperty("odi.required_src_owner")
+    if (requiredSourceOwner != null) {
+        def sourceContext = em.getFinder(OdiContext.class).findByCode(System.getProperty("odi.source_context"))
+        verifySourceBinding(srcDS, requiredSourceOwner, System.getProperty("odi.required_src_resource"),
+            sourceContext, System.getProperty("odi.required_src_id"))
+    }
     
     OdiDataStore tgtDS = findDsRobust(em, tgtDSName, tgtModName)
     if (tgtDS == null) throw new Exception("Target Datastore not found: " + tgtDSName + " in " + tgtModName)
+
+    Mapping mapping = new Mapping(persistedName, folder)
+    em.persist(mapping)
     
     DatastoreComponent srcComp = new DatastoreComponent(mapping, srcDS)
     DatastoreComponent tgtComp = new DatastoreComponent(mapping, tgtDS)
@@ -308,37 +359,31 @@ try {
     Set<String> requiredUpdateKeyColumns = new LinkedHashSet<>()
     if (requiredUpdateKeyColumnsStr != null && requiredUpdateKeyColumnsStr.trim().length() > 0) {
         requiredUpdateKeyColumnsStr.split(",").each { name ->
-            String normalized = name.trim().toUpperCase()
+            String normalized = name.trim().toUpperCase(Locale.ROOT)
             if (!(normalized ==~ /[A-Z][A-Z0-9_$#]{0,127}/)) {
                 throw new Exception("Invalid required update key column")
             }
             requiredUpdateKeyColumns.add(normalized)
         }
     }
-    def keyColumnNames = { key ->
-        Set<String> names = new LinkedHashSet<>()
-        try {
-            key.getColumns().each { col -> names.add(col.getName().toUpperCase()) }
-        } catch (Exception ignored) {}
-        return names
-    }
     if (tgtBoundDS != null && !controlAppend) {
         def keys = tgtBoundDS.getKeys()
-        // When an explicit contract is present, select the exact column match; otherwise use the previous preference chain.
-        def uKey = requiredUpdateKeyColumns.isEmpty()
-            ? (keys.find { it.getName().toUpperCase().startsWith("UK_") } ?: keys.find { true })
-            : keys.find { keyColumnNames(it) == requiredUpdateKeyColumns }
+        def uKey = selectUpdateKey(keys, requiredUpdateKeyColumns,
+            requiredUpdateKeyColumns.isEmpty() ? null : (requiredUpdateKeyType ?: "ALTERNATE_KEY"))
         if (uKey != null) {
             tgtComp.setUpdateKey(uKey)
+            if (tgtComp.getUpdateKey() != uKey) {
+                throw new IllegalStateException("Update key binding verification failed")
+            }
             println "MAPPING UPDATE KEY SET: ${uKey.getName()}"
 
             // Collect the UK column names (for ORA-38104)
             try {
-                uKey.getColumns().each { col -> ukColNames.add(col.getName().toUpperCase()) }
+                uKey.getColumns().each { col -> ukColNames.add(col.getName().toUpperCase(Locale.ROOT)) }
             } catch (Exception e) {
                 try {
                     uKey.getKeyColumns().each { kc ->
-                        ukColNames.add(kc.getName().toUpperCase())
+                        ukColNames.add(kc.getName().toUpperCase(Locale.ROOT))
                     }
                 } catch (Exception e2) {}
             }
@@ -457,19 +502,10 @@ try {
     IOdiIKMFinder ikmFinder = (IOdiIKMFinder) em.getFinder(OdiIKM.class)
     IOdiLKMFinder lkmFinder = (IOdiLKMFinder) em.getFinder(OdiLKM.class)
     
-    // Optional: exact-match KM names (sent from Python)
+    // IKM is an exact approved name pinned by Python; LKM keeps its existing fallback.
     String ikmNameParam = System.getProperty("odi.ikm_name")
     String lkmNameParam = System.getProperty("odi.lkm_name")
     String truncateTargetTableParam = System.getProperty("odi.truncate_target_table")
-    // Configurable fallback chains (comma-separated, supplied by config.py / .env)
-    String ikmPriorityParam = System.getProperty("odi.ikm_priority", "incremental update,oracle merge,oracle update,oracle insert")
-    if (controlAppend) {
-        // Control append is insert-only: never fall back to a merge or update IKM.
-        ikmPriorityParam = ikmPriorityParam.split(",").findAll { kw ->
-            String lowered = kw.trim().toLowerCase()
-            !(lowered.contains("merge") || lowered.contains("update"))
-        }.join(",")
-    }
     String lkmPriorityParam = System.getProperty("odi.lkm_priority", "sql to oracle,mssql to oracle,sql to sql")
 
     def normalizeBooleanParam = { rawValue, propName ->
@@ -501,22 +537,9 @@ try {
     def allIkms = ikmFinder.findAll()
     def allLkms = lkmFinder.findAll()
 
-    // IKM selection: use the exact match when present, otherwise the configurable fallback chain
-    OdiIKM ikm = null
-    if (ikmNameParam != null && ikmNameParam.trim().length() > 0) {
-        ikm = allIkms.find { it.getName().equalsIgnoreCase(ikmNameParam.trim()) }
-        if (ikm != null) println "IKM: ${ikm.getName()} (exact match)"
-        else println "WARNING: IKM exact match not found: ${ikmNameParam} — fallback chain will be tried"
-    }
-    if (ikm == null) {
-        // The fallback chain comes from configuration (ODI_IKM_PRIORITY)
-        ikmPriorityParam.split(",").each { keyword ->
-            if (ikm == null) {
-                ikm = allIkms.find { it.getName().toLowerCase().contains(keyword.trim().toLowerCase()) }
-            }
-        }
-        if (ikm != null) println "IKM: ${ikm.getName()} (fallback: ${ikmPriorityParam})"
-    }
+    OdiIKM ikm = selectExactIkm(allIkms, ikmNameParam, System.getProperty("odi.approved_ikms"),
+        System.getProperty("odi.required_ikm_id"))
+    println "IKM: ${ikm.getName()} (exact approved match)"
 
     // LKM selection: use the exact match when present, otherwise the configurable fallback chain
     OdiLKM lkm = null
@@ -594,7 +617,7 @@ try {
 
         // IKM: always assigned to the target node and verified by reading it back.
         if (ikm == null) {
-            throw new Exception("IKM selection failed. Configure odi.ikm_name or ODI_IKM_PRIORITY before creating the mapping.")
+            throw new Exception("IKM selection failed. Configure an exact approved odi.ikm_name.")
         }
         // Fail closed: a merge/update IKM without an update key would silently insert only,
         // and control append must never run a merge/update IKM.

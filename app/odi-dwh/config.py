@@ -9,11 +9,13 @@ Usage:
 If the environment file is absent, the root .env is read as a fallback.
 """
 
-import os
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
 from dotenv import load_dotenv
+
 from secret_provider import get_secret, get_secret_list
 
 # ── 1. Environment detection ──────────────────────────────────────────────────────────
@@ -136,7 +138,17 @@ SOURCE_SYSTEM_NAME  = os.getenv("SOURCE_SYSTEM_NAME", "ORACLE_SAMPLE_SCHEMAS")
 TABLE_NAME_MAX_LEN  = int(os.getenv("TABLE_NAME_MAX_LENGTH", "128"))  # Oracle 12.2+/19c and ODI 14c support 128-char identifiers
 OJDBC_JAR_NAME      = os.getenv("OJDBC_JAR_NAME", "ojdbc8.jar")     # ojdbc8 | ojdbc11
 GROOVY_JAR_NAME     = os.getenv("GROOVY_JAR_NAME", "groovy-all-2.4.17.jar")
+# Oracle user that executes ODI loads and needs DML grants on SCD2 targets.
+# Override when the database has no ODI_EXEC user (documented in dwh-scd2-generic-builder.md).
+ODI_EXEC_USER       = (os.getenv("ODI_EXEC_USER", "ODI_EXEC") or "ODI_EXEC").strip().upper()
 ODI_IKM_PRIORITY    = os.getenv("ODI_IKM_PRIORITY", "oracle merge,oracle update,oracle insert")
+# Exact KM names an API caller may request (comma separated, case-insensitive exact match).
+ODI_APPROVED_IKMS   = os.getenv(
+    "ODI_APPROVED_IKMS",
+    "IKM Oracle Incremental Update,IKM Oracle Incremental Update (MERGE),IKM Oracle Merge,"
+    "IKM Oracle Insert,IKM Oracle Control Append,IKM Oracle Slowly Changing Dimension,"
+    "IKM SQL Control Append",
+)
 ODI_LKM_PRIORITY    = os.getenv("ODI_LKM_PRIORITY", "sql to oracle,mssql to oracle,sql to sql")
 
 # ── 9. Alert & Monitoring Settings ──────────────────────────────────────────

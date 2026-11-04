@@ -21,6 +21,7 @@ BASE_PARAMS = {
     "tgt_model": "ORACLE_ODS",
     "tgt_owner": "DWH",
     "tgt_table": "ODS_HR_EMPLOYEES",
+    "update_key_columns": ["EMPLOYEE_ID"],
 }
 
 
@@ -216,16 +217,12 @@ def test_create_target_without_key_keeps_previous_ddl(monkeypatch):
     assert result["key"]["status"] == "NONE"
 
 
-def test_existing_target_adds_missing_key_only(monkeypatch):
-    added = []
+def test_existing_target_blocks_missing_key_without_ddl(monkeypatch):
     monkeypatch.setattr(target_table_service, "_target_exists", lambda _c: True)
     monkeypatch.setattr(
-        target_table_service, "_reconcile_existing", lambda _c, _d: ([], [])
+        target_table_service, "_target_columns", lambda _c: pytest.fail("key check must block first")
     )
-    monkeypatch.setattr(target_table_service, "_existing_key_column_sets", lambda _c: [])
-    monkeypatch.setattr(
-        target_table_service, "_add_key_constraint", lambda ctx, sql: added.append(sql)
-    )
+    monkeypatch.setattr(target_table_service, "_existing_key_constraints", lambda _c: [])
 
     result = target_table_service.execute_target_table_plan(
         _Generator(),
@@ -234,21 +231,20 @@ def test_existing_target_adds_missing_key_only(monkeypatch):
         "DWH",
     )
 
-    assert len(added) == 1 and 'UNIQUE ("ID")' in added[0]
-    assert result["key"]["status"] == "CREATED"
+    assert result["status"] == "BLOCKED"
+    assert result["code"] == "update_key_missing_on_existing_target"
+    assert result["ddl"] == ""
 
 
 def test_existing_target_with_matching_key_is_left_alone(monkeypatch):
-    added = []
     monkeypatch.setattr(target_table_service, "_target_exists", lambda _c: True)
     monkeypatch.setattr(
-        target_table_service, "_reconcile_existing", lambda _c, _d: ([], [])
+        target_table_service, "_target_columns", lambda _c: {"ID", "NAME"}
     )
     monkeypatch.setattr(
-        target_table_service, "_existing_key_column_sets", lambda _c: [("ID",)]
-    )
-    monkeypatch.setattr(
-        target_table_service, "_add_key_constraint", lambda ctx, sql: added.append(sql)
+        target_table_service, "_existing_key_constraints", lambda _c: [
+            {"name": "UK_X", "columns": ["ID"], "type": "U", "enabled": True, "validated": True}
+        ]
     )
 
     result = target_table_service.execute_target_table_plan(
@@ -258,7 +254,8 @@ def test_existing_target_with_matching_key_is_left_alone(monkeypatch):
         "DWH",
     )
 
-    assert added == []
+    assert result["status"] == "ALREADY_IN_SYNC"
+    assert result["ddl"] == ""
     assert result["key"]["status"] == "ALREADY_PRESENT"
 
 
@@ -294,17 +291,17 @@ def test_update_key_kind_is_restricted():
         _validate(update_key_columns=["ID"], update_key_kind="clustered")
 
 
-def test_defaults_do_not_change_when_new_fields_are_absent():
+def test_default_iu_resolves_exact_merge_with_requested_key():
     validated = _validate()
 
-    assert validated["update_key_columns"] == []
+    assert validated["update_key_columns"] == ["EMPLOYEE_ID"]
     assert validated["integration_type"] == "IU"
-    assert validated["ikm_name"] is None
+    assert validated["ikm_name"] == "IKM Oracle Merge"
 
 
 def test_merge_ikm_without_update_key_fails_closed():
     with pytest.raises(ValueError, match="update key"):
-        _validate(ikm_name="IKM Oracle Merge")
+        _validate(ikm_name="IKM Oracle Merge", update_key_columns=[])
 
 
 def test_merge_ikm_with_update_key_is_accepted():
@@ -329,7 +326,7 @@ def test_integration_type_is_restricted_to_two_values():
 def test_ikm_name_must_match_configured_allowlist(monkeypatch):
     import mapping_generator
 
-    monkeypatch.setattr(mapping_generator, "ODI_IKM_PRIORITY", "oracle merge,oracle insert")
+    monkeypatch.setattr(mapping_generator, "ODI_APPROVED_IKMS", "IKM Oracle Merge,IKM Oracle Insert")
 
     assert _validate(ikm_name="IKM Oracle Insert")["ikm_name"] == "IKM Oracle Insert"
     with pytest.raises(ValueError, match="ikm_name"):
@@ -348,7 +345,7 @@ def test_control_append_rejects_merge_or_update_ikm():
 
 
 def test_control_append_defaults_to_insert_ikm_and_needs_no_key():
-    validated = _validate(integration_type="CONTROL_APPEND")
+    validated = _validate(integration_type="CONTROL_APPEND", update_key_columns=[])
 
     assert validated["integration_type"] == "CONTROL_APPEND"
     assert "insert" in validated["ikm_name"].lower()
@@ -416,7 +413,9 @@ def test_plan_without_key_has_no_key_entries(monkeypatch):
         generator, "_get_source_columns_oracle", lambda _t: _source_columns("EMPLOYEE_ID")
     )
 
-    plan = generator._build_target_column_plan(generator.validate_params(dict(BASE_PARAMS)))
+    plan = generator._build_target_column_plan(generator.validate_params(
+        dict(BASE_PARAMS, integration_type="CONTROL_APPEND", update_key_columns=[])
+    ))
 
     assert plan["unique_key"] is None and plan["primary_key"] is None
 
@@ -457,6 +456,7 @@ def test_create_mapping_passes_required_update_key_and_integration(monkeypatch):
     generator._create_odi_mapping(validated)
 
     assert captured["required_update_key_columns"] == ["EMPLOYEE_ID"]
+    assert captured["required_update_key_type"] == "ALTERNATE_KEY"
     assert captured["ikm_name"] == "IKM Oracle Merge"
     assert captured["integration_type"] == "IU"
 
@@ -474,14 +474,14 @@ def test_create_mapping_control_append_does_not_require_update_key(monkeypatch):
     assert "insert" in captured["ikm_name"].lower()
 
 
-def test_create_mapping_without_new_fields_keeps_previous_call(monkeypatch):
+def test_create_mapping_transports_exact_default_ikm_and_key(monkeypatch):
     captured = _capture_generate_mapping(monkeypatch)
     generator, validated = _prepared_generator(monkeypatch)
 
     generator._create_odi_mapping(validated)
 
-    assert not captured.get("required_update_key_columns")
-    assert captured["ikm_name"] is None
+    assert captured["required_update_key_columns"] == ["EMPLOYEE_ID"]
+    assert captured["ikm_name"] == "IKM Oracle Merge"
     assert captured["integration_type"] == "IU"
 
 
@@ -682,6 +682,7 @@ def test_internal_source_reads_through_target_service_with_explicit_owner(monkey
             "tgt_model": "ORACLE_DWH",
             "tgt_owner": "DWH",
             "tgt_table": "DWH_PRODUCT_T1",
+            "update_key_columns": ["PROD_ID"],
         }
     )
 
@@ -708,6 +709,7 @@ def test_internal_source_uses_qualified_owner_when_allowed(monkeypatch):
             "tgt_model": "ORACLE_DWH",
             "tgt_owner": "DWH",
             "tgt_table": "DWH_X",
+            "update_key_columns": ["PROD_ID"],
         }
     )
 

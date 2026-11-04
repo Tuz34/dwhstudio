@@ -111,7 +111,7 @@ def test_target_table_domain_error_preserves_original_cause(monkeypatch):
 
 def test_target_table_existing_plan_returns_metadata_only(monkeypatch):
     monkeypatch.setattr(target_table_service, "_target_exists", lambda _context: True)
-    monkeypatch.setattr(target_table_service, "_reconcile_existing", lambda _context, _columns: ([], []))
+    monkeypatch.setattr(target_table_service, "_target_columns", lambda _context: {"ID"})
     logs = []
     generator = SimpleNamespace(_add_log=lambda *args: logs.append(args))
 

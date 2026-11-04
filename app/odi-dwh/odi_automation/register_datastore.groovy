@@ -106,26 +106,36 @@ try {
         if (!(keyName ==~ /[A-Za-z][A-Za-z0-9_$#]{0,127}/)) throw new Exception("Invalid key name")
         List<String> wanted = []
         keyColumnsStr.split(",").each { raw ->
-            String colName = raw.trim().toUpperCase()
+            String colName = raw.trim().toUpperCase(Locale.ROOT)
             if (!(colName ==~ /[A-Z][A-Z0-9_$#]{0,127}/)) throw new Exception("Invalid key column")
             if (!wanted.contains(colName)) wanted.add(colName)
         }
-        OdiKey.KeyType keyType = OdiKey.KeyType.valueOf(keyTypeStr.trim().toUpperCase())
+        OdiKey.KeyType keyType = OdiKey.KeyType.valueOf(keyTypeStr.trim().toUpperCase(Locale.ROOT))
         if (keyType != OdiKey.KeyType.ALTERNATE_KEY && keyType != OdiKey.KeyType.PRIMARY_KEY) {
             throw new Exception("Unsupported key type")
         }
         Map<String, OdiColumn> byName = [:]
-        targetDs.getColumns().each { c -> byName[c.getName()?.toUpperCase()] = c }
+        targetDs.getColumns().each { c -> byName[c.getName()?.toUpperCase(Locale.ROOT)] = c }
         wanted.each { colName ->
             if (!byName.containsKey(colName)) throw new Exception("Key column is missing from datastore")
         }
         boolean created = false
         OdiKey key = targetDs.getKeys().find { it.getName()?.equalsIgnoreCase(keyName) }
         if (key == null) {
-            // Same column set under another name already satisfies the contract.
-            key = targetDs.getKeys().find { k ->
-                (k.getColumns().collect { it.getName()?.toUpperCase() } as Set) == (wanted as Set)
+            def matchingColumns = targetDs.getKeys().findAll { k ->
+                (k.getColumns().collect { it.getName()?.toUpperCase(Locale.ROOT) } as Set) == (wanted as Set)
             }
+            key = matchingColumns.find { k -> k.getKeyType() == keyType && k.isActive() && k.isInDatabase() }
+                ?: matchingColumns.find { true }
+        }
+        if (key != null && key.getKeyType() != keyType) {
+            // Never replace or retype an existing key: fail closed with a structured code.
+            println '{"status":"error","action":"register_datastore","error_code":"update_key_kind_mismatch"}'
+            throw new Exception("Existing key type does not match the requested key kind")
+        }
+        if (key != null && (!key.isActive() || !key.isInDatabase())) {
+            println '{"status":"error","action":"register_datastore","error_code":"update_key_metadata_inactive"}'
+            throw new Exception("Existing key must be active and marked in database")
         }
         if (key == null) {
             key = new OdiKey(targetDs, keyName)
@@ -136,10 +146,11 @@ try {
             em.persist(key)
             created = true
         }
-        List<String> actual = key.getColumns().collect { it.getName()?.toUpperCase() }
+        List<String> actual = key.getColumns().collect { it.getName()?.toUpperCase(Locale.ROOT) }
         if ((actual as Set) != (wanted as Set)) throw new Exception("Existing key columns do not match")
         println "STEP KEY: key ${created ? 'created' : 'already present'}: ${key.getName()}"
-        return [name: key.getName(), created: created, column_count: actual.size()]
+        return [name: key.getName(), created: created, column_count: actual.size(),
+            key_type: key.getKeyType().name(), active: key.isActive(), in_database: key.isInDatabase()]
     }
 
     // 1. Find the model

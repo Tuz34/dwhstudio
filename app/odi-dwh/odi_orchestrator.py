@@ -1,5 +1,5 @@
-import logging
 import json
+import logging
 import os
 import re
 import shutil
@@ -7,10 +7,26 @@ import subprocess
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from config import (ODI_HOME, ODI_PROJECT, ODI_FOLDER, JAVA_HOME, JAVA_FALLBACK_PATHS,
-                    ODI_MODE, ODI_REST_URL, ODI_REST_USER, ODI_REST_PASSWORD,
-                    SOURCE_SYSTEM_NAME, OJDBC_JAR_NAME, GROOVY_JAR_NAME,
-                    ODI_IKM_PRIORITY, ODI_LKM_PRIORITY, TABLE_NAME_MAX_LEN)
+
+from config import (
+    GROOVY_JAR_NAME,
+    JAVA_FALLBACK_PATHS,
+    JAVA_HOME,
+    ODI_APPROVED_IKMS,
+    ODI_FOLDER,
+    ODI_HOME,
+    ODI_IKM_PRIORITY,
+    ODI_LKM_PRIORITY,
+    ODI_MODE,
+    ODI_PROJECT,
+    ODI_REST_PASSWORD,
+    ODI_REST_URL,
+    ODI_REST_USER,
+    OJDBC_JAR_NAME,
+    SOURCE_SYSTEM_NAME,
+    TABLE_NAME_MAX_LEN,
+)
+from ikm_policy import normalize_repository_preflight, resolve_approved_ikm, verified_source_identity
 
 logger = logging.getLogger("odi_orchestrator")
 
@@ -53,12 +69,16 @@ GROOVY_ACTION_REGISTRY = {
     "list_projects.groovy": _action("read_only"),
     "load_plan_probe.groovy": _action("read_only"),
     "read_only_probe.groovy": _action("read_only"),
+    "mapping_preflight.groovy": _action("read_only"),
     "register_datastore.groovy": _action("repository_write"),
     "remove_column.groovy": _action("repository_write"),
     "repair_datastore_metadata.groovy": _action("repository_write"),
     "repair_mapping_components.groovy": _action("repository_write"),
     "run_load_plan_remote.groovy": _action("load_plan_run"),
     "run_scenario.groovy": _action("scenario_run"),
+    "scd2_datastore_register.groovy": _action("repository_write"),
+    "scd2_mapping_create.groovy": _action("repository_write"),
+    "scd2_probe.groovy": _action("read_only"),
     "scenario_probe.groovy": _action("read_only"),
     "seed_model_datastore.groovy": _action("repository_write"),
     "seed_physical_topology.groovy": _action("topology_write"),
@@ -104,7 +124,35 @@ _PARAM_VAL_RE   = re.compile(r'^[a-zA-Z0-9._\-/\\ :,()#]+$')
 # Extended regex for expression values (=, ;, ', ||, CASE WHEN, LIKE '%X%', !=, &, [], etc.)
 _EXPR_VAL_RE    = re.compile(r"^[a-zA-Z0-9._\-/\\ :,()#=;'|*+<>%!&\[\]{}\"]+$")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
+_SCD2_ERROR_KEYS = frozenset(
+    {
+        "tool",
+        "status",
+        "mode",
+        "side_effects",
+        "repository_connection_attempted",
+        "raw_rows_included",
+        "pk_values_included",
+        "secret_printed",
+        "error_type",
+    }
+)
 _STRICT_STRUCTURED_ERROR_CONTRACTS = {
+    "scd2_probe.groovy": {
+        "tool": "odi.scd2_probe",
+        "mode": "generic_scd2_readiness_probe",
+        "keys": _SCD2_ERROR_KEYS,
+    },
+    "scd2_datastore_register.groovy": {
+        "tool": "odi.scd2_datastore_register",
+        "mode": "generic_absent_only_scd2_datastore_registration",
+        "keys": _SCD2_ERROR_KEYS,
+    },
+    "scd2_mapping_create.groovy": {
+        "tool": "odi.scd2_mapping_create",
+        "mode": "generic_absent_only_scd2_mapping_creation",
+        "keys": _SCD2_ERROR_KEYS,
+    },
     "dim_product_scd2_scenario_run.groovy": {
         "tool": "odi.dim_product_scd2_scenario_run",
         "mode": "fixed_scd2_scenario_run",
@@ -188,20 +236,27 @@ def groovy_approval_context(approved: bool):
         _GROOVY_APPROVED.reset(token)
 
 
-_JMX_NOISE_START_RE = re.compile(r"(?i)^SEVERE:.*JMX\s+FRAMEWORK\s+SPI")
+_JMX_NOISE_START_RE = re.compile(r"(?i)^SEVERE:\s+Error initializing the JMX\s+FRAMEWORK\s+SPI\.?$")
 _JMX_NOISE_DETAIL_RE = re.compile(
-    r"(?i)(javax[./]management[./]j2ee|^\s+at\s|^\s*\.\.\.\s+\d+\s+more"
-    r"|^caused by:|^[\w.$]+(exception|error))"
+    r"^\s+(?:at\s+[\w.$/]+\([^\r\n]*\)|\.\.\.\s+\d+\s+more)\s*$"
 )
-_LOG_HEADER_RE = re.compile(r"^[A-Z][a-z]{2} \d{1,2}, \d{4} .*(AM|PM)\s+\S+")
+_LOG_HEADER_RE = re.compile(r"^[A-Z][a-z]{2} \d{1,2}, \d{4} .*\b(AM|PM)\b\s+\S+")
+_JMX_MISSING_CLASS_ERROR_RE = re.compile(
+    r"^(?:(?:Caused by:|ERROR:)\s*)?java\.lang\.(?:NoClassDefFoundError|ClassNotFoundException):\s*"
+    r"javax[./]management[./]j2ee(?:[./][A-Za-z_$][\w$]*)+\s*$"
+)
+_JMX_OTHER_EXCEPTION_RE = re.compile(r"^\s*(?:Caused by:|Suppressed:|[\w.$]+(?:Exception|Error)\b)")
+_SEVERE_LINE_RE = re.compile(r"(?i)^SEVERE\b")
 
 
 def _strip_known_jmx_noise(text: str) -> str:
-    """Drop only the known JMX framework SPI SEVERE block from Java output.
+    """Drop only the known JMX framework SPI missing-class SEVERE block from Java output.
 
     The block is the log header, the SEVERE line naming the JMX framework SPI and
-    its stack trace (missing javax.management.j2ee classes). Every other line,
-    including any other SEVERE line, is kept so it can still classify the output.
+    its stack trace, and it is dropped only when that trace is a
+    NoClassDefFoundError/ClassNotFoundException for javax.management.j2ee classes.
+    Any other JMX failure, and every other line including any other SEVERE line,
+    is kept so it can still classify the output.
     """
     lines = str(text or "").splitlines()
     kept: list[str] = []
@@ -209,12 +264,21 @@ def _strip_known_jmx_noise(text: str) -> str:
     while index < len(lines):
         stripped = lines[index].strip()
         if _JMX_NOISE_START_RE.match(stripped):
-            if kept and _LOG_HEADER_RE.match(kept[-1].strip()):
-                kept.pop()
-            index += 1
-            while index < len(lines) and _JMX_NOISE_DETAIL_RE.search(lines[index]):
-                index += 1
-            continue
+            end = index + 1
+            missing_class = end < len(lines) and _JMX_MISSING_CLASS_ERROR_RE.fullmatch(lines[end].strip())
+            if missing_class:
+                end += 1
+                while end < len(lines) and (
+                    _JMX_NOISE_DETAIL_RE.fullmatch(lines[end])
+                    or _JMX_MISSING_CLASS_ERROR_RE.fullmatch(lines[end].strip())
+                ):
+                    end += 1
+            other_cause = end < len(lines) and _JMX_OTHER_EXCEPTION_RE.match(lines[end])
+            if missing_class and not other_cause:
+                if kept and _LOG_HEADER_RE.match(kept[-1].strip()):
+                    kept.pop()
+                index = end
+                continue
         kept.append(lines[index])
         index += 1
     return "\n".join(kept)
@@ -230,6 +294,8 @@ def _groovy_output_failed(text: str) -> bool:
     for line in output.splitlines():
         stripped = line.strip()
         if stripped.upper().startswith(("ERROR:", "HATA:", "FATAL:")):
+            return True
+        if _SEVERE_LINE_RE.match(stripped):
             return True
         if not (stripped.startswith("{") and stripped.endswith("}")):
             continue
@@ -527,7 +593,10 @@ class OdiOrchestrator:
                          truncate_target_table: bool | None = None,
                          replace_existing_mapping: bool = False,
                          required_update_key_columns: list[str] | None = None,
-                         integration_type: str | None = None):
+                         integration_type: str | None = None,
+                         required_update_key_type: str | None = None,
+                         required_ikm_id: str | None = None,
+                         source_identity: dict | None = None):
         """Creates a new ODI mapping with create_mapping.groovy.
 
         Args:
@@ -537,12 +606,13 @@ class OdiOrchestrator:
             join_model: Model of the joined table (default: tgt_model).
             join_condition: Join condition (e.g. "JOIN.NATURAL_KEY = TO_CHAR(SRC.ProductID)").
             join_type: LEFT_OUTER (default), INNER, FULL_OUTER.
-            ikm_name: Full IKM name (e.g. "IKM Oracle Incremental Update"). Searched automatically if omitted.
+            ikm_name: Exact approved IKM name. If omitted, resolve the configured first preference locally.
             lkm_name: Full LKM name (e.g. "LKM SQL to Oracle (Built-In)"). Searched automatically if omitted.
             filter_condition: Filter applied to the source table (e.g. "NOT EXISTS (...)").
             truncate_target_table: IKM Oracle Insert option override. If None, the script default remains unchanged.
             required_update_key_columns: Mapping creation must fail unless the
                 target datastore exposes an update key with exactly these columns.
+            required_update_key_type: PRIMARY_KEY or ALTERNATE_KEY (default for a requested key).
             integration_type: IU (default in the script) or CONTROL_APPEND.
         """
         params = {
@@ -567,8 +637,26 @@ class OdiOrchestrator:
             params["odi.join_model"] = join_model or tgt_model
             params["odi.join_condition"] = join_condition
             params["odi.join_type"] = join_type
-        if ikm_name:
-            params["odi.ikm_name"] = ikm_name
+        params["odi.ikm_name"] = resolve_approved_ikm(
+            ikm_name, str(integration_type or "IU").strip().upper(), ODI_APPROVED_IKMS, ODI_IKM_PRIORITY,
+        )
+        params["odi.approved_ikms"] = ODI_APPROVED_IKMS
+        if required_ikm_id is not None:
+            if not isinstance(required_ikm_id, str) or not re.fullmatch(r"[0-9]+", required_ikm_id):
+                raise ValueError("Invalid repository IKM identity")
+            params["odi.required_ikm_id"] = required_ikm_id
+        if source_identity is not None:
+            source = verified_source_identity(
+                source_identity, source_identity.get("physical_schema"),
+                source_identity.get("resource_name"), source_identity.get("context"),
+            )
+            if source["model_code"] != src_model or source["datastore_name"] != src_table:
+                raise ValueError("Source binding does not match verified identity")
+            params.update({"odi.required_src_owner": source["physical_schema"],
+                           "odi.required_src_resource": source["resource_name"],
+                           "odi.source_context": source["context"]})
+            if source["datastore_exists"]:
+                params["odi.required_src_id"] = source["datastore_id"]
         if lkm_name:
             params["odi.lkm_name"] = lkm_name
         if filter_condition:
@@ -578,12 +666,14 @@ class OdiOrchestrator:
         if integration_type:
             params["odi.integration_type"] = str(integration_type).strip().upper()
         if required_update_key_columns:
+            key_type = required_update_key_type or "ALTERNATE_KEY"
+            if key_type not in {"PRIMARY_KEY", "ALTERNATE_KEY"}:
+                raise ValueError("Invalid required_update_key_type")
+            params["odi.required_update_key_type"] = key_type
             params["odi.required_update_key_columns"] = ",".join(
                 str(name).strip().upper() for name in required_update_key_columns
             )
-        # KM fallback chain comes from config (used if there is no exact match)
-        if not ikm_name:
-            params["odi.ikm_priority"] = ODI_IKM_PRIORITY
+        # Only LKM selection retains the existing priority chain.
         if not lkm_name:
             params["odi.lkm_priority"] = ODI_LKM_PRIORITY
         return self.run_groovy("create_mapping.groovy", params)
@@ -961,7 +1051,8 @@ class OdiOrchestrator:
                           approved: bool = False,
                           scenario_name: str,
                           version: str,
-                          context: str = "GLOBAL") -> dict:
+                          context: str = "GLOBAL",
+                          extra_allowed_scenarios: frozenset | None = None) -> dict:
         """Run an allowlisted ODI scenario and return redacted structured evidence."""
         scenario = str(scenario_name or "").strip().upper()
         scen_version = str(version or "").strip()
@@ -981,7 +1072,7 @@ class OdiOrchestrator:
                     }
                 ],
             }
-        if scenario not in _ODI24_ALLOWED_SCENARIOS:
+        if scenario not in _ODI24_ALLOWED_SCENARIOS and scenario not in (extra_allowed_scenarios or ()):
             return {
                 "tool": "odi.run_scenario_safe",
                 "status": "blocked_by_allowlist",
@@ -2138,6 +2229,29 @@ class OdiOrchestrator:
                 "error": "ODI scenario generation output parsing failed.",
                 "error_type": type(exc).__name__,
             }
+
+    def preflight_mapping(self, *, ikm_name: str, src_owner: str | None = None,
+                          src_table: str | None = None, context: str = "GLOBAL", approved: bool = False) -> dict:
+        """Read exact repository IKM availability and contextual physical source identity."""
+        blocked = {"tool": "odi.mapping_preflight", "status": "blocked", "side_effects": False,
+                   "repository_connection_attempted": False, "code": "approval_required"}
+        if approved is not True:
+            return blocked
+        try:
+            exact = resolve_approved_ikm(ikm_name, "IU", ODI_APPROVED_IKMS, ODI_IKM_PRIORITY)
+            if exact != ikm_name or bool(src_owner) != bool(src_table):
+                raise ValueError("Invalid preflight request")
+            for identifier in (context, src_owner, src_table):
+                if identifier is not None and not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", identifier):
+                    raise ValueError("Invalid preflight identifier")
+            params = {"odi.ikm_name": exact, "odi.context": context}
+            if src_owner:
+                params.update({"odi.src_owner": src_owner, "odi.src_table": src_table})
+            with groovy_approval_context(True):
+                output = self.run_groovy("mapping_preflight.groovy", params)
+            return normalize_repository_preflight(json.loads(output), exact, src_owner, src_table, context)
+        except (ValueError, TypeError, RuntimeError, OSError):
+            return {**blocked, "code": "repository_lookup_failed", "repository_connection_attempted": True}
 
     def read_only_probe(self, *,
                         approved: bool = False,

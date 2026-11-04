@@ -147,6 +147,13 @@ export const getMappingRuns  = ({ limit = 50, status } = {}) => {
   return apiGet('/api/mapping/runs', params);
 };
 
+// SCD2 (Type 2) builder: plan is a preview; generate and run need approved: true
+export const planScd2      = (body)   => apiPost('/api/scd2/plan', body);
+export const generateScd2  = (body)   => apiPost('/api/scd2/generate', body);
+export const runScd2       = (body)   => apiPost('/api/scd2/run', body);
+export const getScd2Postflight = (params) => apiGet('/api/scd2/postflight', params);
+
+
 // Mapping Snapshots
 export const takeSnapshot    = (body)    => apiPost('/api/mapping/snapshot', body);
 export const getSnapshots    = (name, limit = 10) =>
