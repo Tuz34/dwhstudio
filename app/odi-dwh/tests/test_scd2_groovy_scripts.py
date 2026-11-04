@@ -238,3 +238,5 @@ def test_create_forces_builtin_lkm_on_every_final_access_point_and_fails_on_db_l
 def test_probe_reports_access_point_count():
     text = read("scd2_probe.groovy")
     assert "access_point_count: accessPointCount" in text
+    line = text.split("lkmNames = apNodes")[1].split(chr(10))[0]
+    assert "it.getLKMName()" in line and "getXKMName" not in line and "unique()" not in line

@@ -95,11 +95,12 @@ IKM/LKM) before being reused; any difference returns
 `blocked_existing_object_mismatch` and nothing is written. An existing matching
 table with a missing sequence or grants is repaired (create sequence, add
 grants) without altering the table, or reported as `blocked_target_incomplete`.
-Knowledge modules: a mapping whose source and target share one ODI data server has
-no access point and therefore needs no LKM (accepted when the probe reports
-`access_point_count: 0` and no LKM names); a mapping with access points must use
-`LKM SQL to Oracle (Built-In)` on every one (the create script forces it and fails
-with `LkmDbLinkRemains` if a DB-Link LKM remains). A KM mismatch response carries
+Knowledge modules: the probe reports `access_point_count` and one LKM name per
+access point (an empty string for an unassigned one). With zero access points
+(source and target on the same ODI data server) no LKM is required and none may be
+listed. Otherwise the list must have exactly one entry per access point and every
+entry must be `LKM SQL to Oracle (Built-In)`; the create script forces it on every
+access point and fails with `LkmDbLinkRemains` if a DB-Link LKM remains. A KM mismatch response carries
 `km_mismatch` with the expected and found KM names (names only, no ids).
 `run` is bound to the server-derived `<mapping>_SCN` and a version verified to
 exist for that mapping (latest by default).

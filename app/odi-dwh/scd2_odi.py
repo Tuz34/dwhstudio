@@ -265,9 +265,10 @@ def _probe_details(result: Mapping[str, Any]) -> dict[str, Any] | None:
 
 def _lkms_ok(mapping: Mapping[str, Any]) -> bool:
     """No access point means no LKM is required (same-server mapping); otherwise only the built-in LKM is accepted."""
+    names = mapping["lkm_names"]
     if mapping["access_point_count"] == 0:
-        return not mapping["lkm_names"]
-    return bool(mapping["lkm_names"]) and set(mapping["lkm_names"]) == {LKM_NAME}
+        return not names
+    return len(names) == mapping["access_point_count"] and all(n == LKM_NAME for n in names)
 
 
 def km_mismatch_details(mapping: Mapping[str, Any] | None) -> dict[str, Any] | None:

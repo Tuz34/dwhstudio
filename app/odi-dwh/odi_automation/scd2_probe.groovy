@@ -207,7 +207,7 @@ try {
                 ikmName = tNode?.getTargetComponentKMName()
                 def apNodes = design.getPhysicalNodes().findAll { it.isAPNode() }
                 accessPointCount = apNodes.size()
-                lkmNames = apNodes.collect { it.getXKMName() }.findAll { it }.unique().sort()
+                lkmNames = apNodes.collect { it.getLKMName() ?: "" }
             } catch (Exception ignoredPhysical) {
                 ikmName = null
             }
