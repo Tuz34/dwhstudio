@@ -27,7 +27,7 @@ rollback has been exercised, or that the original scan's UI records have been cl
 | 2 | Public status probe resource limits | [PR30](https://github.com/Tuz34/dwhstudio/pull/30) merged after independent review and CI. |
 | 3, 7 | Preview schema restriction; mapping replacement order | [PR12](https://github.com/Tuz34/dwhstudio/pull/12) merged; independently reverified. |
 | 4, 8 | Server-owned post-load gates; atomic append/watermark | [PR10](https://github.com/Tuz34/dwhstudio/pull/10) merged; independently reverified. |
-| 5, 9, 12 | Request-local AI provider; credentialed egress; prompt/error handling | Implementation candidate undergoing independent review; not yet a merged remedy. |
+| 5, 9, 12 | Request-local AI provider; credentialed egress; prompt/error handling | [PR36](https://github.com/Tuz34/dwhstudio/pull/36) merged after independent review, reviewed mapped-IPv6 correction and green CI. |
 | 6, 10 | TLS transport and exact Host boundary | [PR32](https://github.com/Tuz34/dwhstudio/pull/32) merged after independent review and CI. |
 | 11, 13 | Partial Oracle DDL reporting; unsupported DQ rules | [PR3](https://github.com/Tuz34/dwhstudio/pull/3) merged; independently reverified. |
 | 14 | Metadata-sync success evidence | Earlier failure handling merged in PRs2/4; independent recheck found missing positive commit evidence. [PR33](https://github.com/Tuz34/dwhstudio/pull/33) closes that residual after independent review and CI. |
@@ -40,10 +40,10 @@ advisory check, not proof that dependencies contain no vulnerabilities.
 
 ## Deployment limits and open work
 
-- Until the AI remedies above are merged and all relevant fixes are deployed, keep the instance local and
+- Until all relevant fixes are deployed and deployment checks pass, keep the instance local and
   single-user; do not expose AI configuration or credentials to untrusted callers. Do not put
   secrets or production rows in model prompts. Existing log/state contents are not retroactively
-  sanitized by a future logging change.
+  sanitized by these logging changes.
 - `APP_ALLOWED_ORIGINS` and `APP_IP_ALLOWLIST` must not be treated as enforced access controls merely
   because they appear in configuration or a validation report. Enforce network restrictions at a
   verified firewall/reverse proxy boundary where required.
@@ -58,6 +58,32 @@ advisory check, not proof that dependencies contain no vulnerabilities.
   rollback. Maintain backups, inspect actual state and obtain the required approval before recovery.
 - Isolated tests and source review do not replace deployment-specific TLS, proxy, privilege,
   backup/restore or ODI runtime validation. Preserve explicit write approvals and scope gates.
+
+## AI endpoint administration
+
+The merged AI boundary in [PR36](https://github.com/Tuz34/dwhstudio/pull/36) requires
+deployment of that source version before these controls can be relied on:
+
+- `AI_TRUSTED_ORIGINS` is an administrator-owned, comma-separated list of exact HTTPS origins
+  (scheme, hostname and port), not wildcard, path or API-request-controlled trust. Remote DNS
+  names must resolve entirely to public addresses; a private service requires an explicitly
+  trusted IP origin. The Claude cloud client also permits its fixed official API origin.
+- Canonical loopback IP addresses and `localhost` are permitted by default at valid HTTP/HTTPS
+  ports. `localhost` is pinned to IPv4 loopback. IPv4-mapped IPv6 forms are rejected explicitly.
+  Outbound connections pin the validated address while retaining TLS hostname verification;
+  redirects and ambient proxy settings are not followed.
+- For local OpenAI-compatible configuration and CLI clients, a new origin cannot silently inherit
+  a retained nonempty API key, including fallback or CLI defaults. Explicit credential
+  replacement/rebinding or explicit empty clearing is required. An explicit empty key suppresses
+  fallback; same-origin path changes retain the binding. These key-clearing/binding guarantees
+  do not apply to Anthropic credentials: administrators must separately review the permitted
+  `ANTHROPIC_BASE_URL` and its resolved key; an empty configuration update does not clear that key.
+- Provider selection is request-local. Persisted benchmark/analyst diagnostics contain metadata,
+  not prompts, generated analysis or provider error bodies. Successful transient responses and
+  deliberately requested synthetic evaluation captures are separate from diagnostic persistence.
+
+These controls do not make an untrusted provider safe to receive sensitive prompts and do not
+sanitize historical logs. Review existing records separately without publishing their contents.
 
 ## Secrets and data
 
