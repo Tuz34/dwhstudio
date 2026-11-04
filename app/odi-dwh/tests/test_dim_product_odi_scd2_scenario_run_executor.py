@@ -124,7 +124,7 @@ def _run_result():
 
 
 def _execute(*, mapping=None, scenario=None, review="approved", approved=True,
-             scope=SCOPE, preflights=None, backup=None, runs=None):
+             scope=SCOPE, preflights=None, backup=None, runs=None, retained_backup=False):
     from dim_product_odi_scd2_scenario_run_executor import (
         execute_dim_product_scd2_scenario_run_and_rerun_proof,
     )
@@ -152,7 +152,10 @@ def _execute(*, mapping=None, scenario=None, review="approved", approved=True,
         events.append(("backup", kwargs))
         if isinstance(backup, Exception):
             raise backup
-        return deepcopy(backup if backup is not None else _backup_result())
+        from tests.test_dim_product_scd2_scenario_backup import _retained_proof
+
+        default = _retained_proof() if retained_backup is True else _backup_result()
+        return deepcopy(backup if backup is not None else default)
 
     def scenario_runner(**kwargs):
         events.append(("run", kwargs))
@@ -171,6 +174,7 @@ def _execute(*, mapping=None, scenario=None, review="approved", approved=True,
         candidate_probe=candidate_probe,
         backup_creator=backup_creator,
         scenario_runner=scenario_runner,
+        retained_backup=retained_backup,
     )
     return result, events
 
@@ -248,6 +252,7 @@ def test_backup_failure_stops_before_run_and_reports_possible_partial_state(bad)
     assert [e if isinstance(e, str) else e[0] for e in events] == ["preflight", "backup"]
 
 
+@pytest.mark.parametrize("retained_backup", [False, True])
 @pytest.mark.parametrize("stage,runs,preflights,attempts,successes", [
     ("first_scenario_run", [{**_run_result(), "status": "failed"}], None, 1, 0),
     ("first_count_only_postflight", None,
@@ -257,8 +262,8 @@ def test_backup_failure_stops_before_run_and_reports_possible_partial_state(bad)
     ("second_count_only_postflight", None,
      [_preflight(), _preflight(), {**_preflight(), "target_count": 73}], 2, 2),
 ])
-def test_partial_failure_states(stage, runs, preflights, attempts, successes):
-    result, _events = _execute(runs=runs, preflights=preflights)
+def test_partial_failure_states(stage, runs, preflights, attempts, successes, retained_backup):
+    result, _events = _execute(runs=runs, preflights=preflights, retained_backup=retained_backup)
     assert result["status"] == "failed"
     assert result["stage"] == stage
     assert result["scenario_run_attempt_count"] == attempts
@@ -266,6 +271,9 @@ def test_partial_failure_states(stage, runs, preflights, attempts, successes):
     assert result["named_backup_retained"] is True
     assert result["automatic_rollback_performed"] is False
     assert result["manual_recovery_review_required"] is True
+    assert result["backup_creation_attempted"] is (not retained_backup)
+    assert result["backup_reused_verified"] is retained_backup
+    assert result["backup_created_absent_only"] is (not retained_backup)
     assert "sensitive-value" not in str(result)
 
 
@@ -426,3 +434,96 @@ def test_real_wrapper_output_satisfies_executor_run_matches(monkeypatch):
     )
     assert result["status"] == "passed"
     assert _run_matches(result)
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", "false", [], {}, 0.0])
+def test_retained_mode_requires_exact_bool_before_any_callbacks(value):
+    result, events = _execute(retained_backup=value)
+    assert result["status"] == "blocked_retained_backup_type"
+    assert events == []
+    assert result["backup_creation_attempted"] is False
+
+
+def test_opt_in_retained_mode_verifies_before_two_runs_without_claiming_creation():
+    result, events = _execute(retained_backup=True)
+    assert result["status"] == "passed"
+    assert [e if isinstance(e, str) else e[0] for e in events] == [
+        "preflight", "backup", "run", "postflight", "run", "postflight"
+    ]
+    assert events[1][1]["require_absent"] is False
+    assert result["backup_mode"] == "retained_verification"
+    assert result["backup_creation_attempted"] is False
+    assert result["backup_verification_attempted"] is True
+    assert result["backup_reused_verified"] is True
+    assert result["backup_created_absent_only"] is False
+    assert result["named_backup_retained"] is True
+    assert result["persistent_action_attempted"] is True  # the scenario callback did run
+
+
+@pytest.mark.parametrize("bad", [
+    _backup_result(), {"status": "failed", "side_effects": False},
+    RuntimeError("sensitive-value"),
+])
+def test_retained_verification_failure_stops_runs_without_claiming_any_persistent_attempt(bad):
+    result, events = _execute(backup=bad, retained_backup=True)
+    assert result["status"] == "failed"
+    assert result["stage"] == "named_backup_gate"
+    assert result["backup_creation_attempted"] is False
+    assert result["backup_verification_attempted"] is True
+    assert result["backup_reused_verified"] is False
+    assert result["backup_created_absent_only"] is False
+    assert result["persistent_action_attempted"] is False
+    assert result["backup_may_exist"] is True
+    assert result["named_backup_retained"] is None
+    assert result["manual_recovery_review_required"] is True
+    assert result["automatic_rollback_performed"] is False
+    assert result["scenario_run_attempt_count"] == 0
+    assert [e if isinstance(e, str) else e[0] for e in events] == ["preflight", "backup"]
+    assert "sensitive-value" not in repr(result)
+
+
+def test_retained_proof_cannot_enable_default_mode():
+    from tests.test_dim_product_scd2_scenario_backup import _retained_proof
+
+    result, events = _execute(backup=_retained_proof())
+    assert result["status"] == "failed"
+    assert result["stage"] == "named_backup_gate"
+    assert not any(isinstance(e, tuple) and e[0] == "run" for e in events)
+
+
+@pytest.mark.parametrize("retained_backup", [False, True])
+@pytest.mark.parametrize("run_index", [0, 1])
+@pytest.mark.parametrize("error_type", [
+    "AgentConfigurationUnavailable", "AgentUnavailable", "ScenarioRunFailed", "InvalidScenarioRunOutput",
+])
+def test_only_allowlisted_failed_run_diagnostic_is_preserved(error_type, run_index, retained_backup):
+    failure = {
+        "status": "failed", "error_type": error_type,
+        "error": "sensitive-value", "body": {"row": "sensitive-value"},
+    }
+    result, _ = _execute(runs=[_run_result()] * run_index + [failure], retained_backup=retained_backup)
+    assert result["status"] == "failed"
+    assert result["error_type"] == error_type
+    assert result["stage"] == ("first_scenario_run" if run_index == 0 else "second_scenario_run")
+    assert result["scenario_run_attempt_count"] == run_index + 1
+    assert result["backup_creation_attempted"] is (not retained_backup)
+    assert "sensitive-value" not in repr(result)
+
+
+@pytest.mark.parametrize("error_type", [
+    "sensitive-value", "AgentUnavailable\nsensitive-value", "agentUnavailable", "", None,
+    True, 1, [], {}, ["AgentUnavailable"], {"AgentUnavailable": True},
+])
+@pytest.mark.parametrize("run_index", [0, 1])
+def test_hostile_unknown_or_nonstring_run_diagnostics_are_not_preserved(error_type, run_index):
+    result, _ = _execute(runs=[_run_result()] * run_index + [{
+        "status": "failed", "error_type": error_type, "body": "sensitive-value",
+    }])
+    assert result["error_type"] == "ScenarioRunError"
+    assert "sensitive-value" not in repr(result)
+
+
+def test_allowlisted_code_does_not_turn_malformed_success_into_trusted_failure():
+    result, _ = _execute(runs=[{**_run_result(), "error_type": "AgentUnavailable"}])
+    assert result["status"] == "failed"
+    assert result["error_type"] == "ScenarioRunError"
