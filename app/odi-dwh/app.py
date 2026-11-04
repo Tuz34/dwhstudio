@@ -30,6 +30,9 @@ from config import (
     DEPLOYMENT_PROFILE,
     APP_TLS_ENABLED,
     APP_REVERSE_PROXY_TLS_ENABLED,
+    APP_TLS_CERT_FILE,
+    APP_TLS_KEY_FILE,
+    APP_ALLOWED_HOSTS,
     APP_IP_ALLOWLIST,
     APP_ALLOWED_ORIGINS,
     APP_AUTH_ENABLED,
@@ -93,7 +96,7 @@ from exceptions import (
     DWHBaseError, DatabaseConnectionError, DatabaseQueryError,
     InvalidOwnerError, TableNotFoundError, SchemaValidationError,
 )
-from deployment_security import validate_deployment_security
+from deployment_security import configure_deployment
 from routes.error_responses import redacted_error
 
 PK_PARITY_MAX_KEYS = 100000
@@ -132,19 +135,25 @@ app.config.update(
     SESSION_COOKIE_SECURE=bool(APP_TLS_ENABLED or APP_REVERSE_PROXY_TLS_ENABLED),
 )
 
-_DEPLOYMENT_SECURITY_PROFILE = validate_deployment_security({
+_DEPLOYMENT_SETTINGS = {
     "environment": ENVIRONMENT,
     "deployment_profile": DEPLOYMENT_PROFILE,
     "app_host": APP_HOST,
+    "app_port": APP_PORT,
+    "app_use_reloader": APP_USE_RELOADER,
     "app_debug": APP_DEBUG,
     "auth_enabled": APP_AUTH_ENABLED,
     "auth_configured": bool(APP_AUTH_USERNAME and APP_AUTH_PASSWORD_HASH),
     "flask_secret_key_configured": _configured_secret_key,
     "tls_enabled": APP_TLS_ENABLED,
     "reverse_proxy_tls_enabled": APP_REVERSE_PROXY_TLS_ENABLED,
+    "tls_cert_file": APP_TLS_CERT_FILE,
+    "tls_key_file": APP_TLS_KEY_FILE,
+    "allowed_hosts": APP_ALLOWED_HOSTS,
     "ip_allowlist": APP_IP_ALLOWLIST,
     "allowed_origins": APP_ALLOWED_ORIGINS,
-})
+}
+_DEPLOYMENT_SECURITY_PROFILE, _DEPLOYMENT_RUN_OPTIONS = configure_deployment(app, _DEPLOYMENT_SETTINGS)
 
 # S-10: Use the same allowed owner/schema list across all endpoints.
 # Include target schemas and active Oracle source schemas (SOURCE_ORACLE_SCHEMAS).
@@ -518,6 +527,6 @@ register_blueprints(app)
 
 
 if __name__ == "__main__":
-    app.run(host=APP_HOST, debug=APP_DEBUG, port=APP_PORT, use_reloader=APP_USE_RELOADER)
+    app.run(**_DEPLOYMENT_RUN_OPTIONS)
 
 

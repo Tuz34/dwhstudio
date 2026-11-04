@@ -67,6 +67,10 @@ def test_lan_pilot_profile_reports_required_controls():
         app_host="0.0.0.0",
         auth_enabled=True,
         auth_configured=True,
+        tls_enabled=True,
+        tls_cert_file="synthetic-cert.pem",
+        tls_key_file="synthetic-key.pem",
+        allowed_hosts=["studio.example.test"],
         ip_allowlist=["10.0.0.0/24"],
     )
 
@@ -79,7 +83,9 @@ def test_lan_pilot_profile_reports_required_controls():
     assert profile["network_exposed"] is True
     assert profile["status"] == "review-required"
     assert "auth" in profile["active_controls"]
-    assert "ip_allowlist" in profile["active_controls"]
+    assert "ip_allowlist" not in profile["active_controls"]
+    assert profile["ip_allowlist_configured"] is True
+    assert profile["ip_allowlist_enforced"] is False
     assert "session_key_configured" in profile["active_controls"]
 
 
@@ -113,7 +119,7 @@ def test_build_profile_is_redacted_and_ui_safe():
 
     assert profile["profile"] == "on-prem-hardened"
     assert profile["network_exposed"] is True
-    assert profile["status"] == "safe"
+    assert profile["status"] == "review-required"
     assert "secret" not in str(profile).lower()
     assert profile["allowed_origins_count"] == 1
 
