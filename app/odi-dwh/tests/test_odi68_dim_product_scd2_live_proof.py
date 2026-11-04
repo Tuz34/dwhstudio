@@ -108,6 +108,7 @@ def _flat(values):
 def _wire(spy, **extra):
     return dict(
         executor=extra.pop("executor", spy("executor", {"status": "passed"})),
+        agent_configuration_probe=extra.pop("agent_configuration_probe", lambda: True),
         mapping_probe_loader=spy("mapping", _mapping_probe),
         scenario_probe_loader=spy("scenario", _scenario_probe),
         candidate_runner=spy("candidate", _raw_preflight),
@@ -115,6 +116,55 @@ def _wire(spy, **extra):
         scenario_runner=spy("runner", None),
         stdout=io.StringIO(), **extra,
     )
+
+
+@pytest.mark.parametrize("ready", [False, None, "yes", 1, {}, []])
+def test_agent_configuration_fails_closed_before_callbacks(evidence, tmp_path, ready):
+    spy = Spy()
+    wiring = _wire(spy, agent_configuration_probe=lambda: ready)
+    assert proof.run(_flat(_args(evidence, tmp_path)), **wiring) == proof.EXIT_BAD_ARGUMENTS
+    assert spy.calls == []
+    assert json.loads(wiring["stdout"].getvalue())["status"] == "blocked_agent_configuration"
+
+
+@pytest.mark.parametrize("endpoint,ready", [
+    ("http://localhost:15101/oraclediagent", True),
+    ("https://localhost:15101/oraclediagent/", True),
+    ("", False), (None, False), ([], False),
+    ("http://localhost:7001/oraclediagent", False),
+    ("http://localhost:15101/not-oraclediagent", False),
+    ("ftp://localhost:15101/oraclediagent", False),
+    ("http://name@localhost:15101/oraclediagent", False),
+    ("http://localhost:15101/oraclediagent?x=1", False),
+    ("http://localhost:bad/oraclediagent", False),
+])
+def test_agent_endpoint_contract(endpoint, ready):
+    assert proof.agent_endpoint_ready(endpoint) is ready
+
+
+def test_retained_backup_option_is_explicit_and_default_off(evidence, tmp_path):
+    observed = []
+
+    def executor(*args, **kwargs):
+        observed.append(kwargs.get("retained_backup", False))
+        return {"status": "passed", "backup_reused_verified": observed[-1]}
+
+    for extra, expected in (([], False), (["--resume-with-retained-backup"], True)):
+        wiring = _wire(Spy(), executor=executor)
+        assert proof.run(_flat(_args(evidence, tmp_path)) + extra, **wiring) == 0
+        assert observed[-1] is expected
+        assert json.loads(wiring["stdout"].getvalue())["backup_reused_verified"] is expected
+
+
+def test_agent_configuration_exception_is_redacted_before_callbacks(evidence, tmp_path):
+    def unavailable():
+        raise ValueError("PRIVATE-DIAGNOSTIC")
+
+    spy = Spy()
+    wiring = _wire(spy, agent_configuration_probe=unavailable)
+    assert proof.run(_flat(_args(evidence, tmp_path)), **wiring) == proof.EXIT_BAD_ARGUMENTS
+    assert spy.calls == []
+    assert "PRIVATE-DIAGNOSTIC" not in wiring["stdout"].getvalue()
 
 
 @pytest.mark.parametrize("overrides,status", [
@@ -248,6 +298,7 @@ def test_end_to_end_all_callbacks_faked_ready_run_postflight_rerun_noop(evidence
     out = io.StringIO()
     code = proof.run(
         _flat(_args(evidence, tmp_path)),
+        agent_configuration_probe=lambda: True,
         mapping_probe_loader=_mapping_probe, scenario_probe_loader=_scenario_probe,
         candidate_runner=candidate, backup_creator=backup, scenario_runner=runner, stdout=out,
     )
@@ -272,6 +323,7 @@ def test_end_to_end_existing_backup_blocks_before_any_run(evidence, tmp_path):
     out = io.StringIO()
     code = proof.run(
         _flat(_args(evidence, tmp_path)),
+        agent_configuration_probe=lambda: True,
         mapping_probe_loader=_mapping_probe, scenario_probe_loader=_scenario_probe,
         candidate_runner=_raw_preflight,
         backup_creator=lambda **kw: create_dim_product_named_backup(db, **kw),

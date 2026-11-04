@@ -19,6 +19,11 @@ any callback ran (bad arguments, approval, scope, review evidence or an
 unusable ``--out`` path); 3 the run finished but the report file could not be
 written (the scalar report is still printed to stdout). The named backup is
 retained; nothing is restored or dropped automatically.
+
+The configured agent endpoint is checked before any ODI/DB callback. This is
+a configuration-shape check, not an authentication or availability proof.
+``--resume-with-retained-backup`` explicitly requests read-only verification of
+the retained backup instead of creating it again. The default stays absent-only.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from dim_product_odi_scd2_packaging_readiness import SCENARIO_NAME, SCENARIO_VERSION
 from dim_product_odi_scd2_scenario import (
@@ -56,6 +62,7 @@ _REPORT_FIELDS = frozenset({
     "source_count", "target_count", "current_target_count", "unchanged_count",
     "remaining_candidate_count", "named_backup_column_count",
     "named_backup_row_count", "ods_backup_untouched",
+    "backup_reused_verified", "backup_created_absent_only",
 })
 _SCENARIO_FIELDS = frozenset({"name", "version", "context"})
 _MAX_TEXT = 80
@@ -75,6 +82,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--scope", required=True)
     parser.add_argument("--review-evidence", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--resume-with-retained-backup", action="store_true")
     return parser
 
 
@@ -181,6 +189,32 @@ def _default_mapping_probe() -> Mapping[str, Any]:
     return OdiOrchestrator().dim_product_scd2_mapping_probe(approved=True)
 
 
+def agent_endpoint_ready(endpoint: object) -> bool:
+    """Validate configured endpoint shape, not agent authentication or availability."""
+    if not isinstance(endpoint, str) or not endpoint:
+        return False
+    try:
+        parsed = urlsplit(endpoint)
+        return (
+            parsed.scheme in {"http", "https"}
+            and bool(parsed.hostname)
+            and parsed.port == 15101
+            and parsed.path.rstrip("/") == "/oraclediagent"
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+        )
+    except ValueError:
+        return False
+
+
+def _default_agent_configuration_probe() -> bool:
+    import config
+
+    return agent_endpoint_ready(config.ODI_REST_URL)
+
+
 def _default_scenario_probe() -> Mapping[str, Any]:
     from odi_orchestrator import OdiOrchestrator
 
@@ -211,7 +245,11 @@ def _configured_ddl_connection() -> Any:
     )
 
 
-def _default_backup_creator() -> Callable[..., Mapping[str, Any]]:
+def _default_backup_creator(*, retained_backup: bool = False) -> Callable[..., Mapping[str, Any]]:
+    if retained_backup:
+        from dim_product_scd2_backup_creator import verify_retained_dim_product_backup
+
+        return functools.partial(verify_retained_dim_product_backup, _configured_ddl_connection)
     from dim_product_scd2_backup_creator import create_dim_product_named_backup
 
     return functools.partial(create_dim_product_named_backup, _configured_ddl_connection)
@@ -280,6 +318,7 @@ def run(
     argv: Sequence[str],
     *,
     executor: Callable[..., dict[str, Any]] | None = None,
+    agent_configuration_probe: Callable[[], object] | None = None,
     mapping_probe_loader: Callable[[], Mapping[str, Any]] | None = None,
     scenario_probe_loader: Callable[[], Mapping[str, Any]] | None = None,
     candidate_runner: Callable[[], Mapping[str, Any]] | None = None,
@@ -331,6 +370,10 @@ def run(
         emit(_blocked("blocked_output_path"), None)
         return EXIT_BAD_ARGUMENTS
 
+    if call_sanitized(agent_configuration_probe or _default_agent_configuration_probe) is not True:
+        emit(_blocked("blocked_agent_configuration"), None)
+        return EXIT_BAD_ARGUMENTS
+
     # Arguments are valid: only now resolve and call anything that can touch ODI or the DB.
     mapping_probe = call_sanitized(mapping_probe_loader or _default_mapping_probe) or {}
     scenario_probe = call_sanitized(scenario_probe_loader or _default_scenario_probe) or {}
@@ -339,6 +382,7 @@ def run(
     def candidate_probe() -> dict[str, Any]:
         return candidate_preflight_to_gate_report(run_candidate(), observed_at=clock())
 
+    run_options = {"retained_backup": True} if args.resume_with_retained_backup else {}
     result = (executor or _default_executor())(
         mapping_probe,
         scenario_probe,
@@ -347,8 +391,9 @@ def run(
         approved=True,
         approval_scope=args.scope,
         candidate_probe=candidate_probe,
-        backup_creator=backup_creator or _default_backup_creator(),
+        backup_creator=backup_creator or _default_backup_creator(retained_backup=args.resume_with_retained_backup),
         scenario_runner=scenario_runner or _default_scenario_runner(),
+        **run_options,
     )
     if not emit(result, out_path):
         return EXIT_REPORT_WRITE_FAILED
