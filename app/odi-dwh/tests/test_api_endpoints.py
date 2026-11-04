@@ -36,13 +36,73 @@ class TestHttpSecurityContracts:
         assert "@csrf.exempt" not in content
 
     def test_debug_mode_is_explicit_opt_in(self):
-        app_content = (PROJECT_ROOT / "app.py").read_text(encoding="utf-8")
-        config_content = (PROJECT_ROOT / "config.py").read_text(encoding="utf-8")
+        import ast
 
-        assert 'APP_HOST          = os.getenv("APP_HOST", "127.0.0.1")' in config_content
-        assert "APP_DEBUG" in config_content
-        assert "debug=APP_DEBUG" in app_content
-        assert 'debug=(ENVIRONMENT == "dev")' not in app_content
+        from flask import Flask
+
+        from deployment_security import configure_deployment
+
+        # Parse source, not real configuration: no dotenv, credentials or app import.
+        config_tree = ast.parse((PROJECT_ROOT / "config.py").read_text(encoding="utf-8-sig"))
+        assignments = {
+            target.id: node.value for node in config_tree.body if isinstance(node, ast.Assign)
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        debug_expression = assignments["APP_DEBUG"]
+        expected_expression = ast.parse(
+            'os.getenv("APP_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}',
+            mode="eval",
+        ).body
+        assert ast.dump(debug_expression) == ast.dump(expected_expression)
+        assert ast.dump(assignments["APP_HOST"]) == ast.dump(
+            ast.parse('os.getenv("APP_HOST", "127.0.0.1")', mode="eval").body
+        )
+
+        app_tree = ast.parse((PROJECT_ROOT / "app.py").read_text(encoding="utf-8-sig"))
+        app_assignments = {
+            target.id: node.value for node in app_tree.body if isinstance(node, ast.Assign)
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        deployment = app_assignments["_DEPLOYMENT_SETTINGS"]
+        fields = {key.value: value for key, value in zip(deployment.keys, deployment.values)}
+        assert ast.dump(fields["app_debug"]) == ast.dump(ast.Name(id="APP_DEBUG", ctx=ast.Load()))
+        wiring = [node for node in app_tree.body if isinstance(node, ast.Assign)
+                  and any(isinstance(t, ast.Tuple) and any(
+                      isinstance(v, ast.Name) and v.id == "_DEPLOYMENT_RUN_OPTIONS" for v in t.elts
+                  ) for t in node.targets)]
+        assert len(wiring) == 1
+        assert ast.unparse(wiring[0]) == (
+            "_DEPLOYMENT_SECURITY_PROFILE, _DEPLOYMENT_RUN_OPTIONS = "
+            "configure_deployment(app, _DEPLOYMENT_SETTINGS)"
+        )
+        main = next(node for node in app_tree.body if isinstance(node, ast.If)
+                    and ast.unparse(node.test) == "__name__ == '__main__'")
+        assert [ast.unparse(node) for node in main.body] == ["app.run(**_DEPLOYMENT_RUN_OPTIONS)"]
+
+        # The expression shape above pins normalization; its literals drive these controls.
+        default = ast.literal_eval(debug_expression.left.func.value.func.value.args[1])
+        enabled_values = ast.literal_eval(debug_expression.comparators[0])
+        for raw, expected in [(None, False), ("", False), ("false", False), ("0", False),
+                              ("off", False), ("dev", False), ("unexpected", False),
+                              ("true", True), ("1", True), ("yes", True), ("on", True),
+                              (" TRUE ", True)]:
+            value = default if raw is None else raw
+            debug = value.strip().lower() in enabled_values
+            options = {"environment": "dev", "deployment_profile": "local-only", "app_debug": debug}
+            _, run_options = configure_deployment(Flask(__name__), options)
+            assert run_options["debug"] is expected
+            assert run_options["host"] == "127.0.0.1"
+
+        _, defaults = configure_deployment(Flask(__name__), {"environment": "dev"})
+        assert defaults["debug"] is False
+        for profile in ("lan-pilot", "on-prem-hardened"):
+            with pytest.raises(RuntimeError, match="debug"):
+                configure_deployment(Flask(__name__), {
+                    "deployment_profile": profile, "app_host": "127.0.0.1", "app_debug": True,
+                    "auth_enabled": True, "auth_configured": True, "flask_secret_key_configured": True,
+                    "reverse_proxy_tls_enabled": True, "allowed_hosts": ["studio.example.test"],
+                    "ip_allowlist": ["192.0.2.0/24"],
+                })
 
     def test_execute_dml_requires_backend_approval(self, app_client, monkeypatch):
         import app as app_module
