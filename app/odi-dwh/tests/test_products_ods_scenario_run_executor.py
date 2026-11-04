@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -174,6 +176,30 @@ def test_executor_stops_after_failed_second_run_and_keeps_backup():
     assert result["successful_scenario_run_count"] == 1
     assert result["named_backup_retained"] is True
     assert probe.calls == 1
+
+
+@pytest.mark.parametrize("attempt", [1, 2])
+@pytest.mark.parametrize("reported_status", ["unknown", "passed"])
+def test_executor_preserves_unknown_outcome_without_retry_or_raw_error(attempt, reported_status):
+    unknown = {
+        **_run_result(reported_status),
+        "outcome_unknown": True,
+        "error_code": "private runtime diagnostic",
+    }
+    runner = _Runner([_run_result()] * (attempt - 1) + [unknown])
+    result, runner, probe = _execute(runner=runner)
+
+    assert result["status"] == "unknown"
+    assert result["outcome_unknown"] is True
+    assert result["error_type"] == "ScenarioOutcomeUnknown"
+    assert result["scenario_run_attempt_count"] == attempt
+    assert result["successful_scenario_run_count"] == attempt - 1
+    assert len(runner.calls) == attempt
+    assert probe.calls == attempt - 1
+    assert result["manual_recovery_review_required"] is True
+    assert result["named_backup_retained"] is True
+    assert result["automatic_rollback_performed"] is False
+    assert "private runtime diagnostic" not in str(result)
 
 
 def test_executor_rejects_dirty_second_postflight():

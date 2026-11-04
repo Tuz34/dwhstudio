@@ -56,6 +56,7 @@ def _readiness_matches(readiness: Mapping[str, Any]) -> bool:
 def _run_result_matches(result: Mapping[str, Any]) -> bool:
     return (
         result.get("status") == "passed"
+        and result.get("outcome_unknown", False) is False
         and result.get("session_status") == "DONE"
         and result.get("scenario")
         == {
@@ -98,14 +99,16 @@ def _failure(
     *,
     attempts: int,
     successes: int,
+    outcome_unknown: bool = False,
 ) -> dict[str, Any]:
     return {
-        **_base("failed"),
+        **_base("unknown" if outcome_unknown else "failed"),
+        **({"outcome_unknown": True} if outcome_unknown else {}),
         "stage": stage,
         "will_execute": attempts > 0,
         "scenario_run_attempt_count": attempts,
         "successful_scenario_run_count": successes,
-        "error_type": "ScenarioRunVerificationError",
+        "error_type": "ScenarioOutcomeUnknown" if outcome_unknown else "ScenarioRunVerificationError",
         "manual_recovery_review_required": attempts > 0,
     }
 
@@ -132,7 +135,10 @@ def execute_products_ods_scenario_run_and_rerun_proof(
     }
     first_run = scenario_runner(**run_args)
     if not _run_result_matches(first_run):
-        return _failure("first_scenario_run", attempts=1, successes=0)
+        return _failure(
+            "first_scenario_run", attempts=1, successes=0,
+            outcome_unknown=first_run.get("status") == "unknown" or first_run.get("outcome_unknown") is True,
+        )
 
     first_postflight = candidate_probe()
     if not _clean_postflight(first_postflight):
@@ -140,7 +146,10 @@ def execute_products_ods_scenario_run_and_rerun_proof(
 
     second_run = scenario_runner(**run_args)
     if not _run_result_matches(second_run):
-        return _failure("second_scenario_run", attempts=2, successes=1)
+        return _failure(
+            "second_scenario_run", attempts=2, successes=1,
+            outcome_unknown=second_run.get("status") == "unknown" or second_run.get("outcome_unknown") is True,
+        )
 
     second_postflight = candidate_probe()
     if not _clean_postflight(second_postflight):
