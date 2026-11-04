@@ -221,6 +221,11 @@ try {
             if (typeSet) {
                 if (colLength > 0) col.setLength(colLength)
                 if (colScale > 0) col.setScale(colScale)
+                if (upperType == "NUMBER" && parts.length == 2) {
+                    // Oracle's unconstrained NUMBER sentinel overrides OdiColumn's default length 50.
+                    col.setLength(0)
+                    col.setScale(-127)
+                }
             }
             col.setPosition(pos)
             pos++

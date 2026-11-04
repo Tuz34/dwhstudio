@@ -175,6 +175,11 @@ try {
             column.setDataFormat(dataFormat)
             if (length != null) column.setLength(length)
             if (scale != null) column.setScale(scale)
+            if (base == "NUMBER" && length == null && scale == null) {
+                // Oracle's unconstrained NUMBER sentinel overrides OdiColumn's default length 50.
+                column.setLength(0)
+                column.setScale(-127)
+            }
             column.setMandatory(nullable[name] == "N")
             column.setPosition(position++)
             String role = roleOf(name)
