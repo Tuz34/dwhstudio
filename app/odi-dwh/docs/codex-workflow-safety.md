@@ -8,8 +8,8 @@
 
 ## On-demand skills
 
-- `C:\Users\yesim\.codex\skills\odi-review` is an explicit-invocation, read-only review workflow.
-- `C:\Users\yesim\.codex\skills\odi-readonly-ui-smoke` checks an already-running UI without persistent actions.
+- `~/.codex/skills/<skill-name>` (the `odi-review` skill) is an explicit-invocation, read-only review workflow.
+- `~/.codex/skills/<skill-name>` (the `odi-readonly-ui-smoke` skill) checks an already-running UI without persistent actions.
 - Both skills set `allow_implicit_invocation: false`; they do not consume context unless selected.
 
 ## Command safety

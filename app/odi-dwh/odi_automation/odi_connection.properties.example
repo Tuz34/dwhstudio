@@ -1,0 +1,34 @@
+# ODI connection properties template for the Groovy automation scripts.
+# Copy this file to `odi_connection.properties` (same folder) and replace every CHANGE_ME.
+# `odi_connection.properties` is git-ignored. Never commit it, paste it, or send it to anyone.
+# You can also generate it from your .env with: python write_odi_connection_properties.py
+
+# JDBC URL of the ODI master repository database, format jdbc:oracle:thin:@host:port/service.
+master_jdbc=jdbc:oracle:thin:@localhost:1521/orcl
+
+# JDBC driver class used for the master repository connection.
+master_jdbc_driver=oracle.jdbc.OracleDriver
+
+# Database user that owns the ODI master repository schema, for example <PREFIX>_ODI_REPO.
+master_username=CHANGE_ME
+
+# Password of the master repository database user.
+master_password=CHANGE_ME
+
+# Name of the ODI work repository, for example WORKREP.
+work_name=WORKREP
+
+# ODI user (for example SUPERVISOR) that the SDK logs in with.
+odi_username=CHANGE_ME
+
+# Password of that ODI user.
+odi_password=CHANGE_ME
+
+# Optional: base URL of the ODI agent, format http://host:port/<agent-context>. Used for load plan runs.
+agent_url=http://localhost:15101/oraclediagent
+
+# Optional: ODI user for agent calls. Falls back to odi_username when omitted.
+agent_username=CHANGE_ME
+
+# Optional: password for agent calls. Falls back to odi_password when omitted.
+agent_password=CHANGE_ME

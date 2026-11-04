@@ -175,7 +175,10 @@ def workspace_root() -> Path:
 
 
 def default_active_app_root() -> Path:
-    config = json.loads((workspace_root() / "WORKSPACE_PATHS.json").read_text(encoding="utf-8"))
+    paths_file = workspace_root() / "WORKSPACE_PATHS.json"
+    if not paths_file.exists():
+        return workspace_root() / "app" / "odi-dwh"
+    config = json.loads(paths_file.read_text(encoding="utf-8"))
     tokens = expand_workspace_tokens(config["tokens"])
     return Path(tokens["ACTIVE_APP_ROOT"])
 
@@ -571,14 +574,13 @@ def write_report_markdown(report: dict[str, Any], output: Path) -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     root = workspace_root()
-    app_root = default_active_app_root()
     return argparse.ArgumentParser(description="Run local AppSec checks for the ODI-DWH workspace.").parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run local AppSec checks for the ODI-DWH workspace.")
     parser.add_argument("--workspace-root", type=Path, default=workspace_root())
-    parser.add_argument("--app-root", type=Path, default=default_active_app_root())
+    parser.add_argument("--app-root", type=Path, default=None, help="Defaults to the active app root.")
     parser.add_argument("--matrix-json", type=Path, default=workspace_root() / "APPSEC_ENDPOINT_MATRIX.json")
     parser.add_argument("--matrix-md", type=Path, default=workspace_root() / "APPSEC_ENDPOINT_MATRIX.md")
     parser.add_argument("--report-json", type=Path, default=workspace_root() / "APPSEC_GATE_REPORT.json")
@@ -586,7 +588,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-write", action="store_true", help="Run checks without writing report files.")
     args = parser.parse_args(argv)
 
-    app_root = args.app_root.resolve()
+    app_root = (args.app_root if args.app_root is not None else default_active_app_root()).resolve()
     app_py = app_root / "app.py"
     config_py = app_root / "config.py"
     matrix = build_endpoint_matrix(app_py)
