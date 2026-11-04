@@ -103,17 +103,25 @@ _SECURITY_AUDIT_LOCK = threading.Lock()
 
 app = Flask(__name__)
 
-# S-8: Prod ortaminda FLASK_SECRET_KEY zorunlu; dev'de fallback + uyari
-_secret_key = FLASK_SECRET_KEY
-_configured_secret_key = bool(_secret_key and _secret_key not in {"REPLACE_ME", "CHANGE_ME"})
-if not _secret_key:
-    if os.getenv("ENVIRONMENT", "dev").lower() == "prod":
-        raise RuntimeError("FLASK_SECRET_KEY ortam degiskeni prod ortaminda zorunludur.")
-    _secret_key = secrets.token_hex(32)
-    logging.getLogger("dwh_app").warning(
-        "FLASK_SECRET_KEY ayarlanmamis; dev modunda runtime-only gecici anahtar uretildi."
-    )
-app.secret_key = _secret_key
+_WEAK_FLASK_SECRET_KEYS = {
+    "replace_me", "change_me", "changeme", "secret", "password", "dev", "test", "default",
+}
+
+
+def _configure_flask_secret_key(flask_app: Flask, configured_key: str | None) -> bool:
+    """Use a configured signing key only when it is neither weak nor a placeholder."""
+    candidate = configured_key if isinstance(configured_key, str) else ""
+    normalized = candidate.strip()
+    configured = len(normalized) >= 16 and normalized.casefold() not in _WEAK_FLASK_SECRET_KEYS
+    if configured:
+        flask_app.secret_key = candidate
+    else:
+        flask_app.secret_key = secrets.token_hex(32)
+        logger.warning("FLASK_SECRET_KEY is missing or weak; generated a temporary runtime key.")
+    return configured
+
+
+_configured_secret_key = _configure_flask_secret_key(app, FLASK_SECRET_KEY)
 app.permanent_session_lifetime = timedelta(minutes=APP_SESSION_TIMEOUT_MINUTES)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,

@@ -115,8 +115,11 @@ def validate_deployment_security(settings: dict[str, Any]) -> dict[str, Any]:
         errors.append("Network-exposed deployment requires auth to be enabled.")
     if result["network_exposed"] and not result["auth_configured"]:
         errors.append("Network-exposed deployment requires configured auth credentials.")
-    if result["environment"] == "prod" and "session_key_configured" not in result["active_controls"]:
-        errors.append("prod deployment requires a configured Flask secret key.")
+    if "session_key_configured" not in result["active_controls"]:
+        if result["environment"] == "prod":
+            errors.append("prod deployment requires a configured Flask secret key.")
+        elif result["network_exposed"] or result["profile"] != "local-only":
+            errors.append("Network-exposed deployment requires a configured Flask secret key.")
     if result["profile"] == "on-prem-hardened" and result["tls_boundary"] == "none":
         errors.append("on-prem-hardened deployment requires a TLS boundary.")
     if result["profile"] == "on-prem-hardened" and not result["ip_allowlist_configured"]:

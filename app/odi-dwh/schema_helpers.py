@@ -451,6 +451,19 @@ def _schema_change_sync_odi_payload(body: dict) -> dict:
             column_scale=column_scale,
             new_name=new_name,
         )
+    failure_reason = odi_orchestrator.groovy_sync_failure_reason(result)
+    if failure_reason:
+        return {
+            "applied": False,
+            "status": "ODI_METADATA_SYNC_FAILED",
+            "operation": operation,
+            "model_code": model_code,
+            "table": table,
+            "column": column or None,
+            "new_name": new_name,
+            "reason": failure_reason,
+            "next_step": "Review ODI metadata state before retrying the sync.",
+        }
     return {
         "applied": True,
         "status": "ODI_METADATA_SYNCED",
