@@ -83,7 +83,12 @@ export function IncrementalLoad() {
         approved: true,
       });
       setExecution(data.execution);
-      setPreflight(data.preflight);
+      setApproved(false);
+      try {
+        setPreflight(await getIncrementalPreflight(SPEC_NAME));
+      } catch {
+        setPreflight(null);
+      }
     } catch (err) {
       setError(err.message);
     } finally {

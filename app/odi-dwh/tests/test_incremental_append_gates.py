@@ -182,9 +182,11 @@ def test_gate_failure_rolls_back_and_leaves_watermark_unchanged(monkeypatch, gol
     assert "key_differences" not in dumped
 
 
-def test_gate_exception_fails_closed_without_leaking_details(monkeypatch):
+def test_gate_database_error_fails_closed_without_leaking_details(monkeypatch):
+    import oracledb
+
     def boom(*_a, **_k):
-        raise RuntimeError("internal-dsn-detail")
+        raise oracledb.DatabaseError("internal-dsn-detail")
 
     monkeypatch.setattr(watermark_manager, "run_live_regressions", boom)
     monkeypatch.setattr(watermark_manager, "run_post_load_dq_gate", lambda specs, **_k: {"status": "passed"})
@@ -215,3 +217,59 @@ def test_executor_no_longer_accepts_caller_supplied_gate_results():
             watermark_writer=FakeWatermarkWriter(),
             post_load_gate_results={"post_load_golden_record_passed": True, "post_load_dq_passed": True},
         )
+
+
+def test_unexpected_gate_error_is_not_a_gate_failure_and_rolls_back(monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("programming error")
+
+    monkeypatch.setattr(watermark_manager, "run_live_regressions", boom)
+    monkeypatch.setattr(watermark_manager, "run_post_load_dq_gate", lambda specs, **_k: {"status": "passed"})
+    target = FakeAppendConnection(rowcount=1)
+    writer = FakeWatermarkWriter()
+
+    with pytest.raises(RuntimeError):
+        watermark_manager.execute_incremental_append(
+            _ready_preflight_report()["results"][0],
+            approved=True,
+            target_conn=target,
+            source_conn=object(),
+            watermark_writer=writer,
+        )
+
+    assert target.commits == 0 and target.rollbacks == 1
+    assert writer.calls == []
+
+
+@pytest.mark.parametrize("exc", [ValueError("secret detail"), RuntimeError("secret detail"), TypeError("secret detail")])
+def test_route_maps_any_unexpected_executor_error_to_redacted_500(app_client, monkeypatch, exc):
+    import app as app_module
+    from routes import schema_write
+
+    class Conn:
+        def close(self):
+            pass
+
+    class WM:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def boom(*_a, **_k):
+        raise exc
+
+    report = _ready_preflight_report()
+    monkeypatch.setattr(app_module, "run_configured_incremental_strategy_preflight", lambda _s: report, raising=False)
+    monkeypatch.setattr(app_module, "_open_incremental_target_connection", lambda: Conn(), raising=False)
+    monkeypatch.setattr(schema_write, "_open_incremental_source_connection", lambda: Conn(), raising=False)
+    monkeypatch.setattr(app_module, "WatermarkManager", WM)
+    monkeypatch.setattr(app_module, "execute_incremental_append", boom, raising=False)
+
+    resp = app_client.post("/api/incremental/execute", json={"spec_name": "SH_SALES_ODS", "approved": True})
+
+    assert resp.status_code == 500
+    body = json.dumps(resp.get_json())
+    assert "secret detail" not in body
+    assert resp.get_json()["error"] == "Incremental execution failed."

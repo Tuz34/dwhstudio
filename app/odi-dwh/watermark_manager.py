@@ -21,6 +21,25 @@ Incremental append transaction model (security findings #4 and #8):
   Rerun idempotency: the rerun guard compares the source window with the
   target's committed maximum, so after a successful run a second preflight
   sees an empty window and the executor appends nothing.
+  Concurrency: the executor first takes a per-spec lock on the target
+  connection (SELECT ... FOR UPDATE on the spec's AUDIT_USER.ETL_WATERMARK row,
+  or LOCK TABLE ... EXCLUSIVE when the row does not exist yet), then recomputes
+  the target high-water mark. If it moved since preflight, the request is
+  answered with blocked_by_rerun_guard and nothing is written. The lock is held
+  through the single commit/rollback, so a concurrent second request waits and
+  then sees the committed window.
+  Executor statuses (all counts/status only, no raw rows):
+    ready_for_executor -> executed: appended, gates passed, watermark advanced,
+      one commit.
+    blocked_until_explicit_approval / blocked_by_rerun_guard: nothing written
+      (also returned when the window changed under the lock).
+    blocked_no_common_append_columns: nothing written.
+    rolled_back_post_load_gate_failed: a server-side gate failed or could not
+      be evaluated (oracledb.Error); append rolled back, watermark untouched.
+    rolled_back_watermark_update_failed: watermark MERGE failed; append and
+      watermark rolled back together, safe_to_retry is true.
+  Any other exception rolls back and propagates; the route maps it to the
+  redacted HTTP 500.
   Deployment prerequisite: the target connection user needs INSERT/UPDATE on
   AUDIT_USER.ETL_WATERMARK; without it the MERGE fails and everything is
   rolled back (fail closed).
@@ -444,9 +463,47 @@ _GOLDEN_SPEC_KEY_BY_INCREMENTAL_SPEC = {
 }
 
 
-# Expected gate failures fail closed here; anything else propagates to the
-# executor-level rollback-and-raise handler (also fail closed).
-_GATE_ERRORS = (oracledb.Error, KeyError, ValueError, TypeError, RuntimeError)
+# Only database errors raised while evaluating a gate are an expected, handled
+# gate failure (fail closed). Everything else (programming errors, bad
+# arguments) propagates to the executor rollback-and-raise handler and the
+# route returns the redacted HTTP 500.
+_GATE_ERRORS = (oracledb.Error,)
+
+
+class _UnknownGateSpec(Exception):
+    """No controlled gate spec exists for the incremental spec (fail closed)."""
+
+
+def _lock_spec_and_recheck_window(
+    target_conn: Any,
+    *,
+    spec_name: str,
+    target_table: str,
+    watermark_column: str | None,
+    expected_start: Any,
+) -> bool:
+    """Serialize executions per spec, then verify the window is still new.
+
+    Takes the lock on ``target_conn`` and keeps it until that connection's
+    commit/rollback. Returns True when the target high-water mark still equals
+    the window start seen at preflight.
+    """
+
+    cursor = target_conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT 1 FROM AUDIT_USER.ETL_WATERMARK "
+            "WHERE TABLE_OWNER = :owner AND TABLE_NAME = :tname FOR UPDATE WAIT 30",
+            {"owner": "INCREMENTAL_STRATEGY", "tname": spec_name.upper()},
+        )
+        if cursor.fetchone() is None:
+            # No watermark row yet: serialize on the table instead.
+            cursor.execute("LOCK TABLE AUDIT_USER.ETL_WATERMARK IN EXCLUSIVE MODE WAIT 30")
+    finally:
+        cursor.close()
+    owner, table = _split_qualified_name(target_table)
+    current = _max_value(target_conn, owner, table, str(watermark_column))
+    return _coerce_extract_date(_safe_value(current)) == _coerce_extract_date(expected_start)
 
 
 def _compute_post_load_gates(
@@ -466,8 +523,12 @@ def _compute_post_load_gates(
     name = str(spec_name).strip().upper()
     golden_passed = False
     dq_passed = False
+    golden_key = _GOLDEN_SPEC_KEY_BY_INCREMENTAL_SPEC.get(name)
+    golden_spec = default_golden_record_specs().get(golden_key) if golden_key else None
+    dq_spec = default_post_load_dq_specs().get(name)
     try:
-        golden_spec = default_golden_record_specs()[_GOLDEN_SPEC_KEY_BY_INCREMENTAL_SPEC[name]]
+        if golden_spec is None:
+            raise _UnknownGateSpec
         report = run_live_regressions(
             [golden_spec],
             source_conn=source_conn,
@@ -475,13 +536,14 @@ def _compute_post_load_gates(
             row_limit=None,
         )
         golden_passed = report.get("status") == "passed"
-    except _GATE_ERRORS as exc:
+    except (*_GATE_ERRORS, _UnknownGateSpec) as exc:
         logger.warning("Post-load golden record gate errored: %s", type(exc).__name__)
     try:
-        dq_spec = default_post_load_dq_specs()[name]
+        if dq_spec is None:
+            raise _UnknownGateSpec
         dq_report = run_post_load_dq_gate([dq_spec], conn=target_conn)
         dq_passed = dq_report.get("status") == "passed"
-    except _GATE_ERRORS as exc:
+    except (*_GATE_ERRORS, _UnknownGateSpec) as exc:
         logger.warning("Post-load DQ gate errored: %s", type(exc).__name__)
     return {
         "post_load_golden_record_passed": golden_passed,
@@ -526,6 +588,23 @@ def execute_incremental_append(
     write_ops = ["append_delta_rows_to_target", "advance_watermark_after_post_load_gates"]
     cursor = target_conn.cursor()
     try:
+        if not _lock_spec_and_recheck_window(
+            target_conn,
+            spec_name=str(preflight_result["spec"]),
+            target_table=target_table,
+            watermark_column=watermark_column,
+            expected_start=last_watermark,
+        ):
+            target_conn.rollback()
+            return {
+                **request,
+                "status": "blocked_by_rerun_guard",
+                "reason": "target high-water mark changed since preflight; window already appended",
+                "will_execute": False,
+                "rows_appended": 0,
+                "write_operations_attempted": [],
+                "watermark_update_attempted": False,
+            }
         sql = _append_insert_select_sql(
             source_table=source_table,
             target_table=target_table,

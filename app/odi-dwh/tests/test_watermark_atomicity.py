@@ -1,5 +1,6 @@
 """Finding #8: append and watermark advance share one transaction."""
 
+import threading
 from datetime import datetime
 
 import pytest
@@ -15,6 +16,11 @@ class TxnCursor(FakeIncrementalCursor):
     rowcount = 0
 
     def execute(self, sql, params=None):
+        upper = " ".join(sql.upper().split())
+        if "FOR UPDATE" in upper or upper.startswith("LOCK TABLE"):
+            self.connection.acquire_lock(table=upper.startswith("LOCK TABLE"))
+            self._row = (1,) if self.connection.watermark_row_exists and "FOR UPDATE" in upper else None
+            return
         if sql.lstrip().upper().startswith("INSERT INTO"):
             if self.connection.fail_on_insert:
                 raise RuntimeError("simulated insert failure")
@@ -40,6 +46,28 @@ class TxnTargetConnection(FakeIncrementalConnection):
         self.commits = 0
         self.rollbacks = 0
         self.fail_on_insert = False
+        self.lock = threading.Lock()
+        self.holds_lock = False
+        self.watermark_row_exists = True
+        self.lock_kinds = []
+
+    def share_with(self, other):
+        """Make `other` a second session on the same database (shared committed state and lock)."""
+        other.tables = self.tables
+        other.lock = self.lock
+        other.watermark_row_exists = self.watermark_row_exists
+        return other
+
+    def acquire_lock(self, table=False):
+        self.lock_kinds.append("table" if table else "row")
+        if not self.holds_lock:
+            self.lock.acquire()
+            self.holds_lock = True
+
+    def release_lock(self):
+        if self.holds_lock:
+            self.holds_lock = False
+            self.lock.release()
 
     def cursor(self):
         return TxnCursor(self)
@@ -51,11 +79,13 @@ class TxnTargetConnection(FakeIncrementalConnection):
             self.committed_watermark = self.pending_watermark
             self.pending_watermark = None
         self.commits += 1
+        self.release_lock()
 
     def rollback(self):
         self.pending_rows = []
         self.pending_watermark = None
         self.rollbacks += 1
+        self.release_lock()
 
 
 class TxnWatermarkWriter:
@@ -177,3 +207,44 @@ def test_update_watermark_with_caller_connection_does_not_commit():
 
     manager.update_watermark("OWN", "TBL", conn=Conn(), commit=True)
     assert ("commit",) in calls
+
+
+@pytest.mark.parametrize("row_exists", [True, False])
+def test_concurrent_requests_serialize_and_second_is_blocked(row_exists):
+    first = TxnTargetConnection()
+    first.watermark_row_exists = row_exists
+    second = first.share_with(TxnTargetConnection())
+    # Both requests passed preflight against the same pre-append state.
+    stale_preflight_1 = _preflight(first)
+    stale_preflight_2 = _preflight(second)
+    results = {}
+    started = threading.Event()
+
+    class SlowWriter(TxnWatermarkWriter):
+        def update_watermark(self, *a, **k):
+            started.set()
+            # Give the second request time to try (and block on) the lock.
+            threading.Event().wait(0.3)
+            super().update_watermark(*a, **k)
+
+    def run_first():
+        results["first"] = _run(first, SlowWriter(), preflight=stale_preflight_1)
+
+    def run_second():
+        started.wait(5)
+        results["second"] = _run(second, TxnWatermarkWriter(), preflight=stale_preflight_2)
+
+    threads = [threading.Thread(target=run_first), threading.Thread(target=run_second)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(15)
+
+    assert results["first"]["status"] == "executed"
+    assert results["second"]["status"] == "blocked_by_rerun_guard"
+    assert results["second"]["write_operations_attempted"] == []
+    assert len(first.tables["DWH.ODS_SH_SALES"]) == 2  # window appended exactly once
+    assert second.commits == 0 and second.pending_rows == []
+    expected_kinds = ["row"] if row_exists else ["row", "table"]
+    assert first.lock_kinds == expected_kinds
+    assert second.lock_kinds == expected_kinds

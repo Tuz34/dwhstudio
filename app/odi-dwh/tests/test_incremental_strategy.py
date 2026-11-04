@@ -81,7 +81,21 @@ class FakeAppendCursor:
         self.rowcount = connection.rowcount
 
     def execute(self, sql, params=None):
+        sql_upper = " ".join(sql.upper().split())
+        if "FOR UPDATE" in sql_upper:
+            self._row = (1,)
+            self.connection.locks.append("row")
+            return
+        if sql_upper.startswith("LOCK TABLE"):
+            self.connection.locks.append("table")
+            return
+        if sql_upper.startswith("SELECT MAX("):
+            self._row = (self.connection.target_max,)
+            return
         self.connection.executed.append((sql, params or {}))
+
+    def fetchone(self):
+        return self._row
 
     def close(self):
         self.connection.closed_cursors += 1
@@ -90,6 +104,8 @@ class FakeAppendCursor:
 class FakeAppendConnection:
     def __init__(self, rowcount=1):
         self.rowcount = rowcount
+        self.target_max = "2026-06-19"
+        self.locks = []
         self.executed = []
         self.commits = 0
         self.rollbacks = 0

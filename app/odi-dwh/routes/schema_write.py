@@ -137,6 +137,9 @@ def api_incremental_execute():
         return jsonify({"error": _CALLER_GATE_REJECTION}), 400
     try:
         spec_name = app_module._validate_incremental_spec_name(body.get("spec_name"))
+    except ValueError as exc:
+        return redacted_error("Schema request rejected", exc, status=400)
+    try:
         report = app_module.run_configured_incremental_strategy_preflight([spec_name])
         preflight_result = (report.get("results") or [{}])[0]
         execution_request = app_module.build_incremental_execution_request(
@@ -175,8 +178,6 @@ def api_incremental_execute():
             "raw_rows_included": False,
             "secret_printed": False,
         })
-    except ValueError as exc:
-        return redacted_error("Schema request rejected", exc, status=400)
     except Exception as exc:
         app_module.logger.error("Incremental execution failed: %s", type(exc).__name__)
         return jsonify({
