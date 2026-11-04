@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: app/odi-dwh/requirements*.txt
+      - name: Install UnixODBC headers for pyodbc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unixodbc-dev
+      - name: Install Python dependencies
+        working-directory: app/odi-dwh
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run Python quality gate
+        working-directory: app/odi-dwh
+        run: python python_quality_gate.py
+      - name: Run pytest with tracked environment-dependent tests deselected
+        working-directory: app/odi-dwh
+        shell: bash
+        run: |
+          mapfile -t known_failures < "$GITHUB_WORKSPACE/.github/known_failures.txt"
+          if [[ ${#known_failures[@]} -ne 13 ]]; then
+            echo "Expected 13 known environment-dependent tests in .github/known_failures.txt"
+            exit 1
+          fi
+          echo "13 known environment-dependent tests deselected, tracked in ODI-80"
+          deselect_args=()
+          for node_id in "${known_failures[@]}"; do
+            deselect_args+=(--deselect "$node_id")
+          done
+          python -m pytest -q "${deselect_args[@]}"
+      - name: Run application security gate
+        run: python tools/workspace/appsec_gate.py --no-write
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/odi-dwh/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: app/odi-dwh/frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
+      - name: Print dependency audit for information
+        run: npm audit --audit-level=high || true
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'

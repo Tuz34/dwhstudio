@@ -1,5 +1,7 @@
 # DWH Studio
 
+[![CI](https://github.com/Tuz34/dwhstudio/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuz34/dwhstudio/actions/workflows/ci.yml)
+
 **Metadata-driven data warehouse automation for Oracle® Database and Oracle Data Integrator**
 
 DWH Studio reads source metadata from an Oracle database, proposes target tables and column
@@ -102,6 +104,8 @@ Examples from the code and tests (Oracle sample schemas `HR` and `SH` as sources
 - **Audit schema:** alert log, mapping log, data lineage, mapping snapshot, and mapping run state.
 
 ## Tests and quality gates
+
+GitHub Actions runs these gates, a frontend build, and a secret scan for every pull request and main push; its pytest step deselects the 13 environment-dependent cases tracked in ODI-80.
 
 From `app/odi-dwh`:
 
