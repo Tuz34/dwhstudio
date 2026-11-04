@@ -23,7 +23,9 @@ from datetime import datetime
 import oracledb
 
 from config import (
+    ODI_APPROVED_IKMS,
     ODI_FOLDER,
+    ODI_IKM_PRIORITY,
     ODI_PROJECT,
     ORACLE_DDL_PASSWORD,
     ORACLE_DDL_USER,
@@ -32,10 +34,46 @@ from config import (
     SOURCE_SYSTEM_NAME,
 )
 from exceptions import MappingGenerationError
+from ikm_policy import is_update_ikm, normalize_repository_preflight, resolve_approved_ikm, verified_source_identity
 from mapping_state_manager import redact_sensitive_text
 from source_connector import get_source_connector
 
 logger = logging.getLogger("mapping_generator")
+
+# Internal (target-schema) sources are read through the target connector.
+INTERNAL_SOURCE_MODELS = ("ORACLE_ODS", "ORACLE_DWH")
+DEFAULT_INTERNAL_SOURCE_OWNER = "DWH"
+ALLOWED_INTERNAL_OWNERS = frozenset({"DWH", "ODS", "AUDIT_USER", "DWH_FLAT"})
+INTEGRATION_TYPES = frozenset({"IU", "CONTROL_APPEND"})
+MAX_UPDATE_KEY_COLUMNS = 8
+# SKEY lookup tables are always loaded with this merge KM (see _create_odi_mapping).
+SKEY_LOOKUP_IKM = "IKM Oracle Incremental Update (MERGE)"
+
+
+class TargetTableBlockedError(RuntimeError):
+    """Existing target failed a read-only schema/key check; no DDL ran."""
+
+    def __init__(self, code: str, detail: dict) -> None:
+        super().__init__(f"{code}: existing target does not satisfy the requested plan")
+        self.error_code = code
+        self.detail = detail
+
+
+class UpdateKeyRequiredError(ValueError):
+    """A merge/update KM would run without an update key (structured code update_key_required)."""
+
+    error_code = "update_key_required"
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"update_key_required: {detail}")
+
+
+class RepositoryPreflightBlockedError(RuntimeError):
+    error_code = "repository_preflight_failed"
+
+    def __init__(self, detail: dict) -> None:
+        super().__init__("repository_preflight_failed: repository identity could not be verified")
+        self.detail = detail
 
 def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> str:
     """Escape single quotes in an Oracle SQL literal."""
@@ -301,6 +339,8 @@ class MappingGenerator:
         return None
 
     def _source_schema_hint(self, params: dict) -> str | None:
+        if params.get("src_owner"):
+            return params["src_owner"]
         src_table = params.get("src_table")
         if src_table and "." in src_table:
             return src_table.split(".", 1)[0].upper()
@@ -321,22 +361,31 @@ class MappingGenerator:
             "model_code", "model_name", "technology", "logical_schema",
             "datastore_name", "resource_name", "score", "ambiguous",
             "candidate_count",
+            "physical_schema", "context", "datastore_id", "datastore_exists",
         ]
         return {key: row.get(key) for key in keys if key in row}
 
     def _resolve_odi_repository_bindings(self, params: dict) -> dict:
         """Resolve ODI model/datastore names from repository metadata tables."""
+        identity = None
+        if params.get("src_model") in INTERNAL_SOURCE_MODELS:
+            try:
+                identity = verified_source_identity(
+                    params.get("_odi_source_identity"), params["src_owner"], params["src_table"], params["context"],
+                )
+            except ValueError as exc:
+                raise RepositoryPreflightBlockedError({"code": "source_identity_unverified"}) from exc
         reader = self._get_odi_repo_reader()
         src_hint = self._source_schema_hint(params)
         tgt_hint = self._target_schema_hint(params)
 
-        source_ds = reader.resolve_datastore(
+        source_ds = (identity if identity["datastore_exists"] else None) if identity else reader.resolve_datastore(
             params.get("src_table"),
             schema_hint=src_hint,
             role="source",
             preferred_model=params.get("src_model"),
         )
-        source_model = source_ds or reader.resolve_model(
+        source_model = identity or source_ds or reader.resolve_model(
             schema_hint=src_hint,
             role="source",
             preferred_model=params.get("src_model"),
@@ -394,6 +443,26 @@ class MappingGenerator:
             f"source_model={src_label}, target_model={tgt_label}",
         )
         return bindings
+
+    def _preflight_odi_repository(self, params: dict) -> dict:
+        from odi_orchestrator import OdiOrchestrator
+
+        internal = params["src_model"] in INTERNAL_SOURCE_MODELS
+        owner = params["src_owner"] if internal else None
+        table = params["src_table"] if internal else None
+        try:
+            result = OdiOrchestrator().preflight_mapping(
+                approved=True, ikm_name=params["ikm_name"], src_owner=owner, src_table=table, context=params["context"],
+            )
+        except Exception as exc:
+            raise RepositoryPreflightBlockedError({"code": "repository_lookup_failed"}) from exc
+        result = normalize_repository_preflight(result, params["ikm_name"], owner, table, params["context"])
+        if result["status"] != "passed":
+            raise RepositoryPreflightBlockedError(result)
+        params["_odi_ikm_id"] = result["ikm_id"]
+        if internal:
+            params["_odi_source_identity"] = result["source"]
+        return result
 
     def _find_repository_mapping(self, mapping_name: str | None) -> dict | None:
         reader = self._get_odi_repo_reader()
@@ -497,6 +566,22 @@ class MappingGenerator:
         connector = get_source_connector("oracle")
         schema_df = connector.get_table_schema(src_table)
         return self._source_schema_df_to_legacy_columns(schema_df, connector)
+
+    def _source_columns_for(self, params: dict) -> list[dict]:
+        """Read source columns. Internal ODS/DWH sources go through the target connector.
+
+        ORACLE_ODS / ORACLE_DWH tables live in the target schema, so they are read with
+        an explicit owner instead of the source connector's default schema.
+        """
+        if params.get("src_model") in INTERNAL_SOURCE_MODELS:
+            from target_table_service import read_table_schema
+
+            owner = params.get("src_owner") or DEFAULT_INTERNAL_SOURCE_OWNER
+            schema_df = read_table_schema(owner, params["src_table"])
+            return self._source_schema_df_to_legacy_columns(
+                schema_df, get_source_connector("oracle")
+            )
+        return self._get_source_columns_oracle(params["src_table"])
 
     @staticmethod
     def _positive_int(value) -> int | None:
@@ -611,7 +696,7 @@ class MappingGenerator:
                 is_mssql_source = True
                 params["src_table"] = full_src_name
             else:
-                src_columns = self._get_source_columns_oracle(src_table)
+                src_columns = self._source_columns_for(params)
                 is_mssql_source = False
         except Exception as e:
             self._add_log("target_preflight", "FAILED", f"Could not retrieve source schema: {e}")
@@ -673,11 +758,27 @@ class MappingGenerator:
                 desired_col_defs.append((def_name, def_type))
                 defaults_added.append(def_name)
 
+        key_columns = list(params.get("update_key_columns") or [])
+        unique_key = primary_key = None
+        if key_columns:
+            known = {name for name, _type_sql in desired_col_defs}
+            missing = [name for name in key_columns if name not in known]
+            if missing:
+                raise ValueError(
+                    "update_key_columns not found in target columns: " + ", ".join(missing)
+                )
+            if params.get("update_key_kind") == "primary":
+                primary_key = key_columns
+            else:
+                unique_key = key_columns
+
         return {
             "src_columns": src_columns,
             "col_defs": col_defs,
             "desired_col_defs": desired_col_defs,
             "defaults_added": defaults_added,
+            "unique_key": unique_key,
+            "primary_key": primary_key,
         }
 
     def target_table_preflight(self, params: dict) -> dict:
@@ -785,8 +886,11 @@ class MappingGenerator:
         logger.info("Creating target table from validated mapping parameters")
         try:
             plan = self._build_target_column_plan(params)
-            return execute_target_table_plan(self, params, plan, ORACLE_DDL_USER or "APP_USER")
-        except MappingGenerationError:
+            outcome = execute_target_table_plan(self, params, plan, ORACLE_DDL_USER or "APP_USER")
+            if outcome.get("status") == "BLOCKED":
+                raise TargetTableBlockedError(str(outcome["code"]), outcome)
+            return outcome
+        except (MappingGenerationError, TargetTableBlockedError):
             raise
         except Exception as exc:
             self._add_log("create_target_table", "FAILED", type(exc).__name__)
@@ -884,7 +988,16 @@ class MappingGenerator:
         # - External sources (MSSQL and Oracle source: ORACLE_HR/ORACLE_SH/ORACLE_SOURCE)
         #   arrive schema-qualified; the schema MUST BE PRESERVED (HR.EMPLOYEES -> HR.EMPLOYEES).
         # - Internal Oracle source/target (ORACLE_ODS / ORACLE_DWH) uses a single table name.
-        _internal_oracle = validated["src_model"] in ("ORACLE_ODS", "ORACLE_DWH")
+        _internal_oracle = validated["src_model"] in INTERNAL_SOURCE_MODELS
+        validated["src_owner"] = None
+        if _internal_oracle:
+            owner_parts = raw_src.split(".")
+            src_owner = owner_parts[-2] if len(owner_parts) > 1 else DEFAULT_INTERNAL_SOURCE_OWNER
+            if src_owner not in ALLOWED_INTERNAL_OWNERS:
+                raise ValueError(
+                    f"Invalid src_owner: {src_owner}. Allowed values: {sorted(ALLOWED_INTERNAL_OWNERS)}"
+                )
+            validated["src_owner"] = src_owner
         if not _internal_oracle:
             if not re.match(r'^[A-Z][A-Z0-9_]*(\.[A-Z][A-Z0-9_]*)?$', raw_src):
                 raise ValueError(
@@ -925,6 +1038,8 @@ class MappingGenerator:
         validated["needs_skey"] = params.get("needs_skey") is True
         validated["skey_natural_key"] = params.get("skey_natural_key") or None
         validated["description"] = params.get("description", "")
+        validated["context"] = self._validate_identifier(params.get("context") or "GLOBAL", "context")
+        self._validate_load_options(params, validated)
 
         if validated["needs_skey"] and not validated["skey_natural_key"]:
             raise ValueError("SKEY was requested but skey_natural_key was not specified.")
@@ -932,6 +1047,66 @@ class MappingGenerator:
         self._add_log("validate_params", "SUCCESS",
                        f"{validated['src_table']} -> {validated['tgt_table']}")
         return validated
+
+    def _validate_load_options(self, params: dict, validated: dict) -> None:
+        """Validate the additive update-key, integration-type and IKM request fields."""
+        raw_keys = params.get("update_key_columns")
+        if raw_keys is None or raw_keys == "" or raw_keys == []:
+            items: list = []
+        elif isinstance(raw_keys, str):
+            items = raw_keys.split(",")
+        elif isinstance(raw_keys, (list, tuple)):
+            items = list(raw_keys)
+        else:
+            raise ValueError("update_key_columns must be a list of column names.")
+        key_columns: list[str] = []
+        for item in items:
+            if not isinstance(item, str):
+                raise ValueError("update_key_columns must contain column names.")
+            name = self._validate_identifier(item, "update_key_columns")
+            if name not in key_columns:
+                key_columns.append(name)
+        if len(key_columns) > MAX_UPDATE_KEY_COLUMNS:
+            raise ValueError(f"update_key_columns allows at most {MAX_UPDATE_KEY_COLUMNS} columns.")
+        validated["update_key_columns"] = key_columns
+
+        kind = str(params.get("update_key_kind") or "unique").strip().lower()
+        if kind not in ("unique", "primary"):
+            raise ValueError("update_key_kind must be 'unique' or 'primary'.")
+        validated["update_key_kind"] = kind
+
+        integration_type = str(params.get("integration_type") or "IU").strip().upper()
+        if integration_type not in INTEGRATION_TYPES:
+            raise ValueError(f"integration_type must be one of {sorted(INTEGRATION_TYPES)}.")
+        validated["integration_type"] = integration_type
+
+        # Derive the key requirement from the KM that will really run, before any DDL.
+        is_skey_lookup = (
+            validated.get("needs_skey") is True
+            and bool(validated.get("skey_natural_key"))
+            and str(validated.get("tgt_table") or "").startswith("SKEY_")
+        )
+        if is_skey_lookup:
+            # SKEY lookup mappings are always forced onto the merge KM with an update key.
+            if integration_type != "IU":
+                raise ValueError("An SKEY lookup mapping needs integration_type IU.")
+        raw_ikm = params.get("ikm_name")
+        if raw_ikm not in (None, ""):
+            resolve_approved_ikm(raw_ikm, integration_type, ODI_APPROVED_IKMS, ODI_IKM_PRIORITY)
+        effective = resolve_approved_ikm(
+            SKEY_LOOKUP_IKM if is_skey_lookup else raw_ikm,
+            integration_type, ODI_APPROVED_IKMS, ODI_IKM_PRIORITY,
+        )
+        validated["ikm_name"] = effective
+        if (
+            integration_type == "IU"
+            and is_update_ikm(effective)
+            and not key_columns
+        ):
+            raise UpdateKeyRequiredError(
+                "the effective IKM requires an update key; pass update_key_columns "
+                "(for an SKEY lookup target, the natural key column)."
+            )
 
     # ── ODI Datastore Registration ──────────────────────────────────────────────────────
 
@@ -972,7 +1147,7 @@ class MappingGenerator:
             if _is_mssql_reg:
                 src_columns, _ = self._get_source_columns_mssql(src_table)
             else:
-                src_columns = self._get_source_columns_oracle(src_table)
+                src_columns = self._source_columns_for(params)
 
             src_col_defs = self._odi_register_column_defs(src_columns)
 
@@ -1011,6 +1186,18 @@ class MappingGenerator:
         tgt_model = params["tgt_model"]
         tgt_table = params["tgt_table"]
         tgt_owner = params["tgt_owner"]
+        key_columns = list(params.get("update_key_columns") or [])
+        key_kind = params.get("update_key_kind") or "unique"
+        key_kwargs: dict = {}
+        key_failure: str | None = None
+        if key_columns:
+            from target_table_service import key_constraint_name
+
+            key_kwargs = {
+                "key_columns": key_columns,
+                "key_name": key_constraint_name(tgt_table, key_columns, key_kind),
+                "key_type": "PRIMARY_KEY" if key_kind == "primary" else "ALTERNATE_KEY",
+            }
 
         try:
             # Read target Oracle columns
@@ -1030,14 +1217,30 @@ class MappingGenerator:
                 }
                 self._add_log("register_datastores", "SKIPPED",
                               f"Target datastore exists: {odi_tgt_model_code}.{tgt_ds_name}")
+                if key_kwargs:
+                    # Existing datastore: add the missing key only; never recreate it.
+                    key_result = orch.register_datastore(
+                        model_code=odi_tgt_model_code,
+                        table_name=tgt_ds_name,
+                        columns=tgt_col_defs,
+                        resource_name=tgt_ds_name,
+                        key_only=True,
+                        **key_kwargs,
+                    )
+                    results["tgt_result"]["key_result"] = key_result
+                    if not self._register_key_passed(key_result):
+                        key_failure = "ODI update key registration failed for the target datastore."
             else:
                 tgt_result = orch.register_datastore(
                     model_code=odi_tgt_model_code,
                     table_name=tgt_ds_name,
                     columns=tgt_col_defs,
                     resource_name=tgt_ds_name,
+                    **key_kwargs,
                 )
                 results["tgt_result"] = tgt_result
+                if key_kwargs and not self._register_key_passed(tgt_result):
+                    key_failure = "ODI update key registration failed for the target datastore."
 
                 if "Hata:" in tgt_result and "zaten mevcut" not in tgt_result.lower():
                     logger.warning("Target datastore registration warning: %s", tgt_result)
@@ -1047,8 +1250,24 @@ class MappingGenerator:
         except Exception as e:
             logger.warning("Target datastore registration failed (continuing): %s", e)
             results["tgt_result"] = f"WARNING: {e}"
+            if key_kwargs:
+                key_failure = "ODI update key registration failed for the target datastore."
+
+        if key_failure:
+            # A requested update key is a contract: do not continue to mapping creation without it.
+            self._add_log("register_datastores", "FAILED", key_failure)
+            raise RuntimeError(key_failure)
 
         return results
+
+    @staticmethod
+    def _register_key_passed(output: object) -> bool:
+        """True when register_datastore reported a structured passed status with a key."""
+        for line in str(output or "").splitlines():
+            payload = _json_object(line)
+            if payload is not None and str(payload.get("status", "")).lower() == "passed":
+                return isinstance(payload.get("key"), dict)
+        return False
 
     # ── Create ODI Mapping ──────────────────────────────────────────────────
 
@@ -1079,7 +1298,6 @@ class MappingGenerator:
         
         # Special expressions for NK and SK columns in SKEY tables
         expressions = {}
-        ikm_override = None
 
         if params.get("needs_skey") and params.get("skey_natural_key"):
             nk_src = params["skey_natural_key"].strip()
@@ -1094,9 +1312,8 @@ class MappingGenerator:
                 expressions["NATURAL_KEY"] = f"TO_CHAR({nk_src})"
                 # No NOT EXISTS filter — IKM Merge already writes MERGE INTO through UpdateKey(NATURAL_KEY)
                 # (prevents ORA-00001 entirely, avoids inserting duplicate records, updates existing records)
-                ikm_override = "IKM Oracle Incremental Update (MERGE)"
                 logger.info(
-                    "SKEY lookup mapping (Best Practice): SEQ.NEXTVAL + IKM=%s, no filter.", ikm_override
+                    "SKEY lookup mapping: SEQ.NEXTVAL + IKM=%s, no filter.", params["ikm_name"]
                 )
                 
             # 2. For an actual dimension/fact table: CASE WHEN EXISTS (SKEY lookup)
@@ -1116,6 +1333,11 @@ class MappingGenerator:
                 expressions[f"NK_{params['tgt_table']}"] = nk_src
                 expressions[f"{params['tgt_table']}_NK"] = nk_src
 
+        integration_type = params.get("integration_type") or "IU"
+        update_key_columns = (
+            list(params.get("update_key_columns") or []) if integration_type == "IU" else []
+        )
+
         result = orch.generate_mapping(
             mapping_name=params["mapping_name"],
             src_model=odi_src_model,
@@ -1126,7 +1348,14 @@ class MappingGenerator:
             expressions=expressions,
             replace_existing_mapping=params.get("replace_existing_mapping") is True,
             filter_condition=None,          # No NOT EXISTS — IKM Merge handles it
-            ikm_name=ikm_override,           # IKM override for SKEY lookup tables
+            ikm_name=params.get("ikm_name"),
+            required_ikm_id=params.get("_odi_ikm_id"),
+            source_identity=params.get("_odi_source_identity"),
+            integration_type=integration_type,
+            required_update_key_columns=update_key_columns or None,
+            required_update_key_type=(
+                "PRIMARY_KEY" if params.get("update_key_kind") == "primary" else "ALTERNATE_KEY"
+            ) if update_key_columns else None,
         )
 
         # OdiOrchestrator returns "KOMUT HAZIRLANDI: ..." in stub mode.
@@ -1360,18 +1589,21 @@ class MappingGenerator:
             "overall_status": "SUCCESS",
             "log": [],
         }
+        persistent_steps_started = False
 
         try:
             # Step 2: Validation
             validated = self.validate_params(params)
             result["params"] = validated
 
-            # Step 3: Create target table (SQL Server → Oracle type conversion + ODS default columns)
-            tgt_result = self._create_target_table(validated)
-            result["steps"]["create_target_table"] = tgt_result
-
+            result["steps"]["repository_preflight"] = self._preflight_odi_repository(validated)
             repo_result = self._resolve_odi_repository_bindings(validated)
             result["steps"]["resolve_odi_repository"] = repo_result
+
+            # Step 3: Create target table (SQL Server → Oracle type conversion + ODS default columns)
+            persistent_steps_started = True
+            tgt_result = self._create_target_table(validated)
+            result["steps"]["create_target_table"] = tgt_result
 
             # Step 4: Register ODI datastores (source + target)
             ds_result = self._register_odi_datastores(validated)
@@ -1407,6 +1639,12 @@ class MappingGenerator:
         except (ValueError, RuntimeError) as e:
             result["overall_status"] = "FAILED"
             result["error"] = str(e)
+            if getattr(e, "error_code", None):
+                result["error_code"] = e.error_code
+            if isinstance(e, TargetTableBlockedError):
+                result["steps"]["create_target_table"] = e.detail
+            if isinstance(e, RepositoryPreflightBlockedError):
+                result["steps"]["repository_preflight"] = {"status": "BLOCKED", **e.detail}
             if isinstance(e, MappingCreationFailure):
                 result["replaced"] = e.replaced
                 result["kept_existing_on_failure"] = e.kept_existing_on_failure
@@ -1418,7 +1656,7 @@ class MappingGenerator:
             self._add_log("pipeline", "FAILED", failure_class)
 
             # Failed MAPPING_LOG record
-            if result.get("params"):
+            if persistent_steps_started and result.get("params"):
                 self._log_to_mapping_log(result["params"], "FAILED", str(e))
 
         except Exception as e:

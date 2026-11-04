@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from typing import Any
 
 import oracledb
+import pandas as pd
 
-from exceptions import MappingGenerationError
+from exceptions import DWHBaseError, MappingGenerationError
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +19,41 @@ class TargetTableContext:
     table: str
     drop_if_exists: bool
     ddl_user: str
+
+
+_MAX_CONSTRAINT_NAME = 30
+_KEY_KINDS = {"unique": "UK", "primary": "PK"}
+
+
+def key_constraint_name(table: str, columns: list[str], kind: str) -> str:
+    """Deterministic constraint name (<= 30 chars): UK_<T>_<COL> or PK_<T>."""
+    prefix = _KEY_KINDS[kind]
+    table_name = str(table).upper()
+    cols = [str(column).upper() for column in columns]
+    if kind == "primary":
+        name = f"{prefix}_{table_name}"
+    else:
+        name = f"{prefix}_{table_name}_{cols[0]}"
+    if len(name) <= _MAX_CONSTRAINT_NAME and (kind == "primary" or len(cols) == 1):
+        return name
+    digest = hashlib.sha1(f"{table_name}|{','.join(cols)}".encode("utf-8")).hexdigest()[:6].upper()
+    head = name[: _MAX_CONSTRAINT_NAME - len(digest) - 1].rstrip("_")
+    return f"{head}_{digest}"
+
+
+def key_constraint_sql(table: str, columns: list[str], kind: str) -> str:
+    """Inline CREATE TABLE constraint clause for the target key."""
+    quoted = ", ".join(f'"{str(column).upper()}"' for column in columns)
+    keyword = "PRIMARY KEY" if kind == "primary" else "UNIQUE"
+    return f"    CONSTRAINT {key_constraint_name(table, columns, kind)} {keyword} ({quoted})"
+
+
+def _plan_key(plan: dict[str, Any]) -> tuple[str, list[str]] | None:
+    if plan.get("primary_key"):
+        return "primary", list(plan["primary_key"])
+    if plan.get("unique_key"):
+        return "unique", list(plan["unique_key"])
+    return None
 
 
 def _close_resource(resource: Any, label: str) -> None:
@@ -82,30 +119,154 @@ def _target_columns(context: TargetTableContext) -> set[str]:
         _close_resource(connection, "target column connection")
 
 
-def _reconcile_existing(
-    context: TargetTableContext,
-    desired_columns: list[tuple[str, str]],
-) -> tuple[list[str], list[str]]:
-    existing = _target_columns(context)
-    missing = [(name, type_sql) for name, type_sql in desired_columns if name not in existing]
-    if not missing:
-        return [], []
+def read_table_schema(owner: str, table: str) -> pd.DataFrame:
+    """Read table columns through the target (DDL) connection with an explicit owner.
+
+    Same column contract as OracleSourceConnector.get_table_schema, so internal
+    ODS_/DWH_ sources do not depend on the source connector's default schema.
+    """
+    from source_connector import normalize_source_identifier
+
+    owner_name = normalize_source_identifier(owner)
+    table_name = normalize_source_identifier(table)
     connection = cursor = None
-    alter_sqls: list[str] = []
     try:
         connection = _connection()
         cursor = connection.cursor()
-        for name, type_sql in missing:
-            sql = f'ALTER TABLE {context.owner}.{context.table} ADD "{name}" {type_sql}'
-            cursor.execute(sql)
-            alter_sqls.append(sql)
-        connection.commit()
-        return [name for name, _ in missing], alter_sqls
-    except Exception as exc:
-        raise MappingGenerationError("Target table reconciliation failed") from exc
+        cursor.execute(
+            """
+            SELECT c.COLUMN_NAME, c.DATA_TYPE, c.DATA_LENGTH,
+                   c.DATA_PRECISION, c.DATA_SCALE, c.NULLABLE, cm.COMMENTS
+            FROM ALL_TAB_COLUMNS c
+            LEFT JOIN ALL_COL_COMMENTS cm
+              ON c.OWNER = cm.OWNER AND c.TABLE_NAME = cm.TABLE_NAME
+             AND c.COLUMN_NAME = cm.COLUMN_NAME
+            WHERE c.OWNER = :o AND c.TABLE_NAME = :t
+            ORDER BY c.COLUMN_ID
+            """,
+            {"o": owner_name, "t": table_name},
+        )
+        rows = cursor.fetchall()
+    except (oracledb.Error, DWHBaseError) as exc:
+        raise MappingGenerationError("Internal source column read failed") from exc
     finally:
-        _close_resource(cursor, "target reconciliation cursor")
-        _close_resource(connection, "target reconciliation connection")
+        _close_resource(cursor, "internal source cursor")
+        _close_resource(connection, "internal source connection")
+
+    frame = pd.DataFrame(
+        rows,
+        columns=[
+            "COLUMN_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION",
+            "DATA_SCALE", "NULLABLE", "COMMENTS",
+        ],
+    )
+    full_types = []
+    for _, row in frame.iterrows():
+        base = str(row["DATA_TYPE"])
+        precision, scale, length = row["DATA_PRECISION"], row["DATA_SCALE"], row["DATA_LENGTH"]
+        if base in ("VARCHAR2", "CHAR", "NVARCHAR2", "NCHAR"):
+            full_types.append(f"{base}({int(length)})")
+        elif base == "NUMBER" and pd.notna(precision) and pd.notna(scale) and int(scale) > 0:
+            full_types.append(f"NUMBER({int(precision)},{int(scale)})")
+        elif base == "NUMBER" and pd.notna(precision):
+            full_types.append(f"NUMBER({int(precision)})")
+        else:
+            full_types.append(base)
+    frame["FULL_DATA_TYPE"] = full_types
+    return frame[[
+        "COLUMN_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION",
+        "DATA_SCALE", "NULLABLE", "FULL_DATA_TYPE", "COMMENTS",
+    ]]
+
+
+_CONSTRAINT_TYPE_FOR_KIND = {"primary": "P", "unique": "U"}
+
+
+def _existing_key_constraints(context: TargetTableContext) -> list[dict[str, Any]]:
+    """Existing primary/unique constraints (type, status, validated, columns) on the target."""
+    connection = cursor = None
+    try:
+        connection = _connection()
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT c.CONSTRAINT_NAME, cc.COLUMN_NAME, c.CONSTRAINT_TYPE, c.STATUS, c.VALIDATED
+            FROM ALL_CONSTRAINTS c
+            JOIN ALL_CONS_COLUMNS cc
+              ON c.OWNER = cc.OWNER AND c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+            WHERE c.OWNER = :o AND c.TABLE_NAME = :t AND c.CONSTRAINT_TYPE IN ('P', 'U')
+            ORDER BY c.CONSTRAINT_NAME, cc.POSITION
+            """,
+            {"o": context.owner, "t": context.table},
+        )
+        grouped: dict[str, dict[str, Any]] = {}
+        for name, column, ctype, status, validated in cursor.fetchall():
+            entry = grouped.setdefault(
+                str(name),
+                {
+                    "name": str(name),
+                    "type": str(ctype).upper(),
+                    "enabled": str(status).upper() == "ENABLED",
+                    "validated": str(validated).upper() == "VALIDATED",
+                    "columns": [],
+                },
+            )
+            entry["columns"].append(str(column).upper())
+        return list(grouped.values())
+    except (oracledb.Error, DWHBaseError) as exc:
+        raise MappingGenerationError("Target key lookup failed") from exc
+    finally:
+        _close_resource(cursor, "target key cursor")
+        _close_resource(connection, "target key connection")
+
+
+def _verify_key_on_existing(context: TargetTableContext, plan: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed: verify the requested key on an existing table; never add DDL.
+
+    Returns status NONE (no key requested), ALREADY_PRESENT (right kind, enabled and
+    validated) or BLOCKED with a structured code: update_key_missing_on_existing_target,
+    update_key_kind_mismatch, update_key_constraint_disabled.
+    """
+    requested = _plan_key(plan)
+    if requested is None:
+        return {"status": "NONE", "columns": []}
+    kind, columns = requested
+    wanted = set(columns)
+    same_columns = [
+        entry for entry in _existing_key_constraints(context) if set(entry["columns"]) == wanted
+    ]
+    base = {"columns": columns, "kind": kind}
+    if not same_columns:
+        return {
+            **base,
+            "status": "BLOCKED",
+            "code": "update_key_missing_on_existing_target",
+            "message": "Existing target has no key on columns: " + ", ".join(columns),
+        }
+    right_type = [e for e in same_columns if e["type"] == _CONSTRAINT_TYPE_FOR_KIND[kind]]
+    if not right_type:
+        return {
+            **base,
+            "status": "BLOCKED",
+            "code": "update_key_kind_mismatch",
+            "message": "Existing key on these columns is not a " + kind + " key.",
+            "existing_types": sorted({e["type"] for e in same_columns}),
+        }
+    usable = [e for e in right_type if e["enabled"] and e["validated"]]
+    if not usable:
+        return {
+            **base,
+            "status": "BLOCKED",
+            "code": "update_key_constraint_disabled",
+            "message": "Existing key constraint is not ENABLED and VALIDATED.",
+            "constraint": right_type[0]["name"],
+        }
+    return {
+        "status": "ALREADY_PRESENT",
+        "columns": columns,
+        "kind": kind,
+        "constraint": usable[0]["name"],
+    }
 
 
 def _create_target(context: TargetTableContext, column_definitions: list[str]) -> str:
@@ -117,8 +278,8 @@ def _create_target(context: TargetTableContext, column_definitions: list[str]) -
         cursor.execute(ddl)
         connection.commit()
     except oracledb.DatabaseError as exc:
-        if "ORA-00955" not in str(exc):
-            raise MappingGenerationError("Target table creation failed") from exc
+        # A concurrent CREATE is not success: its schema/key has not been verified.
+        raise MappingGenerationError("Target table creation failed") from exc
     finally:
         _close_resource(cursor, "target create cursor")
         _close_resource(connection, "target create connection")
@@ -186,18 +347,49 @@ def execute_target_table_plan(
         generator._add_log("create_target_table", "INFO", f"Target table dropped: {context.owner}.{context.table}")
         exists = False
     if exists:
-        added, alter_sqls = _reconcile_existing(context, plan["desired_col_defs"])
-        status = "RECONCILED" if added else "ALREADY_IN_SYNC"
-        generator._add_log("create_target_table", "SUCCESS", f"Target table reused; {len(added)} columns added")
+        key_result = _verify_key_on_existing(context, plan)
+        missing = []
+        code = key_result.get("code")
+        if key_result["status"] != "BLOCKED":
+            existing_columns = _target_columns(context)
+            missing = [name for name, _ in plan["desired_col_defs"] if name not in existing_columns]
+            if missing:
+                code = "target_columns_missing_on_existing_target"
+        if code:
+            generator._add_log("create_target_table", "BLOCKED", code)
+            return {
+                "status": "BLOCKED",
+                "code": code,
+                "key": key_result,
+                "missing_columns": missing,
+                "table": f"{context.owner}.{context.table}",
+                "columns_count": len(plan["src_columns"]),
+                "default_columns_added": [],
+                "added_columns": [],
+                "ddl": "",
+            }
+        generator._add_log("create_target_table", "SUCCESS", "Existing target verified; no DDL executed")
         return {
-            "status": status,
+            "status": "ALREADY_IN_SYNC",
+            "key": key_result,
             "table": f"{context.owner}.{context.table}",
             "columns_count": len(plan["src_columns"]),
-            "default_columns_added": plan["defaults_added"],
-            "added_columns": added,
-            "ddl": "\n".join(alter_sqls),
+            "default_columns_added": [],
+            "added_columns": [],
+            "ddl": "",
         }
-    ddl = _create_target(context, plan["col_defs"])
+    requested_key = _plan_key(plan)
+    column_definitions = list(plan["col_defs"])
+    key_result: dict[str, Any] = {"status": "NONE", "columns": []}
+    if requested_key is not None:
+        kind, key_columns = requested_key
+        column_definitions.append(key_constraint_sql(context.table, key_columns, kind))
+        key_result = {
+            "status": "CREATED",
+            "columns": key_columns,
+            "constraint": key_constraint_name(context.table, key_columns, kind),
+        }
+    ddl = _create_target(context, column_definitions)
     _apply_grants(context)
     _write_creation_audit(generator, context, ddl)
     generator._add_log(
@@ -207,6 +399,7 @@ def execute_target_table_plan(
     )
     return {
         "status": "CREATED",
+        "key": key_result,
         "table": f"{context.owner}.{context.table}",
         "ddl": ddl,
         "columns_count": len(plan["src_columns"]),
