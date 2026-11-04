@@ -6,7 +6,6 @@ import pytest
 import odi_orchestrator
 from schema_helpers import _schema_change_sync_odi_payload
 
-
 _SYNC_BODY = {
     "approved": True,
     "model_code": "TGT_DWH",
@@ -92,3 +91,32 @@ def test_successful_groovy_sync_preserves_success_response(groovy_runner):
     assert result["applied"] is True
     assert result["status"] == "ODI_METADATA_SYNCED"
     assert result["result"] == "SUCCESS: ODI datastore metadata sync committed"
+
+
+@pytest.mark.parametrize("output", [
+    "", "ODI runtime initialized", '{"status":"success","action":"unrelated"}',
+    "SUCCESS: ODI datastore metadata synced",
+    "prefix SUCCESS: ODI datastore metadata sync committed",
+    "SUCCESS: ODI datastore metadata sync committed trailing text",
+    "SUCCESS: ODI datastore metadata sync committed\n" * 2,
+])
+def test_zero_exit_without_unique_commit_acknowledgement_is_not_success(groovy_runner, output):
+    groovy_runner(stdout=output)
+    result = _schema_change_sync_odi_payload(_SYNC_BODY)
+    assert result["applied"] is False
+    assert result["status"] == "ODI_METADATA_SYNC_FAILED"
+    assert result["reason"] == "ODI Groovy did not confirm the metadata sync commit."
+    assert "result" not in result
+
+
+def test_commit_acknowledgement_accepts_normal_startup_lines(groovy_runner):
+    groovy_runner(stdout="Runtime ready\n  SUCCESS: ODI datastore metadata sync committed  \n")
+    assert _schema_change_sync_odi_payload(_SYNC_BODY)["applied"] is True
+
+
+def test_error_marker_wins_over_commit_acknowledgement(groovy_runner):
+    groovy_runner(stdout='SUCCESS: ODI datastore metadata sync committed\n'
+                         '{"status":"error","action":"sync_datastore_column"}')
+    result = _schema_change_sync_odi_payload(_SYNC_BODY)
+    assert result["applied"] is False
+    assert "result" not in result
