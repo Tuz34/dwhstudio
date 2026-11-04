@@ -1,0 +1,3 @@
+# Historical synthetic non-disclosure fixture, independently reviewed in PR #17.
+# Exact commit/path/rule/line only; no file-wide or rule-wide suppression.
+c5f662c0f0dcb0daa33f713c3b845d65b75886cc:app/odi-dwh/tests/test_odi68_dim_product_scd2_live_proof.py:generic-api-key:301

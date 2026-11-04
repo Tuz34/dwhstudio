@@ -528,7 +528,7 @@ class OdiOrchestrator:
             join_table: LEFT Name of table to JOIN (e.g. SKEY_PROD_PRODUCT).
             join_model: Model of the joined table (default: tgt_model).
             join_condition: Join condition (e.g. "JOIN.NATURAL_KEY = TO_CHAR(SRC.ProductID)").
-            join_type: LEFT_OUTER (varsayilan), INNER, FULL_OUTER.
+            join_type: LEFT_OUTER (default), INNER, FULL_OUTER.
             ikm_name: Full IKM name (e.g. "IKM Oracle Incremental Update"). Searched automatically if omitted.
             lkm_name: Full LKM name (e.g. "LKM SQL to Oracle (Built-In)"). Searched automatically if omitted.
             filter_condition: Filter applied to the source table (e.g. "NOT EXISTS (...)").
