@@ -55,6 +55,22 @@ class QualityRule:
     severity: str = "ERROR"
 
 
+SUPPORTED_QUALITY_RULE_TYPES = frozenset({"not_null", "date_range"})
+
+
+def _quality_rule_type_label(rule_type: object) -> str:
+    """Return a short rule-type name safe to put in a fail-closed reason."""
+    if isinstance(rule_type, str):
+        label = rule_type.strip()
+        if label:
+            return label[:80]
+    return "unknown"
+
+
+def _is_supported_quality_rule(rule: QualityRule) -> bool:
+    return isinstance(rule.rule_type, str) and rule.rule_type in SUPPORTED_QUALITY_RULE_TYPES
+
+
 @dataclass(frozen=True)
 class PostLoadDQSpec:
     """Read-only post-load data-quality contract for one ODS target."""
@@ -346,7 +362,7 @@ class ValidationResult:
         if rule.severity == "ERROR":
             self.passed = False
 
-    def record_rule(self, rule: QualityRule, passed: bool, violation_count: int = 0):
+    def record_rule(self, rule: QualityRule, passed: bool, violation_count: int = 0) -> None:
         """Çalışan her kuralı (geçen veya ihlal eden) kaydeder."""
         self.rules_run.append({
             "rule_name":       rule.rule_name,
@@ -354,8 +370,24 @@ class ValidationResult:
             "rule_type":       rule.rule_type,
             "severity":        rule.severity,
             "passed":          passed,
+            "status":          "passed" if passed else "failed",
             "violation_count": violation_count,
         })
+
+    def record_unsupported(self, rule: QualityRule) -> None:
+        """Fail closed: an unknown rule type must not be reported as passed."""
+        label = _quality_rule_type_label(rule.rule_type)
+        self.rules_run.append({
+            "rule_name": rule.rule_name,
+            "column": rule.column,
+            "rule_type": rule.rule_type,
+            "severity": rule.severity,
+            "passed": False,
+            "status": "unsupported",
+            "violation_count": 0,
+            "reason": f"Unsupported quality rule type: {label}.",
+        })
+        self.passed = False
 
     def finish(self):
         self.finished_at = datetime.now()
@@ -368,14 +400,27 @@ class ValidationResult:
         )
 
     def summary(self) -> dict:
+        unsupported_rules = [
+            {
+                "rule_name": rule["rule_name"],
+                "column": rule["column"],
+                "rule_type": rule["rule_type"],
+                "reason": rule.get("reason") or "Unsupported quality rule type: unknown.",
+            }
+            for rule in self.rules_run
+            if rule.get("status") == "unsupported"
+        ]
+        passed = self.passed and not unsupported_rules
         return {
             "table":       f"{self.table_owner}.{self.table_name}",
             "total_rows":  self.total_rows,
-            "passed":      self.passed,
+            "passed":      passed,
+            "status":      "passed" if passed else "failed",
             "errors":      len([v for v in self.violations if v["severity"] == "ERROR"]),
             "warnings":    len([v for v in self.violations if v["severity"] == "WARNING"]),
             "violations":  self.violations,
             "rules":       self.rules_run,
+            "unsupported_rules": unsupported_rules,
             "duration_ms": int((self.finished_at - self.started_at).total_seconds() * 1000)
                            if self.finished_at else None,
         }
@@ -486,6 +531,22 @@ class DataQualityManager:
         finally:
             cursor.close()
 
+    def _record_unsupported_rule(
+        self,
+        result: ValidationResult,
+        owner: str,
+        table_name: str,
+        rule: QualityRule,
+    ) -> None:
+        result.record_unsupported(rule)
+        logger.warning(
+            "Unsupported quality rule type %s for %s.%s rule %s.",
+            _quality_rule_type_label(rule.rule_type),
+            owner,
+            table_name,
+            rule.rule_name,
+        )
+
     # ── Tablo Doğrulama ──────────────────────────────────────────────────────
     def validate_table(self, owner: str, table_name: str,
                        custom_rules: list[QualityRule] = None) -> ValidationResult:
@@ -501,13 +562,18 @@ class DataQualityManager:
             rules = custom_rules or self.generate_rules(owner, table_name)
 
             for rule in rules:
+                if not _is_supported_quality_rule(rule):
+                    self._record_unsupported_rule(result, owner, table_name, rule)
+                    continue
+
                 match rule.rule_type:
                     case "not_null":
                         violation_count = self._check_not_null(conn, owner, table_name, rule)
                     case "date_range":
                         violation_count = self._check_date_range(conn, owner, table_name, rule)
                     case _:
-                        violation_count = 0
+                        self._record_unsupported_rule(result, owner, table_name, rule)
+                        continue
 
                 # Her kuralı kaydediyoruz (geçen veya ihlal eden)
                 result.record_rule(rule, passed=(violation_count == 0), violation_count=violation_count)
@@ -697,6 +763,10 @@ class DataQualityManager:
             self.create_error_table(owner, table_name)
 
             for rule in rules:
+                if not _is_supported_quality_rule(rule):
+                    self._record_unsupported_rule(result, owner, table_name, rule)
+                    continue
+
                 match rule.rule_type:
                     case "not_null":
                         violation_count = self._check_not_null(conn, owner, table_name, rule)
@@ -712,7 +782,8 @@ class DataQualityManager:
                                 conn, owner, table_name, rule, max_errors_per_rule
                             )
                     case _:
-                        violation_count = 0
+                        self._record_unsupported_rule(result, owner, table_name, rule)
+                        continue
 
                 if violation_count > 0:
                     result.add_violation(rule, violation_count)
