@@ -10,7 +10,13 @@ BASE_PARAMS = {
     "tgt_model": "ORACLE_ODS",
     "tgt_owner": "DWH",
     "tgt_table": "ODS_HR_EMPLOYEES",
+    "update_key_columns": ["EMPLOYEE_ID"],
 }
+
+
+@pytest.fixture(autouse=True)
+def configured_schemas(monkeypatch):
+    monkeypatch.setattr("mapping_generator.SOURCE_ORACLE_SCHEMAS", ["HR", "SH"])
 
 
 @pytest.mark.parametrize(
