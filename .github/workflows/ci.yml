@@ -46,6 +46,12 @@ jobs:
           for node_id in "${known_failures[@]}"; do
             deselect_args+=(--deselect "$node_id")
           done
+          echo "3 developer-home Codex skill tests deselected; these personal skills are not in the repository"
+          deselect_args+=(
+            --deselect tests/test_codex_workflow_safety.py::test_on_demand_skills_are_installed_and_explicit_only
+            --deselect tests/test_codex_workflow_safety.py::test_review_skill_is_targeted_and_read_only
+            --deselect tests/test_codex_workflow_safety.py::test_ui_skill_stops_when_app_is_down_and_forbids_persistent_actions
+          )
           python -m pytest -q "${deselect_args[@]}"
       - name: Run application security gate
         run: python tools/workspace/appsec_gate.py --no-write
@@ -71,11 +77,15 @@ jobs:
 
   secrets-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           GITLEAKS_ENABLE_COMMENTS: 'false'
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
