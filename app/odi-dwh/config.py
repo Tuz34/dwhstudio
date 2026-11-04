@@ -1,12 +1,12 @@
 """
-Ortam tabanlı konfigürasyon yönetimi.
+Environment based configuration management.
 
-Kullanım:
-  ENVIRONMENT=dev  → .env.dev dosyası yüklenir  (varsayılan)
-  ENVIRONMENT=test → .env.test dosyası yüklenir
-  ENVIRONMENT=prod → .env.prod dosyası yüklenir
+Usage:
+  ENVIRONMENT=dev  → the .env.dev file is loaded  (default)
+  ENVIRONMENT=test → the .env.test file is loaded
+  ENVIRONMENT=prod → the .env.prod file is loaded
 
-Eğer ortam dosyası bulunmazsa, geri dönüş olarak kök .env okunur.
+If the environment file is absent, the root .env is read as a fallback.
 """
 
 import os
@@ -16,22 +16,22 @@ from pathlib import Path
 from dotenv import load_dotenv
 from secret_provider import get_secret, get_secret_list
 
-# ── 1. Ortam tespit ──────────────────────────────────────────────────────────
-# İlk olarak kök .env'den ENVIRONMENT değişkeni okunur
+# ── 1. Environment detection ──────────────────────────────────────────────────────────
+# First read the ENVIRONMENT variable from the root .env
 load_dotenv(override=False)
 ENVIRONMENT = os.getenv("ENVIRONMENT", "dev").lower()
 
-# ── 2. Ortam dosyasını yükle ─────────────────────────────────────────────────
+# ── 2. Load the environment file ─────────────────────────────────────────────────
 _base_dir = Path(__file__).resolve().parent
 _env_file = _base_dir / f".env.{ENVIRONMENT}"
 
 if _env_file.exists():
     load_dotenv(_env_file, override=True)
 else:
-    # Ortam dosyası yoksa kök .env'den devam et
+    # If the environment file is absent, continue with the root .env
     load_dotenv(override=True)
 
-# ── 3. LLM Ayarları ──────────────────────────────────────────────────────────
+# ── 3. LLM Settings ──────────────────────────────────────────────────────────
 APP_HOST          = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT          = int(os.getenv("APP_PORT", "5000"))
 APP_PUBLIC_HOST   = os.getenv("APP_PUBLIC_HOST", "localhost")
@@ -63,7 +63,7 @@ LOCAL_OPENAI_MODEL = os.getenv("LOCAL_OPENAI_MODEL", "qwen/qwen2.5-coder-14b")
 LOCAL_OPENAI_API_KEY = get_secret("LOCAL_OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY  = get_secret("ANTHROPIC_API_KEY")
 
-# ── 4. Oracle Bağlantı ───────────────────────────────────────────────────────
+# ── 4. Oracle Connection ───────────────────────────────────────────────────────
 ORACLE_USER        = get_secret("ORACLE_USER")
 ORACLE_PASSWORD    = get_secret("ORACLE_PASSWORD")
 ORACLE_DSN         = get_secret("ORACLE_DSN")
@@ -71,7 +71,7 @@ ORACLE_DDL_USER     = get_secret("ORACLE_DDL_USER")
 ORACLE_DDL_PASSWORD = get_secret("ORACLE_DDL_PASSWORD")
 AUDIT_ORACLE_USER   = get_secret("AUDIT_ORACLE_USER", ORACLE_USER or "AUDIT_USER")
 
-# ── 5. MS SQL Bağlantı (legacy adapter; default kapalı) ─────────────────────
+# ── 5. MS SQL Connection (legacy adapter; disabled by default) ─────────────────────
 ENABLE_MSSQL_SOURCE = os.getenv("ENABLE_MSSQL_SOURCE", "false").lower() in {"1", "true", "yes", "on"}
 MSSQL_DEFAULT_SERVER   = os.getenv("MSSQL_DEFAULT_SERVER", "")
 MSSQL_DEFAULT_DATABASE = os.getenv("MSSQL_DEFAULT_DATABASE", "")
@@ -80,31 +80,31 @@ MSSQL_DATABASE     = get_secret("MSSQL_DATABASE")
 MSSQL_USER         = get_secret("MSSQL_USER")
 MSSQL_PASSWORD     = get_secret("MSSQL_PASSWORD")
 
-# ── 5b. SOURCE / TARGET ayrimi (FAZ 1 — source connector) ────────────────────
-# SOURCE_DB_TYPE: "oracle" (ana yol) | "mssql" (legacy adapter; ENABLE_MSSQL_SOURCE gerekir)
+# ── 5b. SOURCE / TARGET separation (PHASE 1 — source connector) ────────────────────
+# SOURCE_DB_TYPE: "oracle" (primary path) | "mssql" (legacy adapter; requires ENABLE_MSSQL_SOURCE)
 SOURCE_DB_TYPE        = os.getenv("SOURCE_DB_TYPE", "oracle").lower()
-# Kaynak Oracle (HR, SH gibi semalar)
+# Source Oracle (schemas such as HR and SH)
 SOURCE_ORACLE_USER     = get_secret("SOURCE_ORACLE_USER", ORACLE_USER)
 SOURCE_ORACLE_PASSWORD = get_secret("SOURCE_ORACLE_PASSWORD", ORACLE_PASSWORD)
 SOURCE_ORACLE_DSN      = get_secret("SOURCE_ORACLE_DSN", ORACLE_DSN)
-# Virgulle ayrilmis sema listesi; bos ise tum erisilebilir semalar
+# Comma-separated schema list; if empty, use all accessible schemas
 SOURCE_ORACLE_SCHEMAS  = get_secret_list("SOURCE_ORACLE_SCHEMAS")
-# Hedef Oracle (kavramsal ayrim; ayni DB olsa bile)
+# Target Oracle (conceptually separate, even if it is the same DB)
 TARGET_ORACLE_USER     = get_secret("TARGET_ORACLE_USER", ORACLE_DDL_USER)
 TARGET_ORACLE_PASSWORD = get_secret("TARGET_ORACLE_PASSWORD", ORACLE_DDL_PASSWORD)
 TARGET_ORACLE_DSN      = get_secret("TARGET_ORACLE_DSN", ORACLE_DSN)
-# Proje kapsamindaki is semalari (UI tablo listesi + sema secici).
-# Oracle sistem semalari ve AUDIT_USER (ic altyapi) listede gosterilmez.
+# Business schemas in the project scope (UI table list and schema selector).
+# Oracle system schemas and AUDIT_USER (internal infrastructure) are omitted from the list.
 PROJECT_SCHEMAS        = [s.strip().upper() for s in os.getenv("PROJECT_SCHEMAS", "HR,SH,DWH").split(",") if s.strip()]
 
-# ── 6. RAG Ayarları ──────────────────────────────────────────────────────────
+# ── 6. RAG Settings ──────────────────────────────────────────────────────────
 RAG_DB_PATH        = os.getenv("RAG_DB_PATH", "./rag_database.json")
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
 
 # ── 7. Logging ────────────────────────────────────────────────────────────────
 # ... (logging code) ...
 
-# ── 8. ODI Otomasyon Ayarları (Faz 3) ──────────────────────────────────────────
+# ── 8. ODI Automation Settings (Phase 3) ──────────────────────────────────────────
 ODI_HOME        = os.getenv("ODI_HOME", "C:\\Oracle\\Middleware\\Oracle_Home")
 ODI_PROJECT     = os.getenv("ODI_PROJECT", "ORA_DWH")
 ODI_FOLDER      = os.getenv("ODI_FOLDER", "FLD_CORE_MAPPINGS")
@@ -143,7 +143,7 @@ ODI_LKM_PRIORITY    = os.getenv("ODI_LKM_PRIORITY", "sql to oracle,mssql to orac
 ALERT_FRESHNESS_DAYS = int(os.getenv("ALERT_FRESHNESS_DAYS", "2"))
 ALERT_POLL_INTERVAL  = int(os.getenv("ALERT_POLL_INTERVAL", "60"))
 
-# Log dizinini oluştur
+# Create the log directory
 _log_dir = Path(LOG_FILE).parent
 _log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -151,7 +151,7 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     handlers=[
-        # D-2: RotatingFileHandler — max 50MB, 5 yedek dosya (log sınırsız büyümez)
+        # D-2: RotatingFileHandler — max 50MB, 5 backup files (log growth is bounded)
         RotatingFileHandler(
             LOG_FILE, maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8"
         ),

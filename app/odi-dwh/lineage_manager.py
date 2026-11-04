@@ -1,13 +1,13 @@
 """
-Lineage Manager — Veri Soyagaci Yonetimi
+Lineage Manager — Data Lineage Management
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ODI repository'den source/target kolon eslesmelerini ceker
-ve AUDIT_USER.DATA_LINEAGE tablosuna yazar.
+Fetches source/target column mappings from the ODI repository
+and writes them to the AUDIT_USER.DATA_LINEAGE table.
 
-Sorgulama:
-  - get_table_lineage(table_name) → tablo bazli lineage
-  - get_impact_analysis(source_table) → degisiklik etki analizi
+Queries:
+  - get_table_lineage(table_name) → table based lineage
+  - get_impact_analysis(source_table) → change impact analysis
 """
 
 import logging
@@ -23,7 +23,7 @@ logger = logging.getLogger("lineage_manager")
 
 
 class LineageManager:
-    """Veri soyagaci yonetimi."""
+    """Data lineage management."""
 
     def __init__(self):
         self.conn = None
@@ -63,19 +63,19 @@ class LineageManager:
         return False
 
     def populate_from_odi(self) -> dict:
-        """ODI repo'dan kaynak-hedef tablo eslesmelerini cekip DATA_LINEAGE gunceller.
+        """Fetches source-target table mappings from the ODI repository and updates DATA_LINEAGE.
 
-        Dogru yaklasim (2 adim):
-          1. Hedef bileşenler: OUTPUT portunda en az bir SNP_MAP_EXPR satiri olan DATASTORE.
-          2. Kaynak bileşenler: OUTPUT portunda hiç SNP_MAP_EXPR satiri olmayan DATASTORE.
-          Kolon adı eşleşmesi yapilmaz (ODI'da kaynak/hedef adlari farkli olabilir).
+        Correct approach (2 steps):
+          1. Target components: DATASTORE with at least one SNP_MAP_EXPR row on the OUTPUT port.
+          2. Source components: DATASTORE with no SNP_MAP_EXPR rows on the OUTPUT port.
+          Column names are not matched (source/target names may differ in ODI).
 
         Returns:
-            Sozluk: inserted (eklenen satir sayisi) ve
-            mappings_processed (islenen mapping sayisi).
+            Dictionary: inserted (number of rows added) and
+            mappings_processed (number of mappings processed).
 
         Raises:
-            Exception: ODI veya audit baglantisi hatasiyla karsilasildiginda.
+            Exception: When an ODI or audit connection error occurs.
         """
         odi_conn = self._get_odi_conn()
         audit_conn = self._get_conn()
@@ -85,7 +85,7 @@ class LineageManager:
         inserted = 0
         mappings_processed = set()
 
-        # TARGET bileşenleri: OUTPUT portunda expression olan DATASTORE
+        # TARGET components: DATASTORE with an expression on the OUTPUT port
         _tgt_sql = f"""
             SELECT DISTINCT m.NAME AS MAPPING_NAME, tgt.NAME AS TARGET_TABLE
             FROM {ODI_REPO_SCHEMA}.SNP_MAPPING m
@@ -102,7 +102,7 @@ class LineageManager:
             )
         """
 
-        # SOURCE bileşenleri: OUTPUT portunda expression olmayan DATASTORE
+        # SOURCE components: DATASTORE without an expression on the OUTPUT port
         _src_sql = f"""
             SELECT DISTINCT m.NAME AS MAPPING_NAME, src.NAME AS SOURCE_TABLE
             FROM {ODI_REPO_SCHEMA}.SNP_MAPPING m
@@ -133,7 +133,7 @@ class LineageManager:
             # Full refresh
             c_audit.execute("DELETE FROM AUDIT_USER.DATA_LINEAGE")
 
-            # Her (mapping, source, target) çifti için bir satir
+            # One row for each (mapping, source, target) pair
             rows_to_insert = []
             for mname, tgt_tables in targets_by_mapping.items():
                 for src_table in sources_by_mapping.get(mname, []):
@@ -167,7 +167,7 @@ class LineageManager:
             c_audit.close()
 
         logger.info(
-            "Lineage guncellendi: %d kayit, %d mapping",
+            "Lineage updated: %d records, %d mappings",
             inserted, len(mappings_processed)
         )
         return {
@@ -176,16 +176,16 @@ class LineageManager:
         }
 
     def get_table_lineage(self, table_name: str) -> list[dict]:
-        """Belirtilen tablo icin lineage kayitlarini doner.
+        """Returns lineage records for the specified table.
 
-        Tabloyu hem kaynak (SOURCE_TABLE) hem hedef (TARGET_TABLE) olarak arar.
+        Searches the table as both source (SOURCE_TABLE) and target (TARGET_TABLE).
 
         Args:
-            table_name: Lineage sorgulanacak tablo adi (buyuk/kucuk harf duyarsiz).
+            table_name: Table name to query for lineage (case insensitive).
 
         Returns:
-            LINEAGE_ID, MAPPING_NAME, SOURCE/TARGET tablo ve kolon, EXPRESSION
-            alanlari icerien sozluk listesi.
+            LINEAGE_ID, MAPPING_NAME, SOURCE/TARGET table and column, EXPRESSION
+            fields as a list of dictionaries.
         """
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -220,27 +220,27 @@ class LineageManager:
     def get_impact_analysis(self,
                             table_name: str,
                             direction: str = "both") -> list[dict]:
-        """Tablo bazli iki yonlu etki analizi.
+        """Two way impact analysis by table.
 
-        Önce ODI repository'den dogrudan mapping tablolari (SNP_MAPPING ve
-        SNP_MAP_COMP) uzerinden analiz yapar. Bu katmanda artik OUTPUT
-        portunda expression olup olmamasina gore ekstra filtre uygulanmaz;
-        yani hem klasik kaynak→hedef mapping'leri hem de karma EXP/FILTER
-        iceren mapping'ler (ör. PRODUCTSUBCATEGORY) kapsam disinda kalmaz.
+        First analyzes mapping tables (SNP_MAPPING and
+        SNP_MAP_COMP) directly from the ODI repository. At this layer, the OUTPUT
+        port is no longer filtered by whether an expression exists;
+        therefore both classic source→target mappings and complex EXP/FILTER
+        mappings (e.g. PRODUCTSUBCATEGORY) remain in scope.
 
-        Eger ODI tarafinda hic kayit bulunamaz veya sorgu hatasi olursa,
-        downstream yönü icin AUDIT_USER.DATA_LINEAGE tablosunu fallback
-        kaynagi olarak kullanir.
+        If ODI returns no records or the query fails,
+        uses AUDIT_USER.DATA_LINEAGE as the fallback source for the
+        downstream direction.
 
         Args:
-            table_name: Analiz edilecek tablo adi (buyuk/kucuk harf duyarsiz).
-            direction: 'downstream' (bu tablo kaynak, hedefleri bul),
-                       'upstream'   (bu tablo hedef, kaynaklari bul),
-                       'both'       (her iki yon).
+            table_name: Table name to analyze (case insensitive).
+            direction: 'downstream' (this table is the source; find targets),
+                       'upstream'   (this table is the target; find sources),
+                       'both'       (both directions).
 
         Returns:
-            Her satirda mapping_name, related_table ve
-            direction ('downstream'/'upstream') alanlari bulunan liste.
+            Each row has mapping_name, related_table, and
+            direction ('downstream'/'upstream') fields.
         """
         results: list[dict] = []
 
@@ -248,7 +248,7 @@ class LineageManager:
             odi_conn = self._get_odi_conn()
             cursor = odi_conn.cursor()
             try:
-                # ── DOWNSTREAM: table bir KAYNAK, etkilenen hedefleri bul ──
+                # ── DOWNSTREAM: table is a SOURCE; find affected targets ──
                 if direction in ("downstream", "both"):
                     ds_sql = f"""
                         SELECT DISTINCT
@@ -272,7 +272,7 @@ class LineageManager:
                             "label":         f"→ {rel_table}",
                         })
 
-                # ── UPSTREAM: table bir HEDEF, besleyen kaynaklari bul ──
+                # ── UPSTREAM: table is a TARGET; find feeding sources ──
                 if direction in ("upstream", "both"):
                     us_sql = f"""
                         SELECT DISTINCT
@@ -300,17 +300,17 @@ class LineageManager:
                 cursor.close()
 
         except Exception as e:
-            logger.error("ODI impact sorgusu basarisiz [%s / %s]: %s",
+            logger.error("ODI impact query failed [%s / %s]: %s",
                          table_name, direction, e, exc_info=True)
-            # Gercek hatayi API katmanina tasiyalim ki UI tarafinda
-            # "hic iliski yok" ile "sorgu hatasi" durumlari ayirt edilebilsin.
+            # Propagate the actual error to the API layer so the UI can
+            # distinguish "no relationships" from "query error".
             raise
 
         if results:
-            logger.info("Impact (%s): %s → %d satir", direction, table_name, len(results))
+            logger.info("Impact (%s): %s → %d rows", direction, table_name, len(results))
             return results
 
-        # ── Fallback: DATA_LINEAGE cache (sadece downstream destekler) ────────
+        # ── Fallback: DATA_LINEAGE cache (supports only downstream) ────────
         try:
             conn = self._get_conn()
             cursor = conn.cursor()
@@ -335,25 +335,25 @@ class LineageManager:
             finally:
                 cursor.close()
         except oracledb.DatabaseError:
-            pass  # tablo yok veya kolon yok — sessizce bos don
+            pass  # table or column absent — return empty silently
 
-        # ── Son fallback: MAPPING_RUN_STATE (LangGraph kalici state) ──────────
+        # ── Final fallback: MAPPING_RUN_STATE (persistent LangGraph state) ──────────
         if not results:
             state_rows = self._impact_from_state(table_name, direction)
             if state_rows:
-                logger.info("Impact (%s): %s -> %d satir (state fallback)",
+                logger.info("Impact (%s): %s -> %d rows (state fallback)",
                             direction, table_name, len(state_rows))
                 results.extend(state_rows)
 
         return results
 
     def _impact_from_state(self, table_name: str, direction: str) -> list[dict]:
-        """ODI/DATA_LINEAGE bos donerse LangGraph state'inden iliskileri turet.
+        """Derives relationships from LangGraph state if ODI/DATA_LINEAGE returns empty.
 
-        Hedef tablo eslesirse:
-          - upstream: state.validated_params.src_table -> bu tablo
-        Kaynak tablo eslesirse (state'in src_table'i bu ise):
-          - downstream: bu tablo -> state.validated_params.tgt_table
+        If the target table matches:
+          - upstream: state.validated_params.src_table -> this table
+        If the source table matches (state's src_table is this table):
+          - downstream: this table -> state.validated_params.tgt_table
         """
         try:
             from mapping_state_manager import MappingStateManager
@@ -363,7 +363,7 @@ class LineageManager:
             with MappingStateManager() as msm:
                 target_state = msm.get_by_target_table(table_name)
         except Exception as e:
-            logger.debug("MAPPING_RUN_STATE okunamadi (%s): %s", table_name, e)
+            logger.debug("MAPPING_RUN_STATE could not be read (%s): %s", table_name, e)
             return []
         if not target_state:
             return []
@@ -388,17 +388,17 @@ class LineageManager:
         return out
 
     def get_table_usage_details(self, table_name: str, mapping_name: str) -> list[dict]:
-        """Bir tablonun belirli bir mapping icindeki detayli kullanimini doner.
+        """Returns detailed usage of a table within a specific mapping.
 
-        Mapping'in bilesenlerini (Filter, Join, Expression, Datastore) tarar
-        ve tablonun (veya kolonlarinin) nerede gectigini bulur.
+        Scans the mapping's components (Filter, Join, Expression, Datastore)
+        and finds where the table (or its columns) occurs.
 
         Args:
-            table_name: Aranan tablo adi (ör: ODS_PRODUCT).
-            mapping_name: Analiz edilecek mapping adi.
+            table_name: Table name to search for (e.g. ODS_PRODUCT).
+            mapping_name: Mapping name to analyze.
 
         Returns:
-            Bilesen adi, tipi, kolon ve ifade detaylarini iceren liste.
+            List containing component name, type, column, and expression details.
         """
         results = []
         cursor = None
@@ -406,8 +406,8 @@ class LineageManager:
             odi_conn = self._get_odi_conn()
             cursor = odi_conn.cursor()
 
-            # 1. Bu mapping'teki tum bilesenleri ve ifadeleri cek
-            # (SNP_MAP_ATTR ve SNP_MAP_EXPR join'i ile)
+            # 1. Fetch all components and expressions in this mapping
+            # (using a SNP_MAP_ATTR and SNP_MAP_EXPR join)
             sql = """
                 SELECT
                     c.NAME AS COMP_NAME,
@@ -430,7 +430,7 @@ class LineageManager:
             cursor.execute(sql, {"mname": mapping_name, "tbl": table_name})
 
             for c_name, c_type, a_name, expr in cursor.fetchall():
-                # CLOB (LOB) verisini string'e cevir
+                # Convert CLOB (LOB) data to a string
                 expr_str = ""
                 if expr is not None:
                     if hasattr(expr, "read"):
@@ -445,7 +445,7 @@ class LineageManager:
                     "expression": expr_str
                 })
 
-            # 2. FILTER bilesenleri ozeldir (koşulları SNP_MAP_PROP'tadir)
+            # 2. FILTER components are special (their conditions are in SNP_MAP_PROP)
             filter_sql = """
                 SELECT
                     c.NAME AS COMP_NAME,
@@ -471,7 +471,7 @@ class LineageManager:
                 })
 
         except Exception as e:
-            logger.error("Usage detail sorgusu hatasi: %s", e, exc_info=True)
+            logger.error("Usage detail query error: %s", e, exc_info=True)
             raise
         finally:
             if cursor is not None:

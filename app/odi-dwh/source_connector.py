@@ -1,24 +1,24 @@
 """
-Kaynak Sistem Soyutlamasi (FAZ 1)
+Source System Abstraction (PHASE 1)
 ==================================
-Eski sistem MSSQL (AdventureWorks) kaynagina yaslaniyordu. Yeni sistemde
-kaynak = Oracle (HR, SH gibi semalar). Bu modul kaynak okuma islemlerini
-soyutlar; mapping_generator / reconciliator / db.py dogrudan pyodbc cagirmaz.
+The old system relied on an MSSQL (AdventureWorks) source. In the new system,
+the source is Oracle (schemas such as HR and SH). This module abstracts source
+reads; mapping_generator / reconciliator / db.py do not call pyodbc directly.
 
-Mimari:
-    SourceConnector (ABC)          -> ortak arayuz
-      |-- OracleSourceConnector    -> ANA YOL (Oracle source: ALL_TAB_*)
-      |-- MssqlSourceConnector     -> LEGACY adapter (explicit flag ile)
-    get_source_connector()         -> SOURCE_DB_TYPE ile dogru connector (singleton)
+Architecture:
+    SourceConnector (ABC)          -> shared interface
+      |-- OracleSourceConnector    -> PRIMARY PATH (Oracle source: ALL_TAB_*)
+      |-- MssqlSourceConnector     -> LEGACY adapter (with explicit flag)
+    get_source_connector()         -> correct connector via SOURCE_DB_TYPE (singleton)
 
-Arayuz metotlari (mevcut db.py kullanimina gore):
+Interface methods (based on current db.py usage):
     get_tables()                 -> list[str]   ("SCHEMA.TABLE")
     get_table_schema(table)      -> DataFrame   [COLUMN_NAME, FULL_DATA_TYPE, COMMENTS]
     get_table_comment(table)     -> str
-    get_pk_columns(table)        -> list[str]   (composite PK destekli)
+    get_pk_columns(table)        -> list[str]   (composite PK supported)
     sample_data(table, limit)    -> DataFrame
     execute_select(sql, params)  -> DataFrame
-    type_to_oracle(src_type)     -> str         (Oracle hedef tip)
+    type_to_oracle(src_type)     -> str         (Oracle target type)
 """
 import logging
 from abc import ABC, abstractmethod
@@ -39,21 +39,21 @@ def _display_dsn(dsn: str | None) -> str:
 
 
 # ============================================================
-# Soyut arayuz
+# Abstract interface.
 # ============================================================
 class SourceConnector(ABC):
-    """Tum kaynak sistemler icin ortak arayuz."""
+    """Shared interface for all source systems."""
 
     db_type: str = "base"
 
     @abstractmethod
     def get_tables(self) -> list[str]:
-        """Kaynak tablolari 'SCHEMA.TABLE' formatinda dondurur."""
+        """Return source tables in 'SCHEMA.TABLE' format."""
         ...
 
     @abstractmethod
     def get_table_schema(self, table_name: str) -> pd.DataFrame:
-        """Kolonlar: COLUMN_NAME, FULL_DATA_TYPE, COMMENTS."""
+        """Columns: COLUMN_NAME, FULL_DATA_TYPE, COMMENTS."""
         ...
 
     @abstractmethod
@@ -62,7 +62,7 @@ class SourceConnector(ABC):
 
     @abstractmethod
     def get_pk_columns(self, table_name: str) -> list[str]:
-        """Primary key kolon adlari (composite PK icin coklu)."""
+        """Primary key column names (multiple for a composite PK)."""
         ...
 
     @abstractmethod
@@ -75,7 +75,7 @@ class SourceConnector(ABC):
 
     @abstractmethod
     def type_to_oracle(self, src_type: str, length=None, precision=None, scale=None) -> str:
-        """Kaynak veri tipini Oracle hedef tipine cevirir."""
+        """Convert the source data type to the Oracle target type."""
         ...
 
     @staticmethod
@@ -88,12 +88,12 @@ class SourceConnector(ABC):
 
 
 # ============================================================
-# ORACLE kaynak — ANA YOL
+# ORACLE source — PRIMARY PATH
 # ============================================================
 class OracleSourceConnector(SourceConnector):
     db_type = "oracle"
 
-    # Oracle->Oracle: cogu tip korunur. Kaynak FULL tip zaten Oracle.
+    # Oracle->Oracle: most types are preserved. The source FULL type is already Oracle.
     _TYPE_MAP = {
         "VARCHAR2": "VARCHAR2", "NVARCHAR2": "VARCHAR2", "CHAR": "CHAR",
         "NCHAR": "CHAR", "CLOB": "CLOB", "NCLOB": "CLOB", "BLOB": "BLOB",
@@ -106,10 +106,10 @@ class OracleSourceConnector(SourceConnector):
         self.user = config.SOURCE_ORACLE_USER
         self.password = config.SOURCE_ORACLE_PASSWORD
         self.dsn = config.SOURCE_ORACLE_DSN
-        self.schemas = config.SOURCE_ORACLE_SCHEMAS  # list[str] (UPPER), bos olabilir
+        self.schemas = config.SOURCE_ORACLE_SCHEMAS  # list[str] (UPPER), may be empty
         self._pool = None
 
-    # --- baglanti ---
+    # --- connection ---
     def _connect(self):
         import oracledb
         if self._pool is None:
@@ -118,20 +118,20 @@ class OracleSourceConnector(SourceConnector):
                     user=self.user, password=self.password, dsn=self.dsn,
                     min=1, max=3, increment=1,
                 )
-                logger.info("Oracle SOURCE pool olusturuldu (%s@%s)", self.user, _display_dsn(self.dsn))
+                logger.info("Oracle SOURCE pool created (%s@%s)", self.user, _display_dsn(self.dsn))
             except Exception as e:
-                logger.warning("Oracle SOURCE pool olusturulamadi, dogrudan baglanti: %s", e)
+                logger.warning("Oracle SOURCE pool could not be created; direct connection: %s", e)
         if self._pool:
             return self._pool.acquire()
         return oracledb.connect(user=self.user, password=self.password, dsn=self.dsn)
 
-    # --- arayuz ---
+    # --- interface ---
     def get_tables(self) -> list[str]:
         conn = self._connect()
         cur = conn.cursor()
         try:
-            # Oracle internal tablolarini ele: Text index (DR$), recyclebin (BIN$),
-            # nested table ve secondary (domain index) tablolari.
+            # Exclude Oracle internal tables: text indexes (DR$), recycle bin (BIN$),
+            # nested tables, and secondary (domain index) tables.
             _filter = ("AND TABLE_NAME NOT LIKE 'DR$%' "
                        "AND TABLE_NAME NOT LIKE 'BIN$%' "
                        "AND NESTED = 'NO' AND SECONDARY = 'N'")
@@ -152,7 +152,7 @@ class OracleSourceConnector(SourceConnector):
                        ORDER BY OWNER, TABLE_NAME""")
             return [r[0] for r in cur.fetchall()]
         except Exception as e:
-            logger.warning("Oracle SOURCE get_tables hata: %s", e)
+            logger.warning("Oracle SOURCE get_tables error: %s", e)
             return []
         finally:
             cur.close(); conn.close()
@@ -189,7 +189,7 @@ class OracleSourceConnector(SourceConnector):
                         return f"NUMBER({int(prec)})"
                 return base
             df["FULL_DATA_TYPE"] = df.apply(_full, axis=1)
-            # Genis contract (FAZ 2.0): mapping_generator icin tum metadata
+            # Extended contract (PHASE 2.0): all metadata for mapping_generator.
             return df[["COLUMN_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION",
                        "DATA_SCALE", "NULLABLE", "FULL_DATA_TYPE", "COMMENTS"]]
         finally:
@@ -253,12 +253,12 @@ class OracleSourceConnector(SourceConnector):
 
 
 # ============================================================
-# MSSQL kaynak — LEGACY adapter (explicit flag ile acilir)
+# MSSQL source — LEGACY adapter (enabled with an explicit flag)
 # ============================================================
 class MssqlSourceConnector(SourceConnector):
     db_type = "mssql"
 
-    # MSSQL -> Oracle tip eslemesi
+    # MSSQL -> Oracle type mapping.
     _TYPE_MAP = {
         "int": "NUMBER(10)", "bigint": "NUMBER(19)", "smallint": "NUMBER(5)",
         "tinyint": "NUMBER(3)", "bit": "NUMBER(1)",
@@ -300,7 +300,7 @@ class MssqlSourceConnector(SourceConnector):
             conn.close()
             return tables
         except Exception as e:
-            logger.warning("MSSQL get_tables hata: %s", e)
+            logger.warning("MSSQL get_tables error: %s", e)
             return []
 
     def get_table_schema(self, table_name: str) -> pd.DataFrame:
@@ -326,7 +326,7 @@ class MssqlSourceConnector(SourceConnector):
             conn.close()
             return df
         except Exception as e:
-            logger.warning("MSSQL get_table_schema hata (%s): %s", table_name, e)
+            logger.warning("MSSQL get_table_schema error (%s): %s", table_name, e)
             return pd.DataFrame(columns=["COLUMN_NAME", "DATA_TYPE", "DATA_LENGTH",
                 "DATA_PRECISION", "DATA_SCALE", "NULLABLE", "FULL_DATA_TYPE", "COMMENTS"])
 
@@ -389,11 +389,11 @@ class MssqlSourceConnector(SourceConnector):
 
 
 # ============================================================
-# Factory (singleton, SOURCE_DB_TYPE ile)
+# Factory (singleton, via SOURCE_DB_TYPE)
 # ============================================================
 @lru_cache(maxsize=2)
 def get_source_connector(db_type: str | None = None) -> SourceConnector:
-    """SOURCE_DB_TYPE'a gore connector dondurur. Oracle ana yol, MSSQL legacy adapter."""
+    """Return the connector for SOURCE_DB_TYPE. Oracle is primary; MSSQL is legacy."""
     dt = (db_type or config.SOURCE_DB_TYPE or "oracle").lower()
     if dt == "mssql":
         if not getattr(config, "ENABLE_MSSQL_SOURCE", False):
@@ -403,5 +403,5 @@ def get_source_connector(db_type: str | None = None) -> SourceConnector:
             )
         logger.info("Source connector: MSSQL (legacy adapter)")
         return MssqlSourceConnector()
-    logger.info("Source connector: Oracle (ana yol)")
+    logger.info("Source connector: Oracle (primary path)")
     return OracleSourceConnector()

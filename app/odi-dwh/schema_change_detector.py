@@ -1,13 +1,13 @@
 """
-Şema Değişiklik Dedektörü
+Schema Change Detector
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Oracle tablolarındaki yapısal değişiklikleri (kolon ekleme/silme/tip değişikliği)
-tespit eder ve AUDIT_USER.SCHEMA_HASH tablosuna kaydeder.
+Detects structural changes in Oracle tables (column additions/deletions/type changes)
+and records them in the AUDIT_USER.SCHEMA_HASH table.
 
-Kullanım:
-  python schema_change_detector.py               # Tüm DWH tabloları
-  python schema_change_detector.py --owner ODS    # Belirli schema
+Usage:
+  python schema_change_detector.py               # All DWH tables
+  python schema_change_detector.py --owner ODS    # Specific schema
 """
 
 import hashlib
@@ -30,9 +30,9 @@ logger = logging.getLogger("schema_change_detector")
 _EXPRESSION_REF_RE = re.compile(r"\b([A-Z][A-Z0-9_$]*)\.([A-Z][A-Z0-9_$]*)\b")
 
 
-# ── Bağlantı ──────────────────────────────────────────────────────────────────
+# ── Connection ────────────────────────────────────────────────────────────────
 def get_connection():
-    """Normal kullanıcı olarak bağlan (SYSDBA değil)."""
+    """Connect as a regular user (not SYSDBA)."""
     return oracledb.connect(
         user=ORACLE_USER,
         password=ORACLE_PASSWORD,
@@ -40,11 +40,11 @@ def get_connection():
     )
 
 
-# ── Hash Hesaplama ────────────────────────────────────────────────────────────
+# ── Hash Calculation ──────────────────────────────────────────────────────────
 def compute_column_hash(conn, owner: str, table_name: str) -> str:
     """
-    Bir tablonun kolon yapısını (ad, tip, uzunluk, precision, scale, nullable)
-    SHA-256 ile hash'ler.
+    Hash a table's column structure (name, type, length, precision, scale,
+    nullable) with SHA-256.
     """
     cursor = conn.cursor()
     try:
@@ -60,7 +60,7 @@ def compute_column_hash(conn, owner: str, table_name: str) -> str:
         if not rows:
             return ""
 
-        # Kolon bilgilerini birleştirip hash'le
+        # Combine column information and hash it.
         structure = "|".join(
             f"{r[0]}:{r[1]}:{r[2]}:{r[3]}:{r[4]}:{r[5]}" for r in rows
         )
@@ -69,9 +69,9 @@ def compute_column_hash(conn, owner: str, table_name: str) -> str:
         cursor.close()
 
 
-# ── Önceki Hash'i Al ─────────────────────────────────────────────────────────
+# ── Get Previous Hash ─────────────────────────────────────────────────────────
 def get_previous_hash(conn, owner: str, table_name: str) -> str | None:
-    """AUDIT_USER.SCHEMA_HASH tablosundan son kaydedilen hash'i çeker."""
+    """Fetch the latest recorded hash from AUDIT_USER.SCHEMA_HASH."""
     cursor = conn.cursor()
     try:
         cursor.execute("""
@@ -84,17 +84,17 @@ def get_previous_hash(conn, owner: str, table_name: str) -> str | None:
         row = cursor.fetchone()
         return row[0] if row else None
     except Exception:
-        # Tablo henüz oluşturulmamış olabilir
+        # The table may not have been created yet.
         return None
     finally:
         cursor.close()
 
 
-# ── Hash Kaydet ───────────────────────────────────────────────────────────────
+# ── Save Hash ─────────────────────────────────────────────────────────────────
 def save_hash(conn, owner: str, table_name: str,
               current_hash: str, previous_hash: str | None,
               change_detected: bool):
-    """Yeni hash kaydını AUDIT_USER.SCHEMA_HASH tablosuna yazar."""
+    """Write a new hash record to AUDIT_USER.SCHEMA_HASH."""
     cursor = conn.cursor()
     try:
         cursor.execute("""
@@ -114,9 +114,9 @@ def save_hash(conn, owner: str, table_name: str,
         cursor.close()
 
 
-# ── Tablo Listesi ─────────────────────────────────────────────────────────────
+# ── Table List ────────────────────────────────────────────────────────────────
 def get_tables(conn, owner: str) -> list[str]:
-    """Belirtilen schema'daki tüm tabloları listeler."""
+    """List all tables in the specified schema."""
     cursor = conn.cursor()
     try:
         cursor.execute("""
@@ -397,7 +397,7 @@ def build_schema_sync_findings(owner: str = "DWH") -> dict:
     }
 
 
-# ── Ana Dedektör ──────────────────────────────────────────────────────────────
+# ── Main Detector ─────────────────────────────────────────────────────────────
 def _clean_schema(value: str, label: str) -> str:
     cleaned = str(value or "").strip().upper()
     if not cleaned.replace("_", "").isalnum():
@@ -766,33 +766,33 @@ def build_source_target_metadata_findings(source_schema: str = "HR", target_owne
 
 def detect_changes(owner: str = "DWH") -> list[dict]:
     """
-    Belirtilen schema'daki tüm tablolar için şema değişikliklerini kontrol eder.
-    Değişiklik tespit edilen tablolar listesi döner.
+    Check all tables in the specified schema for schema changes.
+    Return the list of tables where changes were detected.
     """
     changes = []
     conn = get_connection()
 
     try:
         tables = get_tables(conn, owner)
-        logger.info("📋 %s schema'sında %d tablo kontrol ediliyor...", owner, len(tables))
+        logger.info("📋 Schema %s: checking %d tables...", owner, len(tables))
 
         for table_name in tables:
             current_hash = compute_column_hash(conn, owner, table_name)
             if not current_hash:
-                logger.warning("⚠️  %s.%s — kolon bilgisi alınamadı, atlanıyor.", owner, table_name)
+                logger.warning("⚠️  %s.%s — column information unavailable; skipping.", owner, table_name)
                 continue
 
             previous_hash = get_previous_hash(conn, owner, table_name)
 
             if previous_hash is None:
-                # İlk kayıt
-                logger.info("🆕 %s.%s — ilk hash kaydediliyor.", owner, table_name)
+                # First record.
+                logger.info("🆕 %s.%s — recording the first hash.", owner, table_name)
                 save_hash(conn, owner, table_name, current_hash, None, False)
 
             elif current_hash != previous_hash:
-                # DEĞİŞİKLİK TESPİT EDİLDİ!
+                # CHANGE DETECTED!
                 logger.warning(
-                    "🔴 DEĞİŞİKLİK: %s.%s — Hash: %s → %s",
+                    "🔴 CHANGE: %s.%s — Hash: %s → %s",
                     owner, table_name, previous_hash[:12], current_hash[:12]
                 )
                 save_hash(conn, owner, table_name, current_hash, previous_hash, True)
@@ -805,11 +805,11 @@ def detect_changes(owner: str = "DWH") -> list[dict]:
                 })
 
             else:
-                # Değişiklik yok
-                logger.debug("✅ %s.%s — değişiklik yok.", owner, table_name)
+                # No change.
+                logger.debug("✅ %s.%s — no change.", owner, table_name)
 
         logger.info(
-            "━━━ Sonuç: %d tablo kontrol edildi, %d değişiklik tespit edildi.",
+            "━━━ Result: %d tables checked, %d changes detected.",
             len(tables), len(changes)
         )
     finally:
@@ -818,9 +818,9 @@ def detect_changes(owner: str = "DWH") -> list[dict]:
     return changes
 
 
-# ── Son Değişiklikleri Getir (UI için) ────────────────────────────────────────
+# ── Get Recent Changes (for UI) ───────────────────────────────────────────────
 def get_recent_changes(limit: int = 20) -> list[dict]:
-    """Son N şema değişikliğini döner (UI'da göstermek için)."""
+    """Return the latest N schema changes for display in the UI."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -845,18 +845,18 @@ def get_recent_changes(limit: int = 20) -> list[dict]:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Oracle Şema Değişiklik Dedektörü")
-    parser.add_argument("--owner", default="DWH", help="Kontrol edilecek schema (varsayılan: DWH)")
+    parser = argparse.ArgumentParser(description="Oracle Schema Change Detector")
+    parser.add_argument("--owner", default="DWH", help="Schema to check (default: DWH)")
     args = parser.parse_args()
 
     results = detect_changes(args.owner)
 
     if results:
-        print(f"\n🔴 {len(results)} tablo(da) şema değişikliği tespit edildi:\n")
+        print(f"\n🔴 Schema changes detected in {len(results)} tables:\n")
         for r in results:
             print(f"  • {r['owner']}.{r['table']}")
-            print(f"    Eski: {r['previous_hash'][:16]}...")
-            print(f"    Yeni: {r['current_hash'][:16]}...")
+            print(f"    Old: {r['previous_hash'][:16]}...")
+            print(f"    New: {r['current_hash'][:16]}...")
             print()
     else:
-        print("\n✅ Şema değişikliği tespit edilmedi.\n")
+        print("\n✅ No schema changes detected.\n")

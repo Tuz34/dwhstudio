@@ -11,7 +11,7 @@ from exceptions import DatabaseQueryError
 logger = logging.getLogger("dwh_app.db")
 
 # Y3: Lazy-initialized connection pool (min=1, max=5)
-# SYSDBA modunda pool desteklenmez — sys kullanıcısı için doğrudan bağlantı kullanılır.
+# Pooling is unsupported in SYSDBA mode — use a direct connection for the sys user.
 _pool: oracledb.ConnectionPool | None = None
 _pool_lock = threading.Lock()
 _LEADING_SQL_NOISE = re.compile(r"^(?:(?:\s+)|(?:--[^\r\n]*(?:\r?\n|$))|(?:/\*.*?\*/))*", re.DOTALL)
@@ -30,7 +30,7 @@ def _get_pool() -> oracledb.ConnectionPool | None:
     if _pool is not None:
         return _pool
     if not ORACLE_USER or ORACLE_USER.lower() == "sys":
-        return None   # SYSDBA veya credentials eksik — pool oluşturma
+        return None   # SYSDBA or missing credentials — do not create a pool
     with _pool_lock:
         if _pool is not None:
             return _pool
@@ -43,13 +43,13 @@ def _get_pool() -> oracledb.ConnectionPool | None:
                 max=5,
                 increment=1,
             )
-            logger.info("Oracle connection pool olusturuldu (min=1, max=5)")
+            logger.info("Oracle connection pool created (min=1, max=5)")
         except Exception as e:
             logger.warning("Oracle pool initialization failed: %s", type(e).__name__)
     return _pool
 
 def get_connection(use_ddl=False):
-    """Pooled connection döndürür. SYSDBA veya pool yoksa doğrudan bağlanır."""
+    """Returns a pooled connection. Connects directly for SYSDBA or when no pool exists."""
     if use_ddl and ORACLE_DDL_USER and ORACLE_DDL_PASSWORD:
         return oracledb.connect(user=ORACLE_DDL_USER, password=ORACLE_DDL_PASSWORD, dsn=ORACLE_DSN)
         
@@ -85,8 +85,8 @@ def execute_dml(sql: str, params: dict = None) -> str:
     cursor = None
     try:
         cursor = conn.cursor()
-        # Oracle'da normal DML'lerde noktalı virgül hataya yol açarken,
-        # BEGIN / DECLARE ile başlayan PL/SQL bloklarında şarttır.
+        # In Oracle, a semicolon causes an error in ordinary DML,
+        # but is required in PL/SQL blocks starting with BEGIN / DECLARE.
         upper_sql = sql.upper()
         if not (upper_sql.startswith("BEGIN") or upper_sql.startswith("DECLARE")):
             if sql.endswith(";"):
@@ -97,7 +97,7 @@ def execute_dml(sql: str, params: dict = None) -> str:
             cursor.execute(sql)
         affected = cursor.rowcount
         conn.commit()
-        return f"{affected} satır etkilendi."
+        return f"{affected} rows affected."
     except Exception as exc:
         try:
             conn.rollback()
@@ -112,13 +112,13 @@ def execute_dml(sql: str, params: dict = None) -> str:
 
 def _format_dates(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:
-        # datetime kolonları → dd.MM.yyyy
+        # datetime columns → dd.MM.yyyy
         if pd.api.types.is_datetime64_any_dtype(df[col]):
             if (df[col].dt.hour != 0).any() or (df[col].dt.minute != 0).any():
                 df[col] = df[col].dt.strftime("%d.%m.%Y %H:%M")
             else:
                 df[col] = df[col].dt.strftime("%d.%m.%Y")
-        # epoch millisecond gibi büyük sayılar (tarih olabilecek kolonlar)
+        # large numbers such as epoch milliseconds (columns that may contain dates)
         elif pd.api.types.is_numeric_dtype(df[col]):
             col_lower = col.lower()
             if any(k in col_lower for k in ("date", "tarih", "time", "zaman", "created", "updated")):
@@ -164,29 +164,29 @@ def get_user_tables() -> list:
         conn.close()
 
 # ============================================================
-# KAYNAK (SOURCE) erisimi — FAZ 1: source_connector uzerinden
-# SOURCE_DB_TYPE=oracle (ana yol) | mssql (fallback). Pür MSSQL/Oracle
-# kodu source_connector.py icinde; buradakiler ince delegelerdir.
+# SOURCE access — PHASE 1: through source_connector
+# SOURCE_DB_TYPE=oracle (primary path) | mssql (fallback). Pure MSSQL/Oracle
+# code is in source_connector.py; these are thin delegates.
 # ============================================================
 
 def get_source_connector_lazy():
-    # Lazy import (dongusel bagimlilik ve config sirasi icin)
+    # Lazy import (for circular dependencies and configuration order)
     from source_connector import get_source_connector
     return get_source_connector()
 
 def get_source_tables() -> list:
-    """Aktif kaynak (SOURCE_DB_TYPE) tablolarini 'SCHEMA.TABLE' getirir."""
+    """Returns active source (SOURCE_DB_TYPE) tables as 'SCHEMA.TABLE'."""
     return get_source_connector_lazy().get_tables()
 
 def get_source_table_schema(table_name: str) -> pd.DataFrame:
-    """Kolonlar: COLUMN_NAME, FULL_DATA_TYPE, COMMENTS."""
+    """Columns: COLUMN_NAME, FULL_DATA_TYPE, COMMENTS."""
     return get_source_connector_lazy().get_table_schema(table_name)
 
 def get_source_table_comment(table_name: str) -> str:
     return get_source_connector_lazy().get_table_comment(table_name)
 
 def get_source_pk_columns(table_name: str) -> list:
-    """Composite PK destekli kaynak PK kolonlari."""
+    """Source PK columns with composite PK support."""
     return get_source_connector_lazy().get_pk_columns(table_name)
 
 def source_sample_data(table_name: str, limit: int = 100) -> pd.DataFrame:
@@ -196,9 +196,9 @@ def execute_source_select(sql: str, params=None) -> pd.DataFrame:
     return get_source_connector_lazy().execute_select(sql, params)
 
 
-# --- Geriye donuk uyumluluk: eski get_mssql_* isimleri (artik connector'a gider) ---
-# NOT: Bu isimler SOURCE_DB_TYPE'a gore Oracle VEYA MSSQL kaynagina yonlenir.
-# FAZ 2'de cagiran moduller get_source_* isimlerine gececek; o zaman kaldirilacak.
+# --- Backward compatibility: old get_mssql_* names (now delegated to connector) ---
+# NOTE: These names route to an Oracle OR MSSQL source according to SOURCE_DB_TYPE.
+# In PHASE 2, callers will switch to get_source_* names; these will then be removed.
 
 def get_mssql_tables() -> list:
     return get_source_tables()
@@ -215,7 +215,7 @@ def get_mssql_table_comment(table_name: str) -> str:
 
 
 def get_table_schema(table_name: str) -> pd.DataFrame:
-    # DWH.TABLO_ADI formatını ayır
+    # Split the DWH.TABLO_ADI format
     if '.' in table_name:
         owner, tname = table_name.split('.', 1)
     else:
@@ -302,7 +302,7 @@ def get_schema_for_ai(table_names: list) -> str:
             )
             lines.append(f"TABLE {tbl} ({cols})")
         except Exception as e:
-            lines.append(f"-- TABLE {tbl}: şema alınamadı ({e})")
+            lines.append(f"-- TABLE {tbl}: schema unavailable ({e})")
     return "\n".join(lines)
 
 

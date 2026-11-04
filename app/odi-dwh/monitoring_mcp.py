@@ -1,14 +1,14 @@
 """
-Monitoring MCP Server — READ-ONLY Izleme & DQ Araclari
+Monitoring MCP Server — READ-ONLY Monitoring & DQ Tools
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 6 tool:
-  - mon_etl_job_metrics      : ODI session sureleri, satir sayilari, hata oranlari
-  - mon_data_freshness       : ETL_WATERMARK'tan son yukleme tarihleri + gun farki
+  - mon_etl_job_metrics      : ODI session durations, row counts, error rates
+  - mon_data_freshness       : latest load dates from ETL_WATERMARK + day difference
   - mon_tablespace_usage     : Oracle tablespace doluluk yuzdeleri
-  - mon_dq_score             : Tablo bazli DQ skoru (tek veya toplu)
+  - mon_dq_score             : Table-level DQ score (individual or aggregate)
   - mon_schema_changes       : schema_change_detector'dan son degisiklikler
-  - mon_alert_summary        : ALERT_LOG'dan onaylanmamis alertler
+  - mon_alert_summary        : unapproved alerts from ALERT_LOG
 
 Tum araclar READ-ONLY'dir. INSERT/UPDATE/DELETE yasaktir.
 """
@@ -32,7 +32,7 @@ def _repo_table(table_name: str) -> str:
 
 
 def _get_conn():
-    """Yeni Oracle baglantisi olusturur."""
+    """Create a new Oracle connection."""
     return oracledb.connect(
         user=ORACLE_USER,
         password=ORACLE_PASSWORD,
@@ -53,8 +53,8 @@ def _json_serial(obj):
 
 def mon_etl_job_metrics(limit: int = 20) -> str:
     """
-    ODI session sureleri, satir sayilari ve hata oranlarini getirir.
-    Configured ODI repository SNP_SESSION tablosundan okunur.
+    Retrieve ODI session durations, row counts, and error rates.
+    Reads from the configured ODI repository SNP_SESSION table.
     """
     conn = _get_conn()
     cursor = conn.cursor()
@@ -91,7 +91,7 @@ def mon_etl_job_metrics(limit: int = 20) -> str:
 
 def mon_data_freshness() -> str:
     """
-    AUDIT_USER.ETL_WATERMARK'tan son yukleme tarihlerini ve gun farkini getirir.
+    Retrieve latest load dates and day differences from AUDIT_USER.ETL_WATERMARK.
     """
     conn = _get_conn()
     cursor = conn.cursor()
@@ -146,7 +146,7 @@ def mon_tablespace_usage() -> str:
         return json.dumps(rows, default=_json_serial, ensure_ascii=False)
 
     except Exception as e:
-        # DBA_ gorunumleri icin yetki yoksa USER_ ile dene
+        # Try USER_ if DBA_ view permissions are unavailable
         try:
             cursor2 = conn.cursor()
             cursor2.execute("""
@@ -170,8 +170,8 @@ def mon_tablespace_usage() -> str:
 
 def mon_dq_score(owner: str = "DWH", table_name: str = "") -> str:
     """
-    Tablo bazli DQ skoru hesaplar.
-    table_name bossa tum tablolar icin toplu skor doner.
+    Calculate a table-level DQ score.
+    If table_name is empty, return an aggregate score for all tables.
     Skor = (1 - ihlal_sayisi / toplam_satir) * 100
     """
     from data_quality import DataQualityManager
@@ -246,7 +246,7 @@ def mon_schema_changes(limit: int = 20) -> str:
 # ── Tool 6: Alert Summary ───────────────────────────────────────────────────
 
 def mon_alert_summary() -> str:
-    """AUDIT_USER.ALERT_LOG'dan onaylanmamis alertleri getirir."""
+    """Returns unapproved alerts from AUDIT_USER.ALERT_LOG."""
     conn = _get_conn()
     cursor = conn.cursor()
     try:
@@ -271,7 +271,7 @@ def mon_alert_summary() -> str:
 
     except oracledb.DatabaseError as e:
         if "ORA-00942" in str(e):
-            # ALERT_LOG tablosu henuz olusturulmamis
+            # ALERT_LOG table has not been created yet
             return json.dumps([])
         return safe_error_json("Alert summary read", e)
     except Exception as e:

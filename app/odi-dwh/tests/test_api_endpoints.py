@@ -2,7 +2,7 @@
 API Endpoint Testleri
 ━━━━━━━━━━━━━━━━━━━━━
 
-Temel API endpoint'lerinin HTTP status ve JSON yapisini dogrular.
+Verifies the HTTP status and JSON structure of the core API endpoints.
 """
 
 import pytest

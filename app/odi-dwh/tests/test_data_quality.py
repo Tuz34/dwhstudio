@@ -1,9 +1,9 @@
 """
-Data Quality Testleri
+Data Quality Tests
 ━━━━━━━━━━━━━━━━━━━━━
 
-DataQualityManager sinifinin unit testleri.
-Oracle baglantisi gerektirir (integration test).
+Unit tests for the DataQualityManager class.
+Requires an Oracle connection for integration tests.
 """
 
 import pytest
@@ -84,7 +84,7 @@ class FakeDQConnection:
 
 
 class TestQualityRule:
-    """QualityRule model testleri."""
+    """QualityRule model tests."""
 
     def test_rule_creation(self):
         rule = QualityRule("TEST_RULE", "COL1", "not_null")
@@ -101,7 +101,7 @@ class TestQualityRule:
 
 
 class TestValidationResult:
-    """ValidationResult model testleri."""
+    """ValidationResult model tests."""
 
     def test_new_result_is_passed(self):
         result = ValidationResult("DWH", "SALES")
@@ -122,7 +122,7 @@ class TestValidationResult:
         result.total_rows = 100
         rule = QualityRule("DATE_CHECK", "CREATED", "date_range", severity="WARNING")
         result.add_violation(rule, 3)
-        assert result.passed is True  # WARNING passed'i bozmaz
+        assert result.passed is True  # WARNING does not make the result fail.
 
     def test_summary(self):
         result = ValidationResult("DWH", "SALES")

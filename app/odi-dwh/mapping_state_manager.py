@@ -143,7 +143,7 @@ def _mapping_name_from_state(state: dict[str, Any]) -> str:
 
 
 def _push_failure_to_rag(state: dict[str, Any], status: str, batch_id: str, completed_text: str) -> None:
-    """LangGraph hatalarini RAG `error_patterns` collection'ina kaydet (best-effort)."""
+    """Save LangGraph failures to the RAG `error_patterns` collection (best effort)."""
     try:
         from rag_manager import add_document
     except Exception:
@@ -177,17 +177,17 @@ def _push_failure_to_rag(state: dict[str, Any], status: str, batch_id: str, comp
     }
     try:
         add_document("error_patterns", text, metadata, doc_id=f"err-{batch_id}")
-        logger.info("LangGraph hatasi RAG/error_patterns icine kaydedildi: %s (batch=%s)",
+        logger.info("LangGraph error saved to RAG/error_patterns: %s (batch=%s)",
                     mapping_name, batch_id)
     except Exception as exc:
-        logger.debug("RAG add_document basarisiz: %s", exc)
+        logger.debug("RAG add_document failed: %s", exc)
 
 
 def _push_success_to_rag(state: dict[str, Any], status: str, batch_id: str, completed_text: str) -> None:
-    """Basarili LangGraph runlarini RAG `mapping_runs` collection'ina ozet kaydet.
+    """Store summaries of successful LangGraph runs in the RAG `mapping_runs` collection.
 
-    LLM'in "bu mapping nasil uretildi", "ODS_X mapping'i hangi adimlardan gecti" gibi
-    sorulari icin kullanilabilir referans seti olusturur.
+    This creates a reference set for LLM questions such as "how was this mapping
+    generated" and "which steps did ODS_X mapping pass through".
     """
     try:
         from rag_manager import add_document
@@ -208,7 +208,7 @@ def _push_success_to_rag(state: dict[str, Any], status: str, batch_id: str, comp
         f"STATUS: {status}",
         f"SRC: {src or '-'} ({src_model or '-'})",
         f"TGT: {tgt or '-'} ({tgt_model or '-'})",
-        f"BU TABLO ARTIK ODS KATMANINDA MEVCUTTUR. {src} tablosu {tgt} olarak modellenmistir.",
+        f"THIS TABLE NOW EXISTS IN THE ODS LAYER. {src} has been modeled as {tgt}.",
         f"NEEDS_SKEY: {needs_skey}",
         f"COLUMNS: {columns_count if columns_count is not None else '-'}",
         f"SNAPSHOT_ID: {snap_id if snap_id is not None else '-'}",
@@ -230,16 +230,16 @@ def _push_success_to_rag(state: dict[str, Any], status: str, batch_id: str, comp
     }
     try:
         add_document("mapping_runs", text, metadata, doc_id=f"run-{batch_id}")
-        logger.info("Basarili LangGraph run RAG/mapping_runs icine kaydedildi: %s (batch=%s)",
+        logger.info("Successful LangGraph run saved to RAG/mapping_runs: %s (batch=%s)",
                     mapping_name, batch_id)
     except Exception as exc:
-        logger.debug("RAG mapping_runs add_document basarisiz: %s", exc)
+        logger.debug("RAG mapping_runs add_document failed: %s", exc)
 
 
 class MappingStateManager:
     """Stores LangGraph mapping run state in AUDIT_USER.MAPPING_RUN_STATE."""
 
-    # Proses genelinde tek kez dogrulansın — her upsert'te DDL atmasin
+    # Verify only once per process — avoid issuing DDL on every upsert
     _table_ensured: bool = False
 
     def __init__(self):
@@ -305,7 +305,7 @@ class MappingStateManager:
             normalized_status = _normalize_status(state.get("overall_status"))
         except Exception:
             normalized_status = state.get("overall_status")
-        # state_json icindeki overall_status'u da standart sozluge cevir; UI ve API uyumlu kalsin
+        # Normalize overall_status in state_json to the standard vocabulary for UI and API compatibility
         persisted_state = _persistable_state(state)
         persisted_state["overall_status"] = normalized_status
         persisted_error = _persisted_error(state.get("error"))
@@ -347,13 +347,13 @@ class MappingStateManager:
             logger.info("MAPPING_RUN_STATE yazildi: batch=%s mapping=%s status=%s step=%s",
                         batch_id, mapping_name, normalized_status, state.get("current_step"))
         except Exception as exc:
-            # Tani icin tam hatayi gomelim — yetki/baglanti/sema sorunlari sessiz kalmasin
+            # Include the full error for diagnosis — do not hide permission/connection/schema issues
             logger.error("MAPPING_RUN_STATE yazilamadi (batch=%s mapping=%s): %s",
                          batch_id, mapping_name, exc, exc_info=True)
         finally:
             cursor.close()
 
-        # RAG'a yaz: hata durumunda error_patterns, basarida mapping_runs (best-effort)
+        # Write to RAG: error_patterns on failure, mapping_runs on success (best effort)
         try:
             from mapping_status import is_failure, is_terminal, SUCCEEDED
             if is_failure(normalized_status):
@@ -383,14 +383,14 @@ class MappingStateManager:
             cursor.close()
 
     def get_by_target_table(self, table_name: str, limit: int = 50) -> dict[str, Any] | None:
-        """En son LangGraph state'leri tarayip validated_params.tgt_table eslesenini doner.
+        """Scan recent LangGraph states and return the one matching validated_params.tgt_table.
 
-        DQ/Impact akislarinin tablo adindan tahmin yerine kalici state'i kullanabilmesi icin.
+        So DQ/Impact flows can use persisted state instead of guessing from the table name.
         """
         target = (table_name or "").strip().upper()
         if not target:
             return None
-        # Tablo adindan ODS_/DWH_ vb. on eki gelmis olabilir; kisa ad ile karsilastirma yapacagiz
+        # The table name may include an ODS_/DWH_ prefix; compare using the short name
         target_short = target.split(".")[-1]
         conn = self._get_conn()
         cursor = conn.cursor()

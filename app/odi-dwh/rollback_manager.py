@@ -1,11 +1,11 @@
 """
-Rollback Manager — DDL Islem Geri Alma
+Rollback Manager — Undo DDL Operations
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-MAPPING_LOG tablosundaki batch kayitlarini kullanarak
-DDL islemlerini ters sirada geri alir.
+Uses batch records in the MAPPING_LOG table to undo
+DDL operations in reverse order.
 
-Desteklenen islemler:
+Supported operations:
   CREATE_TABLE    → DROP TABLE
   CREATE_SEQUENCE → DROP SEQUENCE
 """
@@ -29,9 +29,9 @@ def _qualified_object_name(owner: str, name: str) -> str:
 
 
 class RollbackManager:
-    """DDL islem geri alma yonetimi."""
+    """Manage the reversal of DDL operations."""
 
-    # Ters islem haritasi
+    # Reverse operation map.
     REVERSE_OPS = {
         "CREATE_TABLE":    "DROP TABLE",
         "CREATE_SEQUENCE": "DROP SEQUENCE",
@@ -62,14 +62,14 @@ class RollbackManager:
         return False
 
     def get_batch_log(self, batch_id: str) -> list[dict]:
-        """Batch icindeki tum MAPPING_LOG kayitlarini doner.
+        """Return all MAPPING_LOG records in the batch.
 
         Args:
-            batch_id: SKEY veya diger DDL isleminin batch kimlik degeri.
+            batch_id: Batch identifier for SKEY or another DDL operation.
 
         Returns:
-            Her kayit icin LOG_ID, OPERATION, OBJECT_OWNER, OBJECT_NAME,
-            STATUS, ERROR_MESSAGE, CREATED_AT alanlari icerir.
+            Each record contains LOG_ID, OPERATION, OBJECT_OWNER, OBJECT_NAME,
+            STATUS, ERROR_MESSAGE, and CREATED_AT fields.
         """
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -95,21 +95,21 @@ class RollbackManager:
             cursor.close()
 
     def rollback_batch(self, batch_id: str) -> dict:
-        """Batch icindeki basarili CREATE islemlerini ters kronolojik sirada geri alir.
+        """Undo successful CREATE operations in the batch in reverse chronological order.
 
         Args:
-            batch_id: Geri alinacak DDL batch'inin kimlik degeri.
+            batch_id: Identifier of the DDL batch to undo.
 
         Returns:
-            Sozluk: batch_id, rolled_back (geri alinan nesneler),
-            skipped (atlanan nesneler) ve errors listelerini icerir.
+            Dictionary containing batch_id, rolled_back (undone objects),
+            skipped (skipped objects), and errors lists.
         """
         conn = self._get_conn()
         cursor = conn.cursor()
         result = {"batch_id": batch_id, "rolled_back": [], "skipped": [], "errors": []}
 
         try:
-            # Basarili islemleri ters kronolojik sirada al
+            # Fetch successful operations in reverse chronological order.
             cursor.execute("""
                 SELECT LOG_ID, OPERATION, OBJECT_OWNER, OBJECT_NAME
                 FROM AUDIT_USER.MAPPING_LOG
@@ -120,13 +120,13 @@ class RollbackManager:
             operations = cursor.fetchall()
 
             if not operations:
-                result["skipped"].append("Batch'te geri alinacak islem bulunamadi")
+                result["skipped"].append("No operations to undo were found in the batch")
                 return result
 
             for log_id, operation, obj_owner, obj_name in operations:
                 reverse_op = self.REVERSE_OPS.get(operation)
                 if not reverse_op:
-                    result["skipped"].append(f"{operation} {obj_owner}.{obj_name} (ters islemi tanimli degil)")
+                    result["skipped"].append(f"{operation} {obj_owner}.{obj_name} (reverse operation undefined)")
                     continue
 
                 try:
@@ -144,7 +144,7 @@ class RollbackManager:
                     cursor.execute(ddl)
                     conn.commit()
 
-                    # MAPPING_LOG'daki orijinal kaydi ROLLED_BACK olarak isaretle
+                    # Mark the original MAPPING_LOG record as ROLLED_BACK.
                     cursor.execute("""
                         UPDATE AUDIT_USER.MAPPING_LOG
                         SET STATUS = 'ROLLED_BACK'
@@ -153,13 +153,13 @@ class RollbackManager:
                     conn.commit()
 
                     result["rolled_back"].append(f"{reverse_op} {obj_owner}.{obj_name}")
-                    logger.info("Rollback basarili: %s", ddl)
+                    logger.info("Rollback succeeded: %s", ddl)
 
                 except oracledb.DatabaseError as e:
                     err_str = str(e)
                     if "ORA-00942" in err_str or "ORA-02289" in err_str:
-                        # Table/sequence zaten yok
-                        result["skipped"].append(f"{obj_owner}.{obj_name} (zaten mevcut degil)")
+                        # Table/sequence already absent.
+                        result["skipped"].append(f"{obj_owner}.{obj_name} (already absent)")
                     else:
                         result["errors"].append({
                             "object": f"{obj_owner}.{obj_name}",
@@ -172,7 +172,7 @@ class RollbackManager:
             cursor.close()
 
         logger.info(
-            "Rollback sonucu batch=%s: %d geri alindi, %d atlandi, %d hata",
+            "Rollback result batch=%s: %d undone, %d skipped, %d errors",
             batch_id, len(result["rolled_back"]), len(result["skipped"]), len(result["errors"])
         )
         return result

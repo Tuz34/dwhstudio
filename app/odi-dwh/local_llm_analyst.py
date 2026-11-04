@@ -23,7 +23,7 @@ from config import LOCAL_OPENAI_API_KEY, LOCAL_OPENAI_BASE_URL, LOCAL_OPENAI_MOD
 
 DEFAULT_MODEL = LOCAL_OPENAI_MODEL
 DEFAULT_BASE_URL = LOCAL_OPENAI_BASE_URL
-DEFAULT_TASK = "Summarize the handoff, risks, blockers, and next actions in short Turkish bullets."
+DEFAULT_TASK = "Summarize the handoff, risks, blockers, and next actions in short English bullets."
 
 SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("env_assignment", re.compile(r"(?im)^\s*[A-Z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY|KEY)\s*=\s*\S+")),
@@ -101,7 +101,7 @@ def _chat_payload(model: str, task: str, text: str) -> dict[str, Any]:
                 "role": "system",
                 "content": (
                     "You are a local-only analyst for Oracle, ODI, DWH and agent handoff work. "
-                    "Do not request or reveal secrets. Produce concise Turkish bullets."
+                    "Do not request or reveal secrets. Produce concise English bullets."
                 ),
             },
             {

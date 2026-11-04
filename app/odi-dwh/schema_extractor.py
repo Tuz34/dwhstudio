@@ -9,34 +9,34 @@ def get_table_description(table_name: str) -> str:
         
     name = table_name.lower()
     if 'product' in name or 'urun' in name:
-        return 'DWH Ürün boyut (dimension) tablosudur. Ürün ana verilerini, kategorilerini ve fiyat bilgilerini içerir. Ürün analizlerinde kullanılır.'
+        return 'DWH product dimension table. It contains product master data, categories, and pricing information. Used in product analysis.'
     elif 'customer' in name or 'musteri' in name:
-        return 'DWH Müşteri boyut (dimension) tablosudur. Müşteri demografik bilgilerini içerir. Müşteri analizleri ve segmentasyon için kullanılır.'
+        return 'DWH customer dimension table. It contains customer demographic information. Used in customer analysis and segmentation.'
     elif 'sales' in name or 'satis' in name:
-        return 'DWH Satış gerçek (fact) tablosudur. Müşteri ve ürün boyutlarıyla JOIN yapılabilecek satış metrikleri (tutar, miktar, tarih) içerir.'
+        return 'DWH sales fact table. It contains sales metrics (amount, quantity, date) that can be JOINed with customer and product dimensions.'
     elif 'order' in name or 'siparis' in name:
-        return 'Sipariş (fact/detay) tablosudur. Verilen siparişlerin zaman, miktar ve tutar bilgilerini detaylı olarak barındırır.'
-    elif 'emp' in name or 'calisan' in name:
-        return 'Çalışan (personel) bilgilerini, maaşlarını ve departman ilişkilerini içerir.'
-    elif 'dept' in name or 'departman' in name:
-        return 'Şirket departman (bölüm) bilgilerini içerir.'
+        return 'Order fact/detail table. It contains detailed timing, quantity, and amount information for placed orders.'
+    elif 'emp' in name or 'employee' in name or 'calisan' in name:
+        return 'Contains employee (personnel) information, salaries, and department relationships.'
+    elif 'dept' in name or 'department' in name or 'departman' in name:
+        return 'Contains company department information.'
     elif 'dim' in name:
-        return 'DWH Boyut (dimension) tablosudur. İlgili analizin detay ve kırılım (master data) bilgilerini içerir.'
+        return 'DWH dimension table. It contains detail and breakdown (master data) information for the relevant analysis.'
     elif 'fact' in name:
-        return 'DWH Gerçek (fact) tablosudur. Ölçüm (measure), metrik, tutar ve miktar gibi analitik/toplamsal verileri içerir.'
+        return 'DWH fact table. It contains analytical/aggregate data such as measures, metrics, amounts, and quantities.'
     else:
-        return 'Kurumsal DWH tablosudur.'
+        return 'Enterprise DWH table.'
 
 import re
 import pandas as pd
 
 def extract_and_store_schema():
-    print("Veritabanı bağlantısı kontrol ediliyor...")
+    print("Checking the database connection...")
     if test_connection():
-        print("Veritabanına bağlanıldı. Şema bilgileri çekiliyor...")
+        print("Connected to the database. Fetching schema information...")
         tables = get_user_tables()
         
-        # Eski (duplicate) kayıtları engellemek için mevcut şema bilgisini temizle
+        # Clear existing schema information to prevent old duplicate records.
         db = _load_db()
         db["schema_metadata"] = []
         _save_db(db)
@@ -44,7 +44,7 @@ def extract_and_store_schema():
         for tbl in tables:
             try:
                 df = get_table_schema(tbl)
-                # Sınırlamaları (Constraints) çek
+                # Fetch constraints.
                 cons_df = get_table_constraints(tbl)
                 pk_cols = cons_df[cons_df['CONSTRAINT_TYPE'] == 'P']['COLUMN_NAME'].tolist() if not cons_df.empty else []
                 fk_cols = cons_df[cons_df['CONSTRAINT_TYPE'] == 'R']['COLUMN_NAME'].tolist() if not cons_df.empty else []
@@ -71,7 +71,7 @@ def extract_and_store_schema():
                         
                     prop_str = f" [{','.join(props)}]" if props else ""
                     
-                    # Handle comments safely - sadece DB'den oku
+                    # Handle comments safely — read only from the database.
                     comment = r.get('COMMENTS')
                     if pd.isna(comment) or not comment or str(comment).lower().strip() == 'nan':
                         comment_val = "N / A"
@@ -83,37 +83,37 @@ def extract_and_store_schema():
 
                 cols_str = " | ".join(cols_list)
                 
-                doc_text = f"Tablo Adı: {tbl}\nKolonlar: {cols_str}\nAçıklama: {description}"
+                doc_text = f"Table Name: {tbl}\nColumns: {cols_str}\nDescription: {description}"
                 
-                # RAG'a ekle
+                # Add to RAG.
                 doc_id = add_document(
                     collection_name="schema_metadata",
                     document_text=doc_text,
                     metadata={"table_name": tbl, "source": "oracle_db"}
                 )
-                print(f"Eklendi: {tbl} (ID: {doc_id})")
+                print(f"Added: {tbl} (ID: {doc_id})")
             except Exception as e:
-                print(f"Hata ({tbl}): {e}")
+                print(f"Error ({tbl}): {e}")
     else:
-        print("UYARI: Gerçek Oracle veritabanına bağlanılamadı!")
-        print("Demonstrasyon (Mock) DWH şeması SimpleRAG'a yükleniyor...")
+        print("WARNING: Could not connect to the real Oracle database!")
+        print("Loading the demonstration (mock) DWH schema into SimpleRAG...")
         
         mock_tables = [
             {
                 "name": "DWH.DIM_CUSTOMER", 
-                "text": "Tablo Adı: DWH.DIM_CUSTOMER\nKolonlar: CUSTOMER_ID NUMBER [PK,IDX] {N / A}, FIRST_NAME VARCHAR2 {N / A}, LAST_NAME VARCHAR2 {N / A}, EMAIL VARCHAR2 [IDX] {N / A}, REGION VARCHAR2 {N / A}, CREATED_AT DATE {N / A}\nAçıklama: DWH Müşteri Boyut (Dimension) Tablosu. Müşterilerin demografik bilgilerini içerir."
+                "text": "Table Name: DWH.DIM_CUSTOMER\nColumns: CUSTOMER_ID NUMBER [PK,IDX] {N / A}, FIRST_NAME VARCHAR2 {N / A}, LAST_NAME VARCHAR2 {N / A}, EMAIL VARCHAR2 [IDX] {N / A}, REGION VARCHAR2 {N / A}, CREATED_AT DATE {N / A}\nDescription: DWH Customer Dimension Table. Contains customer demographic information."
             },
             {
                 "name": "DWH.DIM_PRODUCT", 
-                "text": "Tablo Adı: DWH.DIM_PRODUCT\nKolonlar: PRODUCT_ID NUMBER [PK] {N / A}, PRODUCT_NAME VARCHAR2 {N / A}, CATEGORY VARCHAR2 {N / A}, PRICE NUMBER {N / A}, STOCK_QUANTITY NUMBER {N / A}, FULL_DESCRIPTION VARCHAR2 [COMPRESS] {N / A}\nAçıklama: DWH Ürün Boyut (Dimension) Tablosu. Ürünlerin temel bilgilerini ve fiyatlarını içerir."
+                "text": "Table Name: DWH.DIM_PRODUCT\nColumns: PRODUCT_ID NUMBER [PK] {N / A}, PRODUCT_NAME VARCHAR2 {N / A}, CATEGORY VARCHAR2 {N / A}, PRICE NUMBER {N / A}, STOCK_QUANTITY NUMBER {N / A}, FULL_DESCRIPTION VARCHAR2 [COMPRESS] {N / A}\nDescription: DWH Product Dimension Table. Contains basic product information and prices."
             },
             {
                 "name": "DWH.FACT_SALES", 
-                "text": "Tablo Adı: DWH.FACT_SALES\nKolonlar: SALE_ID NUMBER [PK] {N / A}, CUSTOMER_ID NUMBER [FK,IDX] {N / A}, PRODUCT_ID NUMBER [FK,IDX] {N / A}, SALE_DATE DATE {N / A}, QUANTITY NUMBER {N / A}, TOTAL_AMOUNT NUMBER {N / A}\nAçıklama: DWH Satış Gerçek (Fact) Tablosu. Tüm satış işlemlerini tutar. Müşteri (DIM_CUSTOMER) ve Ürün (DIM_PRODUCT) ile JOIN yapılabilir."
+                "text": "Table Name: DWH.FACT_SALES\nColumns: SALE_ID NUMBER [PK] {N / A}, CUSTOMER_ID NUMBER [FK,IDX] {N / A}, PRODUCT_ID NUMBER [FK,IDX] {N / A}, SALE_DATE DATE {N / A}, QUANTITY NUMBER {N / A}, TOTAL_AMOUNT NUMBER {N / A}\nDescription: DWH Sales Fact Table. Stores all sales transactions. Can be JOINed with Customer (DIM_CUSTOMER) and Product (DIM_PRODUCT)."
             }
         ]
         
-        # Koleksiyonu temizle (yeni baştan)
+        # Clear the collection to start fresh.
         db = _load_db()
         db["schema_metadata"] = []
         _save_db(db)
@@ -124,8 +124,8 @@ def extract_and_store_schema():
                 document_text=t["text"],
                 metadata={"table_name": t["name"], "source": "mock_data"}
             )
-            print(f"Mock Eklendi: {t['name']} (ID: {doc_id})")
+            print(f"Mock added: {t['name']} (ID: {doc_id})")
 
 if __name__ == "__main__":
     extract_and_store_schema()
-    print("\nİşlem Tamamlandı. SimpleRAG 'schema_metadata' güncellendi.")
+    print("\nOperation completed. SimpleRAG 'schema_metadata' updated.")

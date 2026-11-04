@@ -1,21 +1,21 @@
 """
-DBA MCP Server — Oracle Veritabani Yonetici Araclari (READ-ONLY)
+DBA MCP Server — Oracle Database Administrator Tools (READ-ONLY)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 10 tool:
-  - dba_active_sessions       : Aktif oturumlari ve calistirdiklari SQL'i goster
-  - dba_blocking_locks        : Kilit bekleyen ve tutan oturumlari tespit et
-  - dba_tablespace_detail     : Tablespace doluluk, autoextend, datafile detayi
-  - dba_user_privileges       : Kullanici/rol yetki matrisi sorgula
-  - dba_object_privileges     : Tablo/view bazli GRANT durumu
-  - dba_invalid_objects       : Gecersiz (INVALID) Oracle nesneleri listele
-  - dba_redo_archive_status   : Redo log ve archive log durumu
-  - dba_rman_backup_status    : Son RMAN yedekleme bilgisi
-  - dba_top_sql               : En cok kaynak tuketilen SQL'ler (V$SQL)
-  - dba_wait_events           : Bekleme olaylari (wait event istatistikleri)
+  - dba_active_sessions       : Show active sessions and their SQL
+  - dba_blocking_locks        : Identify sessions waiting for and holding locks
+  - dba_tablespace_detail     : Tablespace usage, autoextend, and datafile details
+  - dba_user_privileges       : Query the user/role privilege matrix
+  - dba_object_privileges     : Table/view GRANT status
+  - dba_invalid_objects       : List invalid (INVALID) Oracle objects
+  - dba_redo_archive_status   : Redo log and archive log status
+  - dba_rman_backup_status    : Latest RMAN backup information
+  - dba_top_sql               : SQL statements consuming the most resources (V$SQL)
+  - dba_wait_events           : Wait events (wait event statistics)
 
-Tum araclar READ-ONLY'dir. DML/DDL yasaktir.
-SYSDBA veya DBA rolune sahip kullanici ile calisir.
+All tools are READ-ONLY. DML/DDL is prohibited.
+Runs with a user having SYSDBA or the DBA role.
 """
 
 import json
@@ -30,7 +30,7 @@ logger = logging.getLogger("dba_mcp")
 
 
 def _get_conn():
-    """Oracle DBA baglantisi olusturur."""
+    """Creates an Oracle DBA connection."""
     return oracledb.connect(
         user=ORACLE_USER,
         password=ORACLE_PASSWORD,
@@ -39,7 +39,7 @@ def _get_conn():
 
 
 def _json_serial(obj):
-    """datetime vb. JSON'a cevirilemeyen tipleri string yapar."""
+    """Converts types that cannot be serialized to JSON, such as datetime, to strings."""
     if hasattr(obj, "isoformat"):
         return obj.isoformat()
     if isinstance(obj, (bytes, bytearray)):
@@ -49,8 +49,8 @@ def _json_serial(obj):
 
 def _safe_query(sql, params=None, fallback_sql=None, fallback_params=None):
     """
-    Guvenli sorgu calistirici. DBA_ gorunumleri icin yetki yoksa
-    fallback_sql (genellikle USER_ gorunumu) denenir.
+    Safe query executor. If access to DBA_ views is unavailable,
+    fallback_sql (usually a USER_ view) is tried.
     """
     conn = _get_conn()
     cursor = conn.cursor()
@@ -82,13 +82,13 @@ def _safe_query(sql, params=None, fallback_sql=None, fallback_params=None):
 
 def dba_active_sessions(limit: int = 30) -> str:
     """
-    Aktif Oracle oturumlarini, calistirdiklari SQL'i ve kaynak kullanimini gosterir.
+    Shows active Oracle sessions, their SQL, and resource usage.
 
     Args:
-        limit: Maksimum satir sayisi (varsayilan 30).
+        limit: Maximum row count (default 30).
 
     Returns:
-        JSON listesi: SID, SERIAL, USERNAME, STATUS, SQL_TEXT, MACHINE, PROGRAM, LOGON_TIME
+        JSON list: SID, SERIAL, USERNAME, STATUS, SQL_TEXT, MACHINE, PROGRAM, LOGON_TIME
     """
     sql = """
         SELECT
@@ -118,11 +118,11 @@ def dba_active_sessions(limit: int = 30) -> str:
 
 def dba_blocking_locks() -> str:
     """
-    Kilit bekleyen ve kilit tutan oturumlari tespit eder.
-    Bloklayan -> bloklanan zincirini gosterir.
+    Identifies sessions waiting for and holding locks.
+    Shows the blocker -> blocked chain.
 
     Returns:
-        JSON listesi: BLOCKER_SID, BLOCKER_USER, WAITER_SID, WAITER_USER,
+        JSON list: BLOCKER_SID, BLOCKER_USER, WAITER_SID, WAITER_USER,
                        LOCKED_OBJECT, LOCK_TYPE, WAIT_SECONDS
     """
     sql = """
@@ -146,7 +146,7 @@ def dba_blocking_locks() -> str:
         ORDER BY sw.SECONDS_IN_WAIT DESC
     """
     fallback = """
-        SELECT 'Yetki yetersiz — V$LOCK/DBA_OBJECTS erisimi gerekli' AS MESSAGE FROM DUAL
+        SELECT 'Insufficient privileges — V$LOCK/DBA_OBJECTS access required' AS MESSAGE FROM DUAL
     """
     return _safe_query(sql, fallback_sql=fallback)
 
@@ -155,10 +155,10 @@ def dba_blocking_locks() -> str:
 
 def dba_tablespace_detail() -> str:
     """
-    Tablespace bazli detayli doluluk: datafile, autoextend, max size.
+    Detailed tablespace usage: datafile, autoextend, max size.
 
     Returns:
-        JSON listesi: TABLESPACE, DATAFILE, SIZE_MB, USED_MB, FREE_MB,
+        JSON list: TABLESPACE, DATAFILE, SIZE_MB, USED_MB, FREE_MB,
                        USED_PCT, AUTOEXTENSIBLE, MAX_SIZE_MB
     """
     sql = """
@@ -194,13 +194,13 @@ def dba_tablespace_detail() -> str:
 
 def dba_user_privileges(username: str = "") -> str:
     """
-    Kullanici/rol bazli sistem yetkilerini sorgular.
+    Queries system privileges by user/role.
 
     Args:
-        username: Belirli bir kullanici adi (bossa tum DWH kullanicilari).
+        username: Specific username (all DWH users if empty).
 
     Returns:
-        JSON listesi: GRANTEE, PRIVILEGE, ADMIN_OPTION
+        JSON list: GRANTEE, PRIVILEGE, ADMIN_OPTION
     """
     if username:
         sql = """
@@ -232,14 +232,14 @@ def dba_user_privileges(username: str = "") -> str:
 
 def dba_object_privileges(owner: str = "DWH", object_name: str = "") -> str:
     """
-    Tablo/view bazli GRANT durumunu sorgular. Kim hangi tabloya ne yetkisi vermis.
+    Queries table/view GRANT status: who granted which privilege on which table.
 
     Args:
-        owner: Nesne sahibi schema (varsayilan DWH).
-        object_name: Belirli bir tablo/view adi (bossa tum nesneler).
+        owner: Object owner schema (default DWH).
+        object_name: Specific table/view name (all objects if empty).
 
     Returns:
-        JSON listesi: GRANTEE, OWNER, TABLE_NAME, PRIVILEGE, GRANTABLE
+        JSON list: GRANTEE, OWNER, TABLE_NAME, PRIVILEGE, GRANTABLE
     """
     if object_name:
         sql = """
@@ -264,13 +264,13 @@ def dba_object_privileges(owner: str = "DWH", object_name: str = "") -> str:
 
 def dba_invalid_objects(owner: str = "") -> str:
     """
-    INVALID durumundaki Oracle nesnelerini listeler (bozuk view, paket vb.).
+    Lists Oracle objects with INVALID status (broken views, packages, etc.).
 
     Args:
-        owner: Schema filtresi (bossa DWH ile ilgili tum schemalar).
+        owner: Schema filter (all DWH related schemas if empty).
 
     Returns:
-        JSON listesi: OWNER, OBJECT_NAME, OBJECT_TYPE, STATUS, LAST_DDL_TIME
+        JSON list: OWNER, OBJECT_NAME, OBJECT_TYPE, STATUS, LAST_DDL_TIME
     """
     if owner:
         sql = """
@@ -301,10 +301,10 @@ def dba_invalid_objects(owner: str = "") -> str:
 
 def dba_redo_archive_status() -> str:
     """
-    Redo log gruplari ve archive log modunu gosterir.
+    Shows redo log groups and archive log mode.
 
     Returns:
-        JSON: redo_logs listesi + archive_mode bilgisi
+        JSON: redo_logs list + archive_mode information
     """
     conn = _get_conn()
     cursor = conn.cursor()
@@ -341,13 +341,13 @@ def dba_redo_archive_status() -> str:
 
 def dba_rman_backup_status(days: int = 7) -> str:
     """
-    Son X gun icindeki RMAN yedekleme islemlerini gosterir.
+    Shows RMAN backup operations in the last X days.
 
     Args:
-        days: Kac gunluk gecmis (varsayilan 7).
+        days: How many days back (default 7).
 
     Returns:
-        JSON listesi: SESSION_KEY, INPUT_TYPE, STATUS, START_TIME, END_TIME,
+        JSON list: SESSION_KEY, INPUT_TYPE, STATUS, START_TIME, END_TIME,
                        INPUT_BYTES_DISPLAY, OUTPUT_BYTES_DISPLAY, ELAPSED_SECONDS
     """
     sql = """
@@ -366,7 +366,7 @@ def dba_rman_backup_status(days: int = 7) -> str:
         FETCH FIRST 50 ROWS ONLY
     """
     fallback = """
-        SELECT 'V$RMAN_BACKUP_JOB_DETAILS erisimi yok veya RMAN yedekleme yapilmamis' AS MESSAGE FROM DUAL
+        SELECT 'No access to V$RMAN_BACKUP_JOB_DETAILS or no RMAN backup has been performed' AS MESSAGE FROM DUAL
     """
     return _safe_query(sql, {"days": days}, fallback_sql=fallback)
 
@@ -375,14 +375,14 @@ def dba_rman_backup_status(days: int = 7) -> str:
 
 def dba_top_sql(order_by: str = "elapsed", limit: int = 15) -> str:
     """
-    En cok kaynak tuketen SQL sorgularini listeler.
+    Lists SQL queries that consume the most resources.
 
     Args:
-        order_by: Siralama kriteri — 'elapsed' (sure), 'cpu', 'disk', 'executions'
-        limit: Maksimum satir (varsayilan 15).
+        order_by: Sort criterion — 'elapsed' (duration), 'cpu', 'disk', 'executions'
+        limit: Maximum rows (default 15).
 
     Returns:
-        JSON listesi: SQL_ID, SQL_TEXT, ELAPSED_SEC, CPU_SEC, DISK_READS,
+        JSON list: SQL_ID, SQL_TEXT, ELAPSED_SEC, CPU_SEC, DISK_READS,
                        BUFFER_GETS, EXECUTIONS, ROWS_PROCESSED
     """
     order_map = {
@@ -417,14 +417,14 @@ def dba_top_sql(order_by: str = "elapsed", limit: int = 15) -> str:
 
 def dba_wait_events(limit: int = 20) -> str:
     """
-    En sik karsilasilan bekleme olaylarini (wait event) gosterir.
-    Performans darbogazlarini tespitte kritiktir.
+    Shows the most frequent wait events.
+    Critical for identifying performance bottlenecks.
 
     Args:
-        limit: Maksimum satir (varsayilan 20).
+        limit: Maximum rows (default 20).
 
     Returns:
-        JSON listesi: EVENT, WAIT_CLASS, TOTAL_WAITS, TIME_WAITED_SEC,
+        JSON list: EVENT, WAIT_CLASS, TOTAL_WAITS, TIME_WAITED_SEC,
                        AVG_WAIT_MS, PCT_OF_TOTAL
     """
     sql = """
