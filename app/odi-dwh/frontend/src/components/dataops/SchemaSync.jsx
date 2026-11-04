@@ -558,6 +558,16 @@ export function SchemaSync() {
     try {
       const value = await fn();
       setResults(prev => ({ ...prev, [name]: value }));
+      if (name === 'odi' && (
+        value?.applied === false
+        || (typeof value?.status === 'string' && value.status.toUpperCase().endsWith('_FAILED'))
+      )) {
+        setError(typeof value?.reason === 'string' && value.reason.trim()
+          ? value.reason
+          : 'ODI metadata sync failed.');
+        setSteps(prev => ({ ...prev, [name]: 'error' }));
+        return value;
+      }
       setSteps(prev => ({ ...prev, [name]: 'done' }));
       return value;
     } catch (err) {
