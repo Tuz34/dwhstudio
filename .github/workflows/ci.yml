@@ -37,11 +37,11 @@ jobs:
         shell: bash
         run: |
           mapfile -t known_failures < "$GITHUB_WORKSPACE/.github/known_failures.txt"
-          if [[ ${#known_failures[@]} -ne 13 ]]; then
-            echo "Expected 13 known environment-dependent tests in .github/known_failures.txt"
+          if [[ ${#known_failures[@]} -ne 7 ]]; then
+            echo "Expected 7 known environment-dependent tests in .github/known_failures.txt"
             exit 1
           fi
-          echo "13 known environment-dependent tests deselected, tracked in ODI-80"
+          echo "7 known environment-dependent tests deselected, tracked in ODI-80"
           deselect_args=()
           for node_id in "${known_failures[@]}"; do
             deselect_args+=(--deselect "$node_id")
