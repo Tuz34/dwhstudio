@@ -157,6 +157,35 @@ def test_endpoint_representations_rejected(url):
         egress.validate_url(url)
 
 
+@pytest.mark.parametrize("rendering", ["dotted", "hex"])
+@pytest.mark.parametrize("trusted", [False, True])
+@pytest.mark.parametrize("host", ["::ffff:127.0.0.1", "::ffff:7f00:1", "::ffff:8.8.8.8", "::ffff:808:808"])
+def test_mapped_ipv6_rejected_independent_of_rendering(monkeypatch, rendering, trusted, host):
+    import ai_egress as egress
+
+    original_str = egress.ipaddress.IPv6Address.__str__
+
+    def render_address(address):
+        mapped = address.ipv4_mapped
+        if mapped is None:
+            return original_str(address)
+        if rendering == "dotted":
+            return f"::ffff:{mapped}"
+        return f"::ffff:{int(mapped) >> 16:x}:{int(mapped) & 0xFFFF:x}"
+
+    # Exercise both Python rendering conventions without replacing address semantics.
+    monkeypatch.setattr(egress.ipaddress.IPv6Address, "__str__", render_address)
+    origin = f"https://[{host}]"
+    if trusted:
+        monkeypatch.setenv("AI_TRUSTED_ORIGINS", origin)
+    url = origin + "/v1"
+    calls = fake_pool(monkeypatch)
+    for operation in (egress._parse, egress.validate_url, egress.validate_endpoint, egress.get):
+        with pytest.raises(egress.EgressPolicyError, match="^AI endpoint is not permitted.$"):
+            operation(url)
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "url",
     ["http://localhost:1234/v1", "http://127.0.0.1:11434/api/tags", "http://[::1]:1234/v1", "https://localhost/v1"],

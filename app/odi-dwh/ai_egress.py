@@ -45,6 +45,9 @@ def _parse(url: str) -> tuple[SplitResult, str, int, str]:
             raise EgressPolicyError()
         try:
             address = ipaddress.ip_address(host)
+            # Mapped IPv6 rendering/classification varies across Python versions.
+            if address.version == 6 and address.ipv4_mapped is not None:
+                raise EgressPolicyError()
             if address.is_unspecified or address.is_multicast or address.is_link_local:
                 raise EgressPolicyError()
             host = str(address)
