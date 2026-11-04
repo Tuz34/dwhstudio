@@ -10,9 +10,15 @@ owner's fresh exact approval, from ``app/odi-dwh``::
 ``review.json`` is a JSON object with ``executor_review_status`` and
 ``scenario_generation_review_status`` both equal to ``"approved"`` (the
 independent reviewers' sign-off, supplied by the operator). Its content is
-never printed. The script prints and writes a count-only report (no session
-ids, key values or raw rows) and exits 0 only when the proof passed. The
-named backup is retained; nothing is restored or dropped automatically.
+never printed; any extra key, missing key or non-string value is refused.
+The script prints and writes a count-only report restricted to an explicit
+allowlist of fields (no session ids, key values or raw rows).
+
+Exit codes: 0 proof passed; 1 proof ran but did not pass; 2 refused before
+any callback ran (bad arguments, approval, scope, review evidence or an
+unusable ``--out`` path); 3 the run finished but the report file could not be
+written (the scalar report is still printed to stdout). The named backup is
+retained; nothing is restored or dropped automatically.
 """
 
 from __future__ import annotations
@@ -20,7 +26,9 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import os
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,8 +44,24 @@ from dim_product_scd2_scenario_backup import call_sanitized
 EXIT_PASSED = 0
 EXIT_NOT_PASSED = 1
 EXIT_BAD_ARGUMENTS = 2
+EXIT_REPORT_WRITE_FAILED = 3
+_EVIDENCE_KEYS = frozenset({"executor_review_status", "scenario_generation_review_status"})
+_REPORT_FIELDS = frozenset({
+    "mode", "status", "stage", "error_type",
+    "scenario_run_attempt_count", "successful_scenario_run_count",
+    "named_backup_retained", "backup_may_exist", "automatic_rollback_performed",
+    "persistent_action_attempted", "manual_recovery_review_required",
+    "raw_rows_included", "pk_values_included", "session_id_included",
+    "raw_output_included", "secret_printed",
+    "source_count", "target_count", "current_target_count", "unchanged_count",
+    "remaining_candidate_count", "named_backup_column_count",
+    "named_backup_row_count", "ods_backup_untouched",
+})
+_SCENARIO_FIELDS = frozenset({"name", "version", "context"})
+_MAX_TEXT = 80
+_PROBE_TOOL = "odi.scenario_probe"
+_PROBE_MODE = "scenario_finders_only"
 _MAX_EVIDENCE_BYTES = 4096
-_SCALARS = (bool, int, str, type(None))
 
 
 class _Parser(argparse.ArgumentParser):
@@ -74,14 +98,53 @@ def _load_review_evidence(path: str) -> Mapping[str, Any] | None:
         data = json.loads(file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    if (
+        not isinstance(data, dict)
+        or set(data) != _EVIDENCE_KEYS
+        or any(not isinstance(v, str) or v != "approved" for v in data.values())
+    ):
+        return None
+    return data
+
+
+def _probe_consistent(raw: Mapping[str, Any], scenario: Mapping[str, Any]) -> bool:
+    """True only when every identity and found-signal of a passed probe agrees."""
+    checks = raw.get("checks")
+    found = (
+        [c for c in checks if isinstance(c, Mapping) and c.get("name") == "scenario_found"]
+        if isinstance(checks, list)
+        else []
+    )
+    latest = scenario.get("latest_version")
+    return (
+        raw.get("tool") == _PROBE_TOOL
+        and raw.get("mode") == _PROBE_MODE
+        and raw.get("repository_connection_attempted") is True
+        and len(found) == 1
+        and found[0].get("status") in {"pass", "passed"}
+        and latest == SCENARIO_VERSION
+    )
+
+
+def _probe_error() -> dict[str, Any]:
+    """Class-only error; no untrusted probe text reaches the report."""
+    return {
+        "status": "error",
+        "side_effects": False,
+        "raw_rows_included": False,
+        "pk_values_included": False,
+        "scenario": {"name": SCENARIO_NAME, "version": SCENARIO_VERSION, "exists": False},
+        "error_type": "InconsistentScenarioProbe",
+    }
 
 
 def scenario_probe_to_gate_report(raw: object) -> dict[str, Any]:
     """Adapt the orchestrator's scenario probe output to the run-readiness contract.
 
-    Keeps only status, the fixed name/version and an ``exists`` flag; anything
-    unexpected becomes an error report that the readiness gate rejects.
+    Keeps only status, the fixed name/version and an ``exists`` flag. ``exists``
+    is True only when the probe is fully self-consistent; a ``passed`` probe
+    with any inconsistency is reported as a class-only error with
+    ``exists=False``. Anything else unexpected becomes an error report.
     """
     scenario = raw.get("scenario") if isinstance(raw, Mapping) else None
     if (
@@ -92,8 +155,11 @@ def scenario_probe_to_gate_report(raw: object) -> dict[str, Any]:
         or scenario.get("name") != SCENARIO_NAME
         or scenario.get("version") != SCENARIO_VERSION
     ):
-        return {"status": "error"}
-    return {
+        return _probe_error()
+    consistent = raw["status"] != "passed" or _probe_consistent(raw, scenario)
+    if not consistent:
+        return _probe_error()
+    report: dict[str, Any] = {
         "status": raw["status"],
         "side_effects": False,
         "raw_rows_included": False,
@@ -104,6 +170,7 @@ def scenario_probe_to_gate_report(raw: object) -> dict[str, Any]:
             "exists": raw["status"] == "passed",
         },
     }
+    return report
 
 
 def _default_mapping_probe() -> Mapping[str, Any]:
@@ -166,15 +233,45 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _safe_scalar(value: object) -> bool:
+    return isinstance(value, (bool, int, type(None))) or (
+        isinstance(value, str) and len(value) <= _MAX_TEXT
+    )
+
+
 def _clean(report: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep only scalar fields and the fixed scenario triple."""
+    """Keep only allowlisted scalar report fields and the scenario name/version/context."""
     out: dict[str, Any] = {}
     for key, value in report.items():
-        if isinstance(value, _SCALARS):
-            out[str(key)] = value
+        if key in _REPORT_FIELDS and _safe_scalar(value):
+            out[key] = value
         elif key == "scenario" and isinstance(value, Mapping):
-            out[key] = {str(k): v for k, v in value.items() if isinstance(v, _SCALARS)}
+            out[key] = {
+                k: v for k, v in value.items()
+                if k in _SCENARIO_FIELDS and _safe_scalar(v)
+            }
     return out
+
+
+def _output_path_usable(raw: str) -> Path | None:
+    """Resolve ``--out`` and check parent and existing-file write access without truncation."""
+    try:
+        if not raw:
+            return None
+        target = Path(raw).resolve()
+        if not target.parent.is_dir() or target.is_dir():
+            return None
+        if target.exists():
+            if not target.is_file():
+                return None
+            fd = os.open(target, os.O_WRONLY | os.O_APPEND)
+            os.close(fd)
+        fd, probe = tempfile.mkstemp(dir=target.parent, prefix=".odi68_probe_")
+        os.close(fd)
+        os.unlink(probe)
+    except (OSError, ValueError):
+        return None
+    return target
 
 
 def run(
@@ -192,11 +289,21 @@ def run(
     """Validate arguments, wire the callbacks, run the proof, emit the report."""
     out_stream = stdout if stdout is not None else sys.stdout
 
-    def emit(report: Mapping[str, Any], out_path: str | None) -> None:
+    def emit(report: Mapping[str, Any], out_path: Path | None) -> bool:
         text = json.dumps(_clean(report), indent=2, sort_keys=True)
         print(text, file=out_stream)
-        if out_path:
-            Path(out_path).write_text(text + "\n", encoding="utf-8")
+        if out_path is None:
+            return True
+        try:
+            out_path.write_text(text + "\n", encoding="utf-8")
+        except OSError:
+            print("report_write_failed", file=out_stream)
+            return False
+        return True
+
+    if any(a in {"--help", "-h"} for a in argv):
+        print(__doc__, file=out_stream)
+        return EXIT_PASSED
 
     try:
         args = _parser().parse_args(list(argv))
@@ -215,6 +322,11 @@ def run(
         for key in ("executor_review_status", "scenario_generation_review_status")
     ):
         emit(_blocked("blocked_review_evidence"), None)
+        return EXIT_BAD_ARGUMENTS
+
+    out_path = _output_path_usable(args.out)
+    if out_path is None:
+        emit(_blocked("blocked_output_path"), None)
         return EXIT_BAD_ARGUMENTS
 
     # Arguments are valid: only now resolve and call anything that can touch ODI or the DB.
@@ -236,7 +348,8 @@ def run(
         backup_creator=backup_creator or _default_backup_creator(),
         scenario_runner=scenario_runner or _default_scenario_runner(),
     )
-    emit(result, args.out)
+    if not emit(result, out_path):
+        return EXIT_REPORT_WRITE_FAILED
     return EXIT_PASSED if result.get("status") == "passed" else EXIT_NOT_PASSED
 
 

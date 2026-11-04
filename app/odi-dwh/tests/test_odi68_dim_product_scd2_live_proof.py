@@ -38,7 +38,7 @@ def _raw_scenario_probe():
         "tool": "odi.scenario_probe", "status": "passed", "mode": "scenario_finders_only",
         "side_effects": False, "repository_connection_attempted": True,
         "scenario": {"name": SCENARIO["name"], "version": "001", "latest_version": "001"},
-        "checks": [],
+        "checks": [{"name": "scenario_found", "status": "pass", "detail": "found"}],
     }
 
 
@@ -197,14 +197,16 @@ def test_exit_code_follows_executor_status_and_report_is_sanitized(evidence, tmp
 
 
 def test_scenario_probe_adapter_rejects_unexpected_shapes():
-    assert proof.scenario_probe_to_gate_report(None) == {"status": "error"}
-    assert proof.scenario_probe_to_gate_report({"status": "error"}) == {"status": "error"}
+    for malformed in (None, {"status": "error"}):
+        report = proof.scenario_probe_to_gate_report(malformed)
+        assert report["status"] == "error" and report["error_type"] == "InconsistentScenarioProbe"
+        assert report["scenario"]["exists"] is False
     raw = _raw_scenario_probe()
     raw["scenario"]["name"] = "OTHER"
-    assert proof.scenario_probe_to_gate_report(raw) == {"status": "error"}
+    assert proof.scenario_probe_to_gate_report(raw)["scenario"]["exists"] is False
     raw = _raw_scenario_probe()
     raw["side_effects"] = True
-    assert proof.scenario_probe_to_gate_report(raw) == {"status": "error"}
+    assert proof.scenario_probe_to_gate_report(raw)["scenario"]["exists"] is False
     absent = _raw_scenario_probe()
     absent["status"] = "attention_required"
     assert proof.scenario_probe_to_gate_report(absent)["scenario"]["exists"] is False
@@ -286,3 +288,126 @@ def test_script_is_not_a_route_and_defers_config_and_driver_imports():
     assert "Blueprint" not in text and "@app." not in text
     head = text.split("def _configured_ddl_connection")[0]
     assert "\nimport config" not in head and "\nimport oracledb" not in head
+
+
+# ---- review round 2 ----
+
+def test_report_is_allowlisted_in_stdout_and_file(evidence, tmp_path):
+    spy = Spy()
+    leaky = {
+        "status": "failed", "stage": "first_scenario_run", "error_type": "ScenarioRunError",
+        "target_count": 72,
+        "session_id": "SID-LEAK-1", "repository_id": "REPO-LEAK-2", "pk_value": "PK-LEAK-3",
+        "message": "password=hunter2-LEAK", "token": "TOKEN-LEAK-4",
+        "scenario": {**SCENARIO, "session_id": "SID-LEAK-5", "repository_id": "REPO-LEAK-6"},
+    }
+    wiring = _wire(spy, executor=spy("executor", leaky))
+    assert proof.run(_flat(_args(evidence, tmp_path)), **wiring) == proof.EXIT_NOT_PASSED
+    stdout = wiring["stdout"].getvalue()
+    written = (tmp_path / "out.json").read_text()
+    for text in (stdout, written):
+        assert "LEAK" not in text and "hunter2" not in text
+        report = json.loads(text)
+        assert report["status"] == "failed" and report["target_count"] == 72
+        assert report["scenario"] == SCENARIO
+        assert set(report) <= proof._REPORT_FIELDS | {"scenario"}
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda r: r.update(status="passed", repository_connection_attempted=False),
+    lambda r: r.update(checks=[]),
+    lambda r: r.update(checks=[{"name": "scenario_found", "status": "fail"}]),
+    lambda r: r.update(tool="odi.other"),
+    lambda r: r.update(mode="other_mode"),
+    lambda r: r.pop("repository_connection_attempted"),
+    lambda r: r["scenario"].pop("latest_version"),
+    lambda r: r["scenario"].update(latest_version="002"),
+])
+def test_scenario_probe_adapter_requires_consistent_passed_probe(mutate):
+    raw = _raw_scenario_probe()
+    assert proof.scenario_probe_to_gate_report(raw)["scenario"]["exists"] is True
+    mutate(raw)
+    report = proof.scenario_probe_to_gate_report(raw)
+    assert report.get("scenario", {}).get("exists", False) is False
+    assert report["status"] == "error"
+    assert report.get("error_type", "InconsistentScenarioProbe") == "InconsistentScenarioProbe"
+
+
+def test_scenario_probe_adapter_old_fixture_without_found_check_is_not_exists():
+    raw = _raw_scenario_probe()
+    raw["checks"] = []
+    report = proof.scenario_probe_to_gate_report(raw)
+    assert report["scenario"]["exists"] is False
+    assert report["error_type"] == "InconsistentScenarioProbe"
+
+
+@pytest.mark.parametrize("kind", ["missing_parent", "is_directory", "empty"])
+def test_invalid_out_path_exits_2_before_any_callback(evidence, tmp_path, kind):
+    spy = Spy()
+    values = _args(evidence, tmp_path)
+    values["--out"] = {
+        "missing_parent": str(tmp_path / "nope" / "out.json"),
+        "is_directory": str(tmp_path),
+        "empty": "",
+    }[kind]
+    wiring = _wire(spy)
+    assert proof.run(_flat(values), **wiring) == proof.EXIT_BAD_ARGUMENTS
+    assert spy.calls == []
+    assert json.loads(wiring["stdout"].getvalue())["status"] == "blocked_output_path"
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_existing_unwritable_out_path_is_rejected_before_callbacks(evidence, tmp_path, monkeypatch):
+    target = tmp_path / "out.json"
+    target.write_text("original", encoding="utf-8")
+    real_open = proof.os.open
+
+    def deny_existing(path, flags, *args, **kwargs):
+        if Path(path) == target.resolve():
+            raise PermissionError("read-only target")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(proof.os, "open", deny_existing)
+    spy = Spy()
+    wiring = _wire(spy)
+    assert proof.run(_flat(_args(evidence, tmp_path)), **wiring) == proof.EXIT_BAD_ARGUMENTS
+    assert spy.calls == []
+    assert target.read_text(encoding="utf-8") == "original"
+    assert json.loads(wiring["stdout"].getvalue())["status"] == "blocked_output_path"
+
+
+def test_report_write_failure_exits_3_and_stdout_keeps_report(evidence, tmp_path, monkeypatch):
+    def boom(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    spy = Spy()
+    wiring = _wire(spy, executor=spy("executor", {"status": "passed", "target_count": 72}))
+    monkeypatch.setattr(Path, "write_text", boom)
+    assert proof.run(_flat(_args(evidence, tmp_path)), **wiring) == proof.EXIT_REPORT_WRITE_FAILED
+    stdout = wiring["stdout"].getvalue()
+    assert '"status": "passed"' in stdout and '"target_count": 72' in stdout
+    assert "report_write_failed" in stdout and "disk full" not in stdout
+
+
+@pytest.mark.parametrize("payload", [
+    {"executor_review_status": "approved", "scenario_generation_review_status": "approved",
+     "note": "extra"},
+    {"executor_review_status": "approved", "scenario_generation_review_status": ["approved"]},
+    {"executor_review_status": True, "scenario_generation_review_status": "approved"},
+    {"executor_review_status": "Approved", "scenario_generation_review_status": "approved"},
+])
+def test_review_evidence_requires_exactly_two_approved_strings(tmp_path, payload):
+    path = tmp_path / "review.json"
+    path.write_text(json.dumps(payload))
+    spy = Spy()
+    wiring = _wire(spy)
+    assert proof.run(_flat(_args(path, tmp_path)), **wiring) == proof.EXIT_BAD_ARGUMENTS
+    assert spy.calls == []
+    assert json.loads(wiring["stdout"].getvalue())["status"] == "blocked_review_evidence"
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_help_documents_exit_codes():
+    out = io.StringIO()
+    assert proof.run(["--help"], stdout=out) == 0
+    assert "3 the run finished but the report file could not be written" in " ".join(out.getvalue().split())
