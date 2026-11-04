@@ -1,0 +1,410 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dwh-studio:metadata-graph:1.0.0",
+  "title": "DWH Studio metadata graph export",
+  "description": "Version 1.0.0 neutral graph of logical and physical metadata, ODI objects, grants, policies, and findings. Hidden objects are omitted or replaced by an anonymous placeholder.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "generated_at",
+    "producer",
+    "redaction_policy",
+    "counts",
+    "nodes",
+    "edges",
+    "conflicts"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "1.0.0"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "producer": {
+      "const": "dwh-studio"
+    },
+    "redaction_policy": {
+      "$ref": "#/$defs/redaction_policy"
+    },
+    "counts": {
+      "$ref": "#/$defs/counts"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/node"
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/edge"
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/conflict"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["redaction_policy"],
+        "properties": {
+          "redaction_policy": {
+            "required": ["hidden_object_handling"],
+            "properties": {
+              "hidden_object_handling": {
+                "const": "omit"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "not": {
+                "required": ["visibility"],
+                "properties": {
+                  "visibility": {
+                    "const": "hidden"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "stable_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$",
+      "description": "Stable identifier within one document. Placeholder ids must be opaque."
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter", "evidence_ref"],
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "evidence_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "Pointer to the evidence the adapter used. Hidden placeholders use a non-identifying ref."
+        }
+      }
+    },
+    "redaction_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hidden_object_handling",
+        "placeholder_label",
+        "placeholder_type",
+        "placeholder_visibility",
+        "strip_attributes",
+        "description"
+      ],
+      "properties": {
+        "hidden_object_handling": {
+          "enum": ["omit", "placeholder"]
+        },
+        "placeholder_label": {
+          "const": "<hidden>"
+        },
+        "placeholder_type": {
+          "const": "unknown"
+        },
+        "placeholder_visibility": {
+          "const": "hidden"
+        },
+        "strip_attributes": {
+          "const": true
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges", "conflicts", "hidden_placeholders"],
+      "properties": {
+        "nodes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "edges": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conflicts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hidden_placeholders": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "label",
+        "platform",
+        "source_adapter",
+        "captured_at",
+        "visibility",
+        "sensitivity",
+        "confidence",
+        "status",
+        "provenance"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/stable_id"
+        },
+        "type": {
+          "enum": [
+            "logical_entity",
+            "physical_table",
+            "column",
+            "schema",
+            "odi_mapping",
+            "odi_scenario",
+            "grant",
+            "policy",
+            "finding",
+            "unknown"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "platform": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "source_adapter": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "captured_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "visibility": {
+          "enum": ["public", "internal", "restricted", "hidden"]
+        },
+        "sensitivity": {
+          "enum": ["none", "low", "medium", "high", "pii", "secret"]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "status": {
+          "enum": ["known", "unknown", "missing", "ambiguous", "conflicting"]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Adapter-specific facts. Forbidden on hidden placeholders."
+        },
+        "conflict_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/stable_id"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["visibility"],
+            "properties": {
+              "visibility": {
+                "const": "hidden"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "unknown"
+              },
+              "label": {
+                "const": "<hidden>"
+              },
+              "visibility": {
+                "const": "hidden"
+              }
+            },
+            "not": {
+              "required": ["attributes"]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["status"],
+            "properties": {
+              "status": {
+                "const": "conflicting"
+              }
+            }
+          },
+          "then": {
+            "required": ["conflict_ids"]
+          },
+          "else": {
+            "not": {
+              "required": ["conflict_ids"]
+            }
+          }
+        }
+      ]
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source_id",
+        "target_id",
+        "relationship",
+        "explicit",
+        "provenance",
+        "confidence",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/stable_id"
+        },
+        "source_id": {
+          "$ref": "#/$defs/stable_id"
+        },
+        "target_id": {
+          "$ref": "#/$defs/stable_id"
+        },
+        "relationship": {
+          "enum": [
+            "contains",
+            "references_fk",
+            "lineage",
+            "maps_to",
+            "grants",
+            "classified_as",
+            "conflicts_with",
+            "unknown"
+          ]
+        },
+        "explicit": {
+          "type": "boolean",
+          "description": "True when the relationship was declared. False when it was inferred."
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "status": {
+          "enum": ["known", "unknown", "missing", "ambiguous", "conflicting"]
+        },
+        "conflict_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/stable_id"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["status"],
+            "properties": {
+              "status": {
+                "const": "conflicting"
+              }
+            }
+          },
+          "then": {
+            "required": ["conflict_ids"]
+          },
+          "else": {
+            "not": {
+              "required": ["conflict_ids"]
+            }
+          }
+        }
+      ]
+    },
+    "conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "subject_ids", "summary", "kind"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/stable_id"
+        },
+        "subject_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/stable_id"
+          }
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "kind": {
+          "enum": [
+            "value_disagreement",
+            "missing_counterpart",
+            "identity_ambiguity",
+            "unknown"
+          ]
+        }
+      }
+    }
+  }
+}

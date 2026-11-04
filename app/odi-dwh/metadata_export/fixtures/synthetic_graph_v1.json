@@ -1,0 +1,422 @@
+{
+  "contract_version": "1.0.0",
+  "generated_at": "2026-01-15T12:00:01Z",
+  "producer": "dwh-studio",
+  "redaction_policy": {
+    "hidden_object_handling": "placeholder",
+    "placeholder_label": "<hidden>",
+    "placeholder_type": "unknown",
+    "placeholder_visibility": "hidden",
+    "strip_attributes": true,
+    "description": "Hidden objects are replaced by anonymous placeholders. Business labels and attributes are removed before the document is released."
+  },
+  "counts": {
+    "nodes": 13,
+    "edges": 11,
+    "conflicts": 1,
+    "hidden_placeholders": 1
+  },
+  "nodes": [
+    {
+      "id": "n-schema-sales",
+      "type": "schema",
+      "label": "SALES_SYNTH",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "public",
+      "sensitivity": "none",
+      "confidence": 1.0,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-schema-sales"
+      },
+      "attributes": {
+        "layer": "synthetic"
+      }
+    },
+    {
+      "id": "n-table-orders",
+      "type": "physical_table",
+      "label": "ORDERS_SYNTH",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "internal",
+      "sensitivity": "low",
+      "confidence": 0.95,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-table-orders"
+      },
+      "attributes": {
+        "layer": "synthetic",
+        "row_estimate_bucket": "small"
+      }
+    },
+    {
+      "id": "n-col-order-id",
+      "type": "column",
+      "label": "ORDER_ID",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "internal",
+      "sensitivity": "none",
+      "confidence": 0.99,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-col-order-id"
+      },
+      "attributes": {
+        "nullable": false
+      }
+    },
+    {
+      "id": "n-col-email",
+      "type": "column",
+      "label": "EMAIL_SYNTH",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "restricted",
+      "sensitivity": "pii",
+      "confidence": 0.9,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-col-email"
+      },
+      "attributes": {
+        "nullable": true,
+        "classification_hint": "contact"
+      }
+    },
+    {
+      "id": "n-logical-order",
+      "type": "logical_entity",
+      "label": "Synthetic Order",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "public",
+      "sensitivity": "none",
+      "confidence": 0.8,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-logical-order"
+      },
+      "attributes": {
+        "business_name": "Synthetic Order"
+      }
+    },
+    {
+      "id": "n-mapping-orders",
+      "type": "odi_mapping",
+      "label": "SYN_LOAD_ORDERS",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "internal",
+      "sensitivity": "low",
+      "confidence": 0.85,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-mapping-orders"
+      },
+      "attributes": {
+        "phase": "static"
+      }
+    },
+    {
+      "id": "n-scenario-orders",
+      "type": "odi_scenario",
+      "label": "SYN_LOAD_ORDERS_SCEN",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "internal",
+      "sensitivity": "medium",
+      "confidence": 0.45,
+      "status": "ambiguous",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-scenario-orders"
+      },
+      "attributes": {
+        "candidate_count": 2
+      }
+    },
+    {
+      "id": "n-grant-analyst",
+      "type": "grant",
+      "label": "SYN_ROLE_READ",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "restricted",
+      "sensitivity": "medium",
+      "confidence": 0.7,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-grant-analyst"
+      },
+      "attributes": {
+        "privilege": "select"
+      }
+    },
+    {
+      "id": "n-policy-contact",
+      "type": "policy",
+      "label": "SYN_CONTACT_POLICY",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "internal",
+      "sensitivity": "high",
+      "confidence": 1.0,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-policy-contact"
+      },
+      "attributes": {
+        "rule": "mask_contact"
+      }
+    },
+    {
+      "id": "n-finding-nullability",
+      "type": "finding",
+      "label": "SYN_NULLABILITY_FINDING",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "internal",
+      "sensitivity": "low",
+      "confidence": 0.55,
+      "status": "conflicting",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-finding-nullability"
+      },
+      "attributes": {
+        "topic": "nullability"
+      },
+      "conflict_ids": ["cfl-nullability"]
+    },
+    {
+      "id": "n-unknown-object",
+      "type": "unknown",
+      "label": "unclassified_synthetic",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "internal",
+      "sensitivity": "none",
+      "confidence": 0.2,
+      "status": "unknown",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-unknown-object"
+      },
+      "attributes": {
+        "reason": "unclassified"
+      }
+    },
+    {
+      "id": "n-missing-audit-col",
+      "type": "column",
+      "label": "EXPECTED_AUDIT_COL",
+      "platform": "synthetic",
+      "source_adapter": "synthetic_catalog",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "internal",
+      "sensitivity": "none",
+      "confidence": 0.0,
+      "status": "missing",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#n-missing-audit-col"
+      },
+      "attributes": {
+        "reason": "not_observed"
+      }
+    },
+    {
+      "id": "n-hidden-001",
+      "type": "unknown",
+      "label": "<hidden>",
+      "platform": "redacted",
+      "source_adapter": "redaction",
+      "captured_at": "2026-01-15T12:00:00Z",
+      "visibility": "hidden",
+      "sensitivity": "secret",
+      "confidence": 1.0,
+      "status": "known",
+      "provenance": {
+        "adapter": "redaction",
+        "evidence_ref": "redacted"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-schema-contains-table",
+      "source_id": "n-schema-sales",
+      "target_id": "n-table-orders",
+      "relationship": "contains",
+      "explicit": true,
+      "confidence": 1.0,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-schema-contains-table"
+      }
+    },
+    {
+      "id": "e-table-contains-order-id",
+      "source_id": "n-table-orders",
+      "target_id": "n-col-order-id",
+      "relationship": "contains",
+      "explicit": true,
+      "confidence": 1.0,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-table-contains-order-id"
+      }
+    },
+    {
+      "id": "e-table-contains-email",
+      "source_id": "n-table-orders",
+      "target_id": "n-col-email",
+      "relationship": "contains",
+      "explicit": true,
+      "confidence": 1.0,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-table-contains-email"
+      }
+    },
+    {
+      "id": "e-email-references-hidden",
+      "source_id": "n-col-email",
+      "target_id": "n-hidden-001",
+      "relationship": "references_fk",
+      "explicit": true,
+      "confidence": 0.5,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-email-references-hidden"
+      }
+    },
+    {
+      "id": "e-order-id-lineage-missing",
+      "source_id": "n-col-order-id",
+      "target_id": "n-missing-audit-col",
+      "relationship": "lineage",
+      "explicit": false,
+      "confidence": 0.3,
+      "status": "ambiguous",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-order-id-lineage-missing"
+      }
+    },
+    {
+      "id": "e-logical-maps-table",
+      "source_id": "n-logical-order",
+      "target_id": "n-table-orders",
+      "relationship": "maps_to",
+      "explicit": true,
+      "confidence": 0.9,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-logical-maps-table"
+      }
+    },
+    {
+      "id": "e-mapping-maps-table",
+      "source_id": "n-mapping-orders",
+      "target_id": "n-table-orders",
+      "relationship": "maps_to",
+      "explicit": true,
+      "confidence": 0.95,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-mapping-maps-table"
+      }
+    },
+    {
+      "id": "e-grant-grants-table",
+      "source_id": "n-grant-analyst",
+      "target_id": "n-table-orders",
+      "relationship": "grants",
+      "explicit": true,
+      "confidence": 1.0,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-grant-grants-table"
+      }
+    },
+    {
+      "id": "e-email-classified-policy",
+      "source_id": "n-col-email",
+      "target_id": "n-policy-contact",
+      "relationship": "classified_as",
+      "explicit": true,
+      "confidence": 1.0,
+      "status": "known",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-email-classified-policy"
+      }
+    },
+    {
+      "id": "e-finding-conflicts-order-id",
+      "source_id": "n-finding-nullability",
+      "target_id": "n-col-order-id",
+      "relationship": "conflicts_with",
+      "explicit": false,
+      "confidence": 0.55,
+      "status": "conflicting",
+      "conflict_ids": ["cfl-nullability"],
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-finding-conflicts-order-id"
+      }
+    },
+    {
+      "id": "e-unknown-relates-schema",
+      "source_id": "n-unknown-object",
+      "target_id": "n-schema-sales",
+      "relationship": "unknown",
+      "explicit": false,
+      "confidence": 0.1,
+      "status": "unknown",
+      "provenance": {
+        "adapter": "synthetic_catalog",
+        "evidence_ref": "fixture:synthetic_graph_v1#e-unknown-relates-schema"
+      }
+    }
+  ],
+  "conflicts": [
+    {
+      "id": "cfl-nullability",
+      "subject_ids": ["n-finding-nullability", "e-finding-conflicts-order-id"],
+      "summary": "Synthetic adapters disagree on whether ORDER_ID is mandatory.",
+      "kind": "value_disagreement"
+    }
+  ]
+}
