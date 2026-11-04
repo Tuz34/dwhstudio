@@ -726,11 +726,14 @@ try {
         println "WARNING: Physical node not found, KM assignment skipped"
     }
     
-    mapping.validate()
+    def vr = mapping.validate()
+    if (vr instanceof Boolean && !vr) throw new IllegalStateException("Mapping validation failed")
+    if (vr != null && !(vr instanceof Boolean) && vr.metaClass.respondsTo(vr, 'isValid') && !vr.isValid()) throw new IllegalStateException("Mapping validation failed")
     boolean replacedExisting = false
     if (preserveExistingOnFailure) {
         em.remove(existingMapping)
         em.flush()
+        // After a replace the new mapping has a new internal id; existing <MAPPING>_SCN scenarios are not re-pointed and must be regenerated.
         mapping.setName(mName)
         if (mapping.getName() == null || !mName.equals(mapping.getName())) {
             throw new IllegalStateException("Mapping rename-swap failed")

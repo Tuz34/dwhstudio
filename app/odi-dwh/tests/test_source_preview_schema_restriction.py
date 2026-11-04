@@ -32,10 +32,39 @@ def test_unlisted_owner_is_rejected_by_the_choke_point(monkeypatch):
     assert "SYS" not in str(captured.value)
 
 
-def test_empty_allowlist_keeps_historical_unrestricted_preview(monkeypatch):
+def test_empty_allowlist_fails_closed_to_hr_and_sh(app_client, monkeypatch):
+    import source_connector
+
     monkeypatch.setattr(config, "SOURCE_ORACLE_SCHEMAS", [])
+    calls: list[str] = []
+
+    class FakeSourceConnector:
+        def sample_data(self, table_name, limit):
+            calls.append(table_name)
+            assert limit == 3
+            return pd.DataFrame([{"STATUS_CODE": "OK"}])
+
+    monkeypatch.setattr(source_connector, "get_source_connector", lambda: FakeSourceConnector())
 
     assert require_source_schema("HR") == "HR"
+    assert require_source_schema("SH") == "SH"
+    with pytest.raises(SourceSchemaNotAllowed) as captured:
+        require_source_schema("SYS")
+    assert str(captured.value) == "Source schema is not allowed."
+    assert "SYS" not in str(captured.value)
+
+    hr = app_client.get("/api/source/preview/HR.EMPLOYEES")
+    sh = app_client.get("/api/source/preview/SH.PRODUCTS")
+    denied = app_client.get("/api/source/preview/SYS.USER$")
+
+    assert hr.status_code == 200
+    assert sh.status_code == 200
+    assert calls == ["HR.EMPLOYEES", "SH.PRODUCTS"]
+    assert denied.status_code == 403
+    assert denied.get_json() == {"error": "Source schema is not allowed."}
+    body = denied.get_data(as_text=True)
+    assert "SYS" not in body
+    assert "USER$" not in body
 
 
 def test_oracle_sample_data_binds_limit_and_skips_sql_for_unlisted_owner(monkeypatch):

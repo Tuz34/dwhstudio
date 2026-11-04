@@ -69,11 +69,10 @@ def _configured_schema_name(item: object) -> str | None:
 
 
 def configured_source_schemas() -> frozenset[str]:
-    """Return the configured source schema allowlist.
+    """Return configured source schema names, ignoring invalid entries.
 
-    An empty SOURCE_ORACLE_SCHEMAS value means no schema restriction is
-    configured. A non-empty list is closed: every preview owner must be in it.
-    Invalid entries are ignored and never become SQL.
+    An empty result means nothing was configured. It is not an open allowlist:
+    require_source_schema fails closed to HR and SH in that case.
     """
     raw_values = getattr(config, "SOURCE_ORACLE_SCHEMAS", None) or []
     return frozenset(
@@ -82,10 +81,14 @@ def configured_source_schemas() -> frozenset[str]:
 
 
 def require_source_schema(owner: str) -> str:
-    """Single choke point for source-preview schema authorization."""
+    """Single choke point for source-preview schema authorization.
+
+    A configured allowlist is closed. An empty SOURCE_ORACLE_SCHEMAS value
+    fails closed to the historical HR and SH default used by ai_helpers.
+    """
     normalized = normalize_source_identifier(owner)
-    allowed = configured_source_schemas()
-    if allowed and normalized not in allowed:
+    allowed = configured_source_schemas() or frozenset({"HR", "SH"})
+    if normalized not in allowed:
         logger.info("Source schema preview rejected for a sanitized identifier.")
         raise SourceSchemaNotAllowed()
     return normalized
