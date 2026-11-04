@@ -187,6 +187,18 @@ def _groovy_output_failed(text: str) -> bool:
             return True
     return False
 
+
+def groovy_sync_failure_reason(output: str) -> str | None:
+    """Return a credential-safe reason when a datastore sync did not succeed."""
+    if not isinstance(output, str):
+        return "ODI Groovy returned an invalid result."
+    if not _groovy_output_failed(output):
+        return None
+    error_type = re.search(r"\berror_type=([A-Za-z][A-Za-z0-9_$]{0,127})\b", output)
+    if error_type:
+        return f"ODI Groovy action failed ({error_type.group(1)})."
+    return "ODI Groovy output reported an error."
+
 def _strict_structured_error_output(script_name: str, text: str) -> bool:
     """Allow only reviewed fixed error envelopes to reach strict normalizers."""
     contract = _STRICT_STRUCTURED_ERROR_CONTRACTS.get(script_name)

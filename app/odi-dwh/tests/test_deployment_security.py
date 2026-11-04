@@ -62,21 +62,25 @@ def test_network_profile_requires_configured_auth():
 
 
 def test_lan_pilot_profile_reports_required_controls():
-    profile = validate_deployment_security(
-        _settings(
-            deployment_profile="lan-pilot",
-            app_host="0.0.0.0",
-            auth_enabled=True,
-            auth_configured=True,
-            ip_allowlist=["10.0.0.0/24"],
-        )
+    settings = _settings(
+        deployment_profile="lan-pilot",
+        app_host="0.0.0.0",
+        auth_enabled=True,
+        auth_configured=True,
+        ip_allowlist=["10.0.0.0/24"],
     )
+
+    with pytest.raises(RuntimeError, match="configured Flask secret key"):
+        validate_deployment_security(settings)
+
+    profile = validate_deployment_security({**settings, "flask_secret_key_configured": True})
 
     assert profile["profile"] == "lan-pilot"
     assert profile["network_exposed"] is True
     assert profile["status"] == "review-required"
     assert "auth" in profile["active_controls"]
     assert "ip_allowlist" in profile["active_controls"]
+    assert "session_key_configured" in profile["active_controls"]
 
 
 def test_on_prem_hardened_requires_tls_boundary_and_secret_key():
