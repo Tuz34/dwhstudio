@@ -36,6 +36,34 @@ def test_strong_session_key_is_used_as_configured(caplog):
     assert not caplog.records
 
 
+@pytest.mark.parametrize("length, configured", [(15, False), (16, True)])
+def test_session_key_length_boundary(length, configured):
+    flask_app = Flask(__name__)
+    candidate = "x" * length
+
+    assert _configure_flask_secret_key(flask_app, candidate) is configured
+    assert (flask_app.secret_key == candidate) is configured
+
+
+def test_whitespace_padded_placeholder_uses_runtime_key():
+    flask_app = Flask(__name__)
+    candidate = "  REPLACE_ME  "
+
+    assert _configure_flask_secret_key(flask_app, candidate) is False
+    assert flask_app.secret_key != candidate
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    ["replace_me_with_real_key", "change_me_now_with_suffix", "DEFAULT_RANDOM_SESSION_KEY"],
+)
+def test_placeholder_prefix_uses_runtime_key(candidate):
+    flask_app = Flask(__name__)
+
+    assert _configure_flask_secret_key(flask_app, candidate) is False
+    assert flask_app.secret_key != candidate
+
+
 def test_network_profile_rejects_placeholder_session_key():
     flask_app = Flask(__name__)
     configured = _configure_flask_secret_key(flask_app, "REPLACE_ME")
@@ -48,6 +76,20 @@ def test_network_profile_rejects_placeholder_session_key():
             "auth_enabled": True,
             "auth_configured": True,
             "flask_secret_key_configured": configured,
+        })
+
+
+def test_on_prem_hardened_profile_requires_configured_session_key():
+    with pytest.raises(RuntimeError, match="configured Flask secret key"):
+        validate_deployment_security({
+            "environment": "dev",
+            "deployment_profile": "on-prem-hardened",
+            "app_host": "0.0.0.0",
+            "auth_enabled": True,
+            "auth_configured": True,
+            "flask_secret_key_configured": False,
+            "tls_enabled": True,
+            "ip_allowlist": ["10.0.0.0/24"],
         })
 
 

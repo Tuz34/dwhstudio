@@ -112,7 +112,10 @@ def _configure_flask_secret_key(flask_app: Flask, configured_key: str | None) ->
     """Use a configured signing key only when it is neither weak nor a placeholder."""
     candidate = configured_key if isinstance(configured_key, str) else ""
     normalized = candidate.strip()
-    configured = len(normalized) >= 16 and normalized.casefold() not in _WEAK_FLASK_SECRET_KEYS
+    normalized_key = normalized.casefold()
+    configured = len(normalized) >= 16 and not any(
+        normalized_key.startswith(token) for token in _WEAK_FLASK_SECRET_KEYS
+    )
     if configured:
         flask_app.secret_key = candidate
     else:
