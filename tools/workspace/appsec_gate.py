@@ -110,6 +110,8 @@ APPROVAL_REQUIRED_PATHS = {
     "/api/mapping/snapshot",
     "/api/mapping/update",
     "/api/rollback/<batch_id>",
+    "/api/scd2/generate",
+    "/api/scd2/run",
     "/api/lineage/refresh",
     "/api/schema-changes/detect",
     "/api/alerts/acknowledge",
