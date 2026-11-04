@@ -41,22 +41,22 @@ def oracle_get_table_constraints(table_name: str) -> str:
         df = db.get_table_constraints(table_name)
         return df.to_json(orient='records', force_ascii=False)
     except Exception as e:
-        return f"Constraint Hatasi: {str(e)}"
+        return f"Constraint error: {str(e)}"
 
 @mcp.tool()
 def oracle_execute_readonly_query(sql: str) -> str:
     """Run READ-ONLY SELECT queries in Oracle. (Used for testing and analysis)"""
     if _FORBIDDEN_SQL.search(sql):
-        return "GUVENLIK HATASI: Only SELECT queries are allowed."
+        return "SECURITY ERROR: Only SELECT queries are allowed."
     if not re.search(r'\bSELECT\b', sql, re.IGNORECASE):
-        return "GUVENLIK HATASI: Query must start with SELECT."
+        return "SECURITY ERROR: Query must start with SELECT."
 
     try:
         limited_sql = f"SELECT * FROM ({sql}) WHERE ROWNUM <= 100"
         df = db.execute_select(limited_sql)
         return df.to_json(orient='records', force_ascii=False)
     except Exception as e:
-        return f"Sorgu Hatasi: {str(e)}"
+        return f"Query error: {str(e)}"
 
 if __name__ == "__main__":
     # Run the MCP server over STDIO (invoked as a subprocess by Claude/LangChain)

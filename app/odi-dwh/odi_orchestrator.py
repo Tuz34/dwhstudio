@@ -445,7 +445,7 @@ class OdiOrchestrator:
 
         Args:
             expressions: Dictionary of custom column mappings. Example:
-                {"SKEY": "NVL(JOIN.SKEY, -1)"} — SRC./JOIN. prefix'leri Groovy'de cozumlenir.
+                {"SKEY": "NVL(JOIN.SKEY, -1)"} — SRC./JOIN. prefixes are resolved in Groovy.
             join_table: LEFT Name of table to JOIN (e.g. SKEY_PROD_PRODUCT).
             join_model: Model of the joined table (default: tgt_model).
             join_condition: Join condition (e.g. "JOIN.NATURAL_KEY = TO_CHAR(SRC.ProductID)").
@@ -453,7 +453,7 @@ class OdiOrchestrator:
             ikm_name: Full IKM name (e.g. "IKM Oracle Incremental Update"). Searched automatically if omitted.
             lkm_name: Full LKM name (e.g. "LKM SQL to Oracle (Built-In)"). Searched automatically if omitted.
             filter_condition: Filter applied to the source table (e.g. "NOT EXISTS (...)").
-            truncate_target_table: IKM Oracle Insert option override. None ise script default'una dokunulmaz.
+            truncate_target_table: IKM Oracle Insert option override. If None, the script default remains unchanged.
             required_update_key_columns: Mapping creation must fail unless the
                 target datastore exposes an update key with exactly these columns.
         """
@@ -614,7 +614,7 @@ class OdiOrchestrator:
             expressions: Column-to-expression mapping dictionary.
 
         Returns:
-            {"valid": True} veya {"valid": False, "errors": {"COL": "ORA-..."}}
+            {"valid": True} or {"valid": False, "errors": {"COL": "ORA-..."}}
         """
         import re as _re
         simple_ref_re = _re.compile(r'^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$')

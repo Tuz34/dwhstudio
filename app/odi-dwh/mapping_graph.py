@@ -374,7 +374,7 @@ def node_skip_skey(state: MappingState) -> dict:
     return {
         "current_step": "skip_skey",
         "skey_result": {"skipped": True},
-        "log": _add_log(state, "create_skey", "SKIPPED", "SKEY istenmedi"),
+        "log": _add_log(state, "create_skey", "SKIPPED", "SKEY not requested"),
         "completed_steps": list(state.get("completed_steps", [])) + ["skip_skey"],
     }
 
@@ -592,7 +592,7 @@ def get_graph(use_memory_checkpoint: bool = True):
     """Return the compiled graph, with or without checkpointing.
 
     Args:
-        use_memory_checkpoint: True ise MemorySaver ile checkpoint aktif.
+        use_memory_checkpoint: If True, checkpointing is enabled with MemorySaver.
             SQLiteSaver can be used in production.
 
     Returns:
@@ -600,7 +600,7 @@ def get_graph(use_memory_checkpoint: bool = True):
     """
     builder = build_mapping_graph()
 
-    # skey_check sanal node'u ekle
+    # Add the virtual skey_check node
     builder.add_node("skey_check", _skey_check_passthrough)
 
     checkpointer = MemorySaver() if use_memory_checkpoint else None
@@ -622,7 +622,7 @@ def run_mapping_graph(
     Args:
         user_prompt: Natural-language request (optional).
         params: Structured parameters (optional). Used if user_prompt is not provided.
-        require_approval: True ise stop at the preview step.
+        require_approval: If True, stop at the preview step.
         thread_id: Checkpoint thread ID. A UUID is generated if omitted.
 
     Returns:

@@ -361,7 +361,7 @@ class MappingStateManager:
             elif is_terminal(normalized_status) and normalized_status == SUCCEEDED:
                 _push_success_to_rag(state, normalized_status, batch_id, completed_text)
         except Exception as exc:
-            logger.debug("RAG yazma atlandi: %s", exc)
+            logger.debug("RAG write skipped: %s", exc)
 
     def get_by_mapping(self, mapping_name: str) -> dict[str, Any] | None:
         conn = self._get_conn()

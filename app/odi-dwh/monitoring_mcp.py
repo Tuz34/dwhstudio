@@ -5,12 +5,12 @@ Monitoring MCP Server — READ-ONLY Monitoring & DQ Tools
 6 tool:
   - mon_etl_job_metrics      : ODI session durations, row counts, error rates
   - mon_data_freshness       : latest load dates from ETL_WATERMARK + day difference
-  - mon_tablespace_usage     : Oracle tablespace doluluk yuzdeleri
+  - mon_tablespace_usage     : Oracle tablespace usage percentages
   - mon_dq_score             : Table-level DQ score (individual or aggregate)
-  - mon_schema_changes       : schema_change_detector'dan son degisiklikler
+  - mon_schema_changes       : latest changes from schema_change_detector
   - mon_alert_summary        : unapproved alerts from ALERT_LOG
 
-Tum araclar READ-ONLY'dir. INSERT/UPDATE/DELETE yasaktir.
+All tools are READ-ONLY. INSERT/UPDATE/DELETE are prohibited.
 """
 
 import json
@@ -120,7 +120,7 @@ def mon_data_freshness() -> str:
 # ── Tool 3: Tablespace Usage ────────────────────────────────────────────────
 
 def mon_tablespace_usage() -> str:
-    """Oracle tablespace doluluk yuzdeleri."""
+    """Oracle tablespace usage percentages."""
     conn = _get_conn()
     cursor = conn.cursor()
     try:
@@ -230,7 +230,7 @@ def mon_dq_score(owner: str = "DWH", table_name: str = "") -> str:
 # ── Tool 5: Schema Changes ──────────────────────────────────────────────────
 
 def mon_schema_changes(limit: int = 20) -> str:
-    """AUDIT_USER.SCHEMA_HASH'ten son sema degisikliklerini getirir."""
+    """Returns recent schema changes from AUDIT_USER.SCHEMA_HASH."""
     try:
         from schema_change_detector import get_recent_changes
         changes = get_recent_changes(limit=limit)

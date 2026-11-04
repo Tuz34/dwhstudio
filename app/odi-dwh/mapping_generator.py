@@ -770,7 +770,7 @@ class MappingGenerator:
         """
         if params is None:
             logger.error("validate_params received None!")
-            raise ValueError("Parametreler bos (None) olamaz.")
+            raise ValueError("Parameters cannot be empty (None).")
 
         validated = {}
 

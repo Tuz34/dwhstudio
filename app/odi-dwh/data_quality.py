@@ -816,7 +816,7 @@ class DataQualityManager:
                 self.insert_error_record(
                     owner, table, row_data, rule.rule_name,
                     rule.column, rule.severity,
-                    f"{rule.column} kolonu NULL olamaz"
+                    f"{rule.column} column must not be NULL"
                 )
         finally:
             cursor.close()
@@ -841,7 +841,7 @@ class DataQualityManager:
                 self.insert_error_record(
                     owner, table, row_data, rule.rule_name,
                     rule.column, rule.severity,
-                    f"{rule.column} degeri {min_year}-{max_year} araliginda olmali"
+                    f"{rule.column} value must be within the {min_year}-{max_year} range"
                 )
         finally:
             cursor.close()
