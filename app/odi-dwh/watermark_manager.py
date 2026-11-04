@@ -9,6 +9,21 @@ Usage:
   from watermark_manager import WatermarkManager
   wm = WatermarkManager()
   delta_sql = wm.get_delta_query("DWH", "SALES", "MODIFIED_DATE")
+
+Incremental append transaction model (security findings #4 and #8):
+  execute_incremental_append() runs everything on ONE target connection:
+    INSERT...SELECT -> server-side post-load gates (golden record + DQ, which
+    see the still-uncommitted rows on that same connection) -> watermark MERGE
+    on that same connection (update_watermark(conn=..., commit=False)) -> ONE
+    commit. Any failure rolls back both the append and the watermark, so there
+    is no window where rows are committed but the watermark is not (or the
+    reverse). Post-load gate results are never accepted from the caller.
+  Rerun idempotency: the rerun guard compares the source window with the
+  target's committed maximum, so after a successful run a second preflight
+  sees an empty window and the executor appends nothing.
+  Deployment prerequisite: the target connection user needs INSERT/UPDATE on
+  AUDIT_USER.ETL_WATERMARK; without it the MERGE fails and everything is
+  rolled back (fail closed).
 """
 
 import logging
@@ -18,6 +33,9 @@ from decimal import Decimal
 from typing import Any
 
 import oracledb
+from data_quality import default_post_load_dq_specs, run_post_load_dq_gate
+from golden_record_regression import default_specs as default_golden_record_specs
+from golden_record_regression import run_live_regressions
 from config import (
     ORACLE_USER,
     ORACLE_PASSWORD,
@@ -419,26 +437,78 @@ def build_incremental_execution_request(preflight_result: dict[str, Any], *, app
     }
 
 
+# Controlled mapping from incremental/DQ spec names to golden-record spec keys.
+_GOLDEN_SPEC_KEY_BY_INCREMENTAL_SPEC = {
+    "HR_EMPLOYEES_ODS": "HR.EMPLOYEES",
+    "SH_SALES_ODS": "SH.SALES",
+}
+
+
+# Expected gate failures fail closed here; anything else propagates to the
+# executor-level rollback-and-raise handler (also fail closed).
+_GATE_ERRORS = (oracledb.Error, KeyError, ValueError, TypeError, RuntimeError)
+
+
+def _compute_post_load_gates(
+    spec_name: str,
+    *,
+    source_conn: Any,
+    target_conn: Any,
+) -> dict[str, bool]:
+    """Run both post-load gates server-side on the append connection.
+
+    The gates run on the SAME target connection that performed the INSERT, so
+    they observe the uncommitted rows. Only pass/fail booleans leave this
+    function; the internal golden report (key differences) is never returned.
+    Any error or unknown spec fails closed.
+    """
+
+    name = str(spec_name).strip().upper()
+    golden_passed = False
+    dq_passed = False
+    try:
+        golden_spec = default_golden_record_specs()[_GOLDEN_SPEC_KEY_BY_INCREMENTAL_SPEC[name]]
+        report = run_live_regressions(
+            [golden_spec],
+            source_conn=source_conn,
+            target_conn=target_conn,
+            row_limit=None,
+        )
+        golden_passed = report.get("status") == "passed"
+    except _GATE_ERRORS as exc:
+        logger.warning("Post-load golden record gate errored: %s", type(exc).__name__)
+    try:
+        dq_spec = default_post_load_dq_specs()[name]
+        dq_report = run_post_load_dq_gate([dq_spec], conn=target_conn)
+        dq_passed = dq_report.get("status") == "passed"
+    except _GATE_ERRORS as exc:
+        logger.warning("Post-load DQ gate errored: %s", type(exc).__name__)
+    return {
+        "post_load_golden_record_passed": golden_passed,
+        "post_load_dq_passed": dq_passed,
+    }
+
+
 def execute_incremental_append(
     preflight_result: dict[str, Any],
     *,
     approved: bool,
     target_conn: Any,
+    source_conn: Any,
     watermark_writer: Any,
-    post_load_gate_results: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     """Execute a server-side append for an approved, rerun-guarded window.
 
-    The function never fetches source rows into Python. It performs one
-    INSERT...SELECT on the target/read connection, rolls back when post-load
-    gates fail, and advances the watermark only after successful commit gates.
+    Single-transaction semantics on ``target_conn``: INSERT...SELECT, then the
+    server-computed post-load gates, then the watermark MERGE, then ONE commit.
+    Any gate failure or exception rolls back both the append and the watermark.
+    The function never fetches source rows into Python.
     """
 
     request = build_incremental_execution_request(preflight_result, approved=approved)
     if request["status"] != "ready_for_executor":
         return request
 
-    failed_gates = _failed_post_load_gates(post_load_gate_results or {})
     source_table = preflight_result["source_table"]
     target_table = preflight_result["target_table"]
     watermark_column = preflight_result.get("watermark_column")
@@ -453,6 +523,7 @@ def execute_incremental_append(
             "reason": "source and target have no common append columns",
         }
 
+    write_ops = ["append_delta_rows_to_target", "advance_watermark_after_post_load_gates"]
     cursor = target_conn.cursor()
     try:
         sql = _append_insert_select_sql(
@@ -463,6 +534,13 @@ def execute_incremental_append(
         )
         cursor.execute(sql, {"last_watermark": last_watermark})
         row_count = int(getattr(cursor, "rowcount", 0) or 0)
+
+        gates = _compute_post_load_gates(
+            str(preflight_result["spec"]),
+            source_conn=source_conn,
+            target_conn=target_conn,
+        )
+        failed_gates = _failed_post_load_gates(gates)
         if failed_gates:
             target_conn.rollback()
             return {
@@ -470,13 +548,14 @@ def execute_incremental_append(
                 "status": "rolled_back_post_load_gate_failed",
                 "will_execute": False,
                 "rows_appended": 0,
+                "post_load_gates": gates,
                 "failed_gates": failed_gates,
                 "write_operations_attempted": ["append_delta_rows_to_target"],
                 "watermark_update_attempted": False,
                 "raw_rows_included": False,
                 "pk_values_included": False,
             }
-        target_conn.commit()
+
         try:
             watermark_writer.update_watermark(
                 "INCREMENTAL_STRATEGY",
@@ -484,29 +563,36 @@ def execute_incremental_append(
                 extract_date=_coerce_extract_date(candidate_watermark),
                 extract_value=_safe_value(candidate_watermark),
                 row_count=row_count,
+                conn=target_conn,
+                commit=False,
             )
         except Exception as exc:
+            target_conn.rollback()
             return {
                 **request,
-                "status": "executed_watermark_update_failed",
-                "will_execute": True,
-                "rows_appended": row_count,
-                "write_operations_attempted": ["append_delta_rows_to_target", "advance_watermark_after_post_load_gates"],
+                "status": "rolled_back_watermark_update_failed",
+                "will_execute": False,
+                "rows_appended": 0,
+                "post_load_gates": gates,
+                "write_operations_attempted": write_ops,
                 "watermark_update_attempted": True,
                 "watermark_update_status": "failed",
                 "watermark_error_type": type(exc).__name__,
-                "safe_to_retry": False,
-                "requires_manual_reconciliation": True,
-                "recovery_action": "Verify target metadata/counts and repair the watermark before another execution request.",
+                "safe_to_retry": True,
+                "requires_manual_reconciliation": False,
+                "recovery_action": "Append and watermark were rolled back together; retry after fixing the watermark store.",
                 "raw_rows_included": False,
                 "pk_values_included": False,
             }
+
+        target_conn.commit()
         return {
             **request,
             "status": "executed",
             "will_execute": True,
             "rows_appended": row_count,
-            "write_operations_attempted": ["append_delta_rows_to_target", "advance_watermark_after_post_load_gates"],
+            "post_load_gates": gates,
+            "write_operations_attempted": write_ops,
             "watermark_update_attempted": True,
             "watermark_advanced_to": _safe_value(candidate_watermark),
             "raw_rows_included": False,
@@ -737,7 +823,9 @@ class WatermarkManager:
     def update_watermark(self, owner: str, table_name: str,
                          extract_date: datetime = None,
                          extract_value: str = None,
-                         row_count: int = None) -> None:
+                         row_count: int = None,
+                         conn: Any = None,
+                         commit: bool = True) -> None:
         """Update the watermark record; create one with MERGE if absent.
 
         Args:
@@ -746,8 +834,13 @@ class WatermarkManager:
             extract_date: Last extraction date; uses SYSDATE if omitted.
             extract_value: Numeric/text watermark value (optional).
             row_count: Number of inserted/updated rows (optional).
+            conn: Optional caller-owned connection. When given, the MERGE runs on
+                it so the caller can make the watermark part of its own transaction.
+            commit: Commit after the MERGE (default). Pass False together with
+                ``conn`` to leave commit/rollback to the caller.
         """
-        conn = self._get_conn()
+        if conn is None:
+            conn = self._get_conn()
         cursor = conn.cursor()
         try:
             cursor.execute("""
@@ -775,7 +868,8 @@ class WatermarkManager:
                 "ext_value2": extract_value,
                 "rcount2":    row_count or 0,
             })
-            conn.commit()
+            if commit:
+                conn.commit()
             logger.info(
                 "✅ Watermark updated: %s.%s → %s (%d rows)",
                 owner, table_name, extract_value, row_count or 0
