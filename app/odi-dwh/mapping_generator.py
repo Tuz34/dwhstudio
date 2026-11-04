@@ -1,17 +1,17 @@
 """
-Mapping Generator — Otonom ODI Mapping Orkestratoru
+Mapping Generator — Autonomous ODI Mapping Orchestrator
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Kullanicinin dogal dil prompt'unu alir ve uctan uca mapping olusturur:
-  1. AI Agent ile prompt'u yapisal parametrelere donusturur
-  2. Hedef Oracle tabloyu olusturur (source connector tip donusumu + ODS default kolonlar)
-  3. ODI mapping olusturur (OdiOrchestrator)
-  4. Surrogate Key nesneleri olusturur (SkeyManager) — opsiyonel
-  5. Data Lineage kaydeder (LineageManager)
-  6. DQ testleri uretir (TestGenerator)
-  7. Mapping snapshot alir (MappingSnapshotManager)
+Takes the user's natural-language prompt and creates an end-to-end mapping:
+  1. Uses AI Agent to convert the prompt to structured parameters
+  2. Creates the target Oracle table (source connector type conversion + ODS default columns)
+  3. Creates the ODI mapping (OdiOrchestrator)
+  4. Creates surrogate key objects (SkeyManager) — optional
+  5. Records data lineage (LineageManager)
+  6. Generates DQ tests (TestGenerator)
+  7. Takes a mapping snapshot (MappingSnapshotManager)
 
-Tum adimlar MAPPING_LOG'a loglanir ve hata durumunda batch rollback desteklenir.
+All steps are logged to MAPPING_LOG, and batch rollback is supported on failure.
 """
 
 import json
@@ -38,7 +38,7 @@ from source_connector import get_source_connector
 logger = logging.getLogger("mapping_generator")
 
 def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> str:
-    """Oracle SQL literal icin tek tirnak kacir."""
+    """Escape single quotes in an Oracle SQL literal."""
     text = (value or fallback).strip() or fallback
     return text.replace("'", "''")
 
@@ -46,7 +46,7 @@ def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> s
 _SOURCE_SYSTEM_LITERAL = _sql_string_literal(SOURCE_SYSTEM_NAME, "ORACLE_SOURCE")
 
 
-# Mapping parametrelerini prompt'tan cikarirken beklenen JSON formati
+# Expected JSON format when extracting mapping parameters from a prompt
 MAPPING_EXTRACT_PROMPT = """You are an ODI Mapping Configuration Expert.
 The user wants to create an ODI mapping. Parse their request and extract structured parameters.
 
@@ -58,9 +58,9 @@ RULES:
 5. tgt_model: Logical target layer only. Use "ORACLE_ODS" for ODS targets and "ORACLE_DWH" for DWH targets; actual ODI model code is resolved from ODI repository tables.
 6. tgt_table: Target table (UPPERCASE). Prefix source schema into ODS name, e.g. HR.EMPLOYEES -> ODS_HR_EMPLOYEES.
 7. tgt_owner: Target schema. Default: "DWH".
-8. needs_skey: true if user mentions "surrogate key", "SKEY", "boyut tablosu", "dimension"
+8. needs_skey: true if user mentions "surrogate key", "SKEY", "boyut tablosu", "dimension table", "dimension"
 9. skey_natural_key: If needs_skey, the natural key expression (e.g., "SRC.PRODUCT_ID")
-10. description: One-line Turkish description of what this mapping does.
+10. description: One-line English description of what this mapping does.
 
 OUTPUT ONLY VALID JSON (no markdown):
 {
@@ -72,21 +72,21 @@ OUTPUT ONLY VALID JSON (no markdown):
   "tgt_owner": "DWH",
   "needs_skey": false,
   "skey_natural_key": null,
-  "description": "HR.EMPLOYEES tablosunu Oracle kaynaktan ODS katmanina aktarir"
+  "description": "Transfers HR.EMPLOYEES from the Oracle source to the ODS layer"
 }"""
 
 
 class MappingGenerator:
-    """Otonom mapping olusturma orkestratoru.
+    """Autonomous mapping creation orchestrator.
 
-    Kullanim:
+    Usage:
         with MappingGenerator() as mg:
-            result = mg.generate_from_prompt("Orders tablosunu ODS'ye aktar")
-            # veya
+            result = mg.generate_from_prompt("Transfer the Orders table to ODS")
+            # or
             result = mg.generate_from_params({...})
     """
 
-    # Adim isimleri (UI ilerleme gostergesi icin)
+    # Step names (for the UI progress indicator)
     STEPS = [
         "prompt_parse",
         "validate_params",
@@ -100,24 +100,24 @@ class MappingGenerator:
         "take_snapshot",
     ]
 
-    # ── SQL Server → Oracle Tip Donusum Tablosu ──────────────────────────────
-    # Her key buyuk harfle tutulur. Deger tuple: (oracle_type, needs_length)
-    # needs_length: True ise kaynak uzunluk aktarilir, False ise sabit tip.
+    # ── SQL Server → Oracle Type Conversion Table ──────────────────────────────
+    # Each key is uppercase. Value tuple: (oracle_type, needs_length)
+    # needs_length: use source length if True; use a fixed type if False.
     MSSQL_TO_ORACLE: dict[str, tuple[str, bool]] = {
-        # Tam sayi tipleri
+        # Integer types
         "INT":             ("NUMBER(10,0)",     False),
         "BIGINT":          ("NUMBER(19,0)",     False),
         "SMALLINT":        ("NUMBER(5,0)",      False),
         "TINYINT":         ("NUMBER(3,0)",      False),
         "BIT":             ("NUMBER(1,0)",      False),
-        # Ondalikli tipler (precision/scale kaynak tablonun kendisinden gelir)
+        # Decimal types (precision/scale come from the source table)
         "DECIMAL":         ("NUMBER",           True),
         "NUMERIC":         ("NUMBER",           True),
         "FLOAT":           ("FLOAT(126)",       False),
         "REAL":            ("FLOAT(63)",        False),
         "MONEY":           ("NUMBER(19,4)",     False),
         "SMALLMONEY":      ("NUMBER(10,4)",     False),
-        # Metin tipleri
+        # Text types
         "NVARCHAR":        ("VARCHAR2",         True),   # len*2 (UTF-16→UTF-8)
         "VARCHAR":         ("VARCHAR2",         True),
         "NCHAR":           ("VARCHAR2",         True),   # len*2
@@ -125,18 +125,18 @@ class MappingGenerator:
         "TEXT":            ("CLOB",             False),
         "NTEXT":           ("NCLOB",            False),
         "XML":             ("CLOB",             False),
-        # Tarih/Zaman tipleri
+        # Date/time types
         "DATETIME":        ("TIMESTAMP(3)",     False),
         "DATETIME2":       ("TIMESTAMP(6)",     False),
         "SMALLDATETIME":   ("DATE",             False),
         "DATE":            ("DATE",             False),
         "TIME":            ("VARCHAR2(16)",     False),
         "DATETIMEOFFSET":  ("TIMESTAMP(6) WITH TIME ZONE", False),
-        # Ikili tipler
+        # Binary types
         "VARBINARY":       ("BLOB",             False),
         "BINARY":          ("RAW",              True),
         "IMAGE":           ("BLOB",             False),
-        # Diger
+        # Other
         "UNIQUEIDENTIFIER": ("VARCHAR2(36)",    False),
         "SQL_VARIANT":     ("VARCHAR2(4000)",   False),
         "HIERARCHYID":     ("VARCHAR2(4000)",   False),
@@ -144,7 +144,7 @@ class MappingGenerator:
         "GEOMETRY":        ("CLOB",             False),
     }
 
-    # ODS katmani icin eklenen standart kolonlar
+    # Standard columns added for the ODS layer
     ODS_DEFAULT_COLUMNS = [
         ("INSERT_DATE",    "TIMESTAMP DEFAULT SYSTIMESTAMP"),
         ("UPDATE_DATE",    "TIMESTAMP"),
@@ -152,7 +152,7 @@ class MappingGenerator:
         ("ETL_BATCH_ID",   "NUMBER"),
     ]
 
-    # DWH boyut tablolari icin SCD2 ek kolonlari
+    # Additional SCD2 columns for DWH dimension tables
     DWH_SCD2_COLUMNS = [
         ("INSERT_DATE",     "TIMESTAMP DEFAULT SYSTIMESTAMP"),
         ("UPDATE_DATE",     "TIMESTAMP"),
@@ -174,10 +174,10 @@ class MappingGenerator:
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         return False
 
-    # ── Yardimci Metodlar ──────────────────────────────────────────────────────
+    # ── Helper Methods ──────────────────────────────────────────────────────
 
     def _add_log(self, step: str, status: str, detail: str = ""):
-        """Islem adimini dahili log listesine ekler."""
+        """Add an operation step to the internal log list."""
         detail = redact_sensitive_text(detail, max_len=500)
         entry = {
             "step": step,
@@ -190,25 +190,25 @@ class MappingGenerator:
         log_fn("MappingGenerator [%s] %s: %s %s", self._batch_id, step, status, detail)
 
     def _validate_identifier(self, value: str, field_name: str) -> str:
-        """SQL/ODI identifier dogrulamasi. Gecersiz karakterleri reddeder.
+        """Validate SQL/ODI identifiers. Reject invalid characters.
 
         Args:
-            value: Dogrulanacak deger.
-            field_name: Hata mesajinda kullanilacak alan adi.
+            value: Value to validate.
+            field_name: Field name to use in the error message.
 
         Returns:
-            Buyuk harfe donusturulmus, gecerli identifier.
+            Valid uppercase identifier.
 
         Raises:
-            ValueError: Deger bos veya gecersiz karakterler iceriyorsa.
+            ValueError: If the value is empty or contains invalid characters.
         """
         if not value or not value.strip():
-            raise ValueError(f"{field_name} bos olamaz.")
+            raise ValueError(f"{field_name} cannot be empty.")
         clean = value.strip().upper()
         if not re.match(r'^[A-Z][A-Z0-9_]{0,127}$', clean):
             raise ValueError(
-                f"{field_name} gecersiz: '{clean}'. "
-                "Sadece harf, rakam, alt cizgi; harf ile baslamali; max 128 karakter."
+                f"{field_name} is invalid: '{clean}'. "
+                "Letters, digits, and underscores only; must start with a letter; max 128 characters."
             )
         return clean
 
@@ -355,14 +355,14 @@ class MappingGenerator:
         raise RuntimeError("ODI target model could not be resolved from repository tables.")
 
     def _check_mapping_exists(self, mapping_name: str) -> tuple[bool, str | None]:
-        """ODI work repository'de mapping varligini read-only kontrol eder."""
+        """Check mapping existence in the ODI work repository in read-only mode."""
         try:
             mapping = self._find_repository_mapping(mapping_name)
             if mapping:
                 return True, mapping.get("mapping_name") or mapping_name
             return False, None
         except Exception as e:
-            logger.warning("Mapping repo tablo varlik kontrolu hatasi: %s", e)
+            logger.warning("Mapping repository table existence check failed: %s", e)
 
         try:
             from odi_orchestrator import OdiOrchestrator
@@ -379,13 +379,13 @@ class MappingGenerator:
                 return True, mapping_name
             return False, None
         except Exception as e:
-            logger.warning("Mapping SDK varlik kontrolu hatasi: %s", e)
+            logger.warning("Mapping SDK existence check failed: %s", e)
             return False, None
 
-    # ── Kaynak Tablo Sema Okuma ──────────────────────────────────────────────
+    # ── Read Source Table Schema ──────────────────────────────────────────────
 
     def _source_schema_df_to_legacy_columns(self, df, connector) -> list[dict]:
-        """Connector schema contract'ini eski mapping kolon formatina cevirir."""
+        """Convert the connector schema contract to the legacy mapping column format."""
         columns: list[dict] = []
         for _, row in df.iterrows():
             data_type = str(row.get("DATA_TYPE") or "VARCHAR2").upper()
@@ -409,14 +409,14 @@ class MappingGenerator:
         return columns
 
     def _get_source_columns_mssql(self, src_table: str) -> list[dict]:
-        """SQL Server'dan kaynak tablo kolonlarini getirir.
+        """Fetch source table columns from SQL Server.
 
         Args:
-            src_table: Tablo adi (orn. "Person.Person" veya "Orders").
+            src_table: Table name (e.g. "Person.Person" or "Orders").
 
         Returns:
-            Her kolon icin COLUMN_NAME, DATA_TYPE, MAX_LEN, IS_NULLABLE,
-            NUMERIC_PRECISION, NUMERIC_SCALE alanlari iceren liste.
+            For each column, return COLUMN_NAME, DATA_TYPE, MAX_LEN, IS_NULLABLE,
+            List containing NUMERIC_PRECISION and NUMERIC_SCALE fields.
         """
         connector = get_source_connector("mssql")
         schema_df = connector.get_table_schema(src_table)
@@ -425,7 +425,7 @@ class MappingGenerator:
         return columns, full_name
 
     def _get_source_columns_oracle(self, src_table: str) -> list[dict]:
-        """Oracle'dan kaynak tablo kolonlarini getirir."""
+        """Fetch source table columns from Oracle."""
         connector = get_source_connector("oracle")
         schema_df = connector.get_table_schema(src_table)
         return self._source_schema_df_to_legacy_columns(schema_df, connector)
@@ -446,7 +446,7 @@ class MappingGenerator:
     def _odi_register_column_defs(self, columns: list[dict]) -> list[dict]:
         """Convert connector column metadata to register_datastore.groovy input."""
         if columns is None:
-            raise ValueError("columns listesi None")
+            raise ValueError("columns list is None")
 
         col_defs = []
         for col in columns:
@@ -475,23 +475,23 @@ class MappingGenerator:
 
     def _convert_mssql_type(self, data_type: str, max_len: int | None,
                              precision: int | None, scale: int | None) -> str:
-        """SQL Server veri tipini Oracle eşdeğerine dönüştürür.
+        """Convert a SQL Server data type to its Oracle equivalent.
 
         Args:
-            data_type: SQL Server veri tipi (orn. "nvarchar", "int").
-            max_len: CHARACTER_MAXIMUM_LENGTH (metin tipleri icin).
-            precision: NUMERIC_PRECISION (sayi tipleri icin).
-            scale: NUMERIC_SCALE (sayi tipleri icin).
+            data_type: SQL Server data type (e.g. "nvarchar", "int").
+            max_len: CHARACTER_MAXIMUM_LENGTH (for text types).
+            precision: NUMERIC_PRECISION (for numeric types).
+            scale: NUMERIC_SCALE (for numeric types).
 
         Returns:
-            Oracle DDL kolon tip string'i (orn. "VARCHAR2(200)", "NUMBER(10,0)").
+            Oracle DDL column type string (e.g. "VARCHAR2(200)", "NUMBER(10,0)").
         """
         dt_upper = data_type.strip().upper()
         entry = self.MSSQL_TO_ORACLE.get(dt_upper)
 
         if entry is None:
-            # Bilinmeyen tip — VARCHAR2(4000) fallback
-            logger.warning("Bilinmeyen SQL Server tipi: %s → VARCHAR2(4000)", data_type)
+            # Unknown type — fall back to VARCHAR2(4000)
+            logger.warning("Unknown SQL Server type: %s → VARCHAR2(4000)", data_type)
             return "VARCHAR2(4000)"
 
         oracle_type, needs_length = entry
@@ -499,7 +499,7 @@ class MappingGenerator:
         if not needs_length:
             return oracle_type
 
-        # Uzunluk gerektiren tipler
+        # Types requiring a length
         if dt_upper in ("DECIMAL", "NUMERIC"):
             p = int(precision) if precision else 38
             s = int(scale) if scale is not None else 0
@@ -546,17 +546,17 @@ class MappingGenerator:
                 src_columns = self._get_source_columns_oracle(src_table)
                 is_mssql_source = False
         except Exception as e:
-            self._add_log("target_preflight", "FAILED", f"Kaynak sema alinamadi: {e}")
-            raise RuntimeError(f"Kaynak tablo semasi alinamadi ({src_model}.{src_table}): {e}") from e
+            self._add_log("target_preflight", "FAILED", f"Could not retrieve source schema: {e}")
+            raise RuntimeError(f"Could not retrieve source table schema ({src_model}.{src_table}): {e}") from e
 
         if src_columns is None:
-            self._add_log("target_preflight", "FAILED", "src_columns None dondu")
-            raise RuntimeError("Kaynak kolon listesi alinamadi (None)")
+            self._add_log("target_preflight", "FAILED", "src_columns returned None")
+            raise RuntimeError("Could not retrieve source column list (None)")
 
         if not src_columns:
             self._add_log("target_preflight", "FAILED",
-                           f"Kaynak tabloda kolon bulunamadi: {params.get('src_table')}")
-            raise RuntimeError(f"Kaynak tabloda kolon bulunamadi: {src_model}.{params.get('src_table')}")
+                           f"No column found in source table: {params.get('src_table')}")
+            raise RuntimeError(f"No column found in source table: {src_model}.{params.get('src_table')}")
 
         col_defs: list[str] = []
         desired_col_defs: list[tuple[str, str]] = []
@@ -707,7 +707,7 @@ class MappingGenerator:
             cursor.close()
             conn.close()
 
-    # ── Hedef Tablo Olusturma ─────────────────────────────────────────────────
+    # ── Create Target Table ─────────────────────────────────────────────────
 
 
     def _create_target_table(self, params: dict) -> dict:
@@ -727,18 +727,18 @@ class MappingGenerator:
     # ── AI Prompt Parsing ──────────────────────────────────────────────────────
 
     def parse_prompt(self, user_prompt: str) -> dict:
-        """Dogal dil prompt'unu yapisal mapping parametrelerine donusturur.
+        """Convert a natural-language prompt to structured mapping parameters.
 
         Args:
-            user_prompt: Kullanicinin dogal dil istegi
-                (orn. "Orders tablosunu SQL Server'dan ODS'ye aktar").
+            user_prompt: User's natural-language request
+                (e.g. "Transfer the Orders table from SQL Server to ODS").
 
         Returns:
-            Sozluk: mapping_name, src_model, src_table, tgt_model, tgt_table,
-            tgt_owner, needs_skey, skey_natural_key, description alanlari.
+            Dictionary: mapping_name, src_model, src_table, tgt_model, tgt_table,
+            tgt_owner, needs_skey, skey_natural_key, description fields.
 
         Raises:
-            ValueError: AI ciktisi parse edilemezse veya gerekli alanlar eksikse.
+            ValueError: If the AI output cannot be parsed or required fields are missing.
         """
         from ai_agent import call_llm, extract_json
 
@@ -751,26 +751,26 @@ class MappingGenerator:
 
         parsed = extract_json(raw)
 
-        # Zorunlu alanlari kontrol et
+        # Check required fields
         required = ["mapping_name", "src_table", "tgt_table", "src_model", "tgt_model"]
         missing = [f for f in required if not parsed.get(f)]
         if missing:
-            raise ValueError(f"AI eksik alan uretti: {', '.join(missing)}. Ham cikti: {raw[:200]}")
+            raise ValueError(f"AI omitted required fields: {', '.join(missing)}. Raw output: {raw[:200]}")
 
         self._add_log("prompt_parse", "SUCCESS", f"mapping={parsed.get('mapping_name')}")
         return parsed
 
-    # ── Parametre Dogrulama ────────────────────────────────────────────────────
+    # ── Parameter Validation ────────────────────────────────────────────────────
 
     def validate_params(self, params: dict) -> dict:
-        """Mapping parametrelerini dogrular ve normalize eder.
+        """Validate and normalize mapping parameters.
 
         Raises:
-            ValueError: Gecersiz veya eksik parametre varsa.
+            ValueError: If parameters are invalid or missing.
         """
         if params is None:
-            logger.error("validate_params'a None degeri geldi!")
-            raise ValueError("Parametreler bos (None) olamaz.")
+            logger.error("validate_params received None!")
+            raise ValueError("Parameters cannot be empty (None).")
 
         validated = {}
 
@@ -781,19 +781,19 @@ class MappingGenerator:
         validated["drop_target_if_exists"] = params.get("drop_target_if_exists") is True
         validated["replace_existing_mapping"] = params.get("replace_existing_mapping") is True
 
-        # src_table: SQL Server tablolari "Schema.Table" formatinda olabilir
+        # src_table: SQL Server tables may use "Schema.Table" format
         src_schema = (params.get("src_schema") or "").strip()
         raw_src_value = (params.get("src_table") or "").strip()
         if src_schema and raw_src_value and "." not in raw_src_value:
             raw_src_value = f"{src_schema}.{raw_src_value}"
         raw_src = raw_src_value.upper()
         if not raw_src:
-            raise ValueError("src_table bos olamaz.")
+            raise ValueError("src_table cannot be empty.")
             
-        # AI bazen tablo adlarini DWH.ODS_ seklinde veriyor, sema adini es gec:
+        # AI sometimes returns table names as DWH.ODS_; omit the schema name:
         src_table_no_schema = raw_src.split('.')[-1]
             
-        # AI bazen ODS_ veya DWH_ tablolarini SQL_SERVER saniyor. Guvenlik agi:
+        # AI sometimes assumes ODS_ or DWH_ tables are SQL_SERVER. Safeguard:
         if src_table_no_schema.startswith("ODS_"):
             validated["src_model"] = "ORACLE_ODS"
         elif src_table_no_schema.startswith("DWH_"):
@@ -808,20 +808,20 @@ class MappingGenerator:
         } | source_schema_models
         if validated["src_model"] not in allowed_src_models:
             raise ValueError(
-                f"Gecersiz src_model: {validated['src_model']}. "
-                f"Izin verilenler: {sorted(allowed_src_models)}"
+                f"Invalid src_model: {validated['src_model']}. "
+                f"Allowed values: {sorted(allowed_src_models)}"
             )
 
-        # Kaynak modeli "SCHEMA.TABLE" formatini destekler mi?
-        # - Disa donuk kaynaklar (MSSQL ve Oracle source: ORACLE_HR/ORACLE_SH/ORACLE_SOURCE)
-        #   schema-qualified gelir; schema KORUNMALI (HR.EMPLOYEES -> HR.EMPLOYEES).
-        # - Oracle internal kaynak-hedef (ORACLE_ODS / ORACLE_DWH) tek tablo adi kullanir.
+        # Does the source model support the "SCHEMA.TABLE" format?
+        # - External sources (MSSQL and Oracle source: ORACLE_HR/ORACLE_SH/ORACLE_SOURCE)
+        #   arrive schema-qualified; the schema MUST BE PRESERVED (HR.EMPLOYEES -> HR.EMPLOYEES).
+        # - Internal Oracle source/target (ORACLE_ODS / ORACLE_DWH) uses a single table name.
         _internal_oracle = validated["src_model"] in ("ORACLE_ODS", "ORACLE_DWH")
         if not _internal_oracle:
             if not re.match(r'^[A-Z][A-Z0-9_]*(\.[A-Z][A-Z0-9_]*)?$', raw_src):
                 raise ValueError(
-                    f"src_table gecersiz: '{raw_src}'. "
-                    "Format: TABLE veya SCHEMA.TABLE (harf, rakam, alt cizgi)."
+                    f"Invalid src_table: '{raw_src}'. "
+                    "Format: TABLE or SCHEMA.TABLE (letters, digits, underscores)."
                 )
             validated["src_table"] = raw_src
         else:
@@ -838,47 +838,47 @@ class MappingGenerator:
         allowed_tgt_models = {"DWH", "ORACLE_ODS", "ORACLE_DWH", "ODS", "TGT_DWH", "MDL_TGT_ORACLE_DWH"}
         if validated["tgt_model"] not in allowed_tgt_models:
             raise ValueError(
-                f"Gecersiz tgt_model: {validated['tgt_model']}. "
-                f"Izin verilenler: {sorted(allowed_tgt_models)}"
+                f"Invalid tgt_model: {validated['tgt_model']}. "
+                f"Allowed values: {sorted(allowed_tgt_models)}"
             )
         
-        # AI SKEY_MAP_ tablosunu hedef secebiliyor, bu yanlistir (skey_manager otomatik yapar). Hedef SKEY_ boyut tablosu olmali.
+        # AI may select the SKEY_MAP_ table as target; this is wrong (skey_manager handles it automatically). The target must be the SKEY_ dimension table.
         if tgt_table_no_schema.startswith("SKEY_MAP_"):
             tgt_table_no_schema = tgt_table_no_schema.replace("SKEY_MAP_", "SKEY_")
             
         validated["tgt_table"] = self._validate_identifier(tgt_table_no_schema, "tgt_table")
         validated["tgt_owner"] = params.get("tgt_owner", "DWH").strip().upper()
 
-        # Owner whitelist kontrolu
+        # Check owner allowlist
         allowed = {"DWH", "ODS", "AUDIT_USER", "DWH_FLAT"}
         if validated["tgt_owner"] not in allowed:
-            raise ValueError(f"Gecersiz tgt_owner: {validated['tgt_owner']}. Izin verilenler: {allowed}")
+            raise ValueError(f"Invalid tgt_owner: {validated['tgt_owner']}. Allowed values: {allowed}")
 
         validated["needs_skey"] = params.get("needs_skey") is True
         validated["skey_natural_key"] = params.get("skey_natural_key") or None
         validated["description"] = params.get("description", "")
 
         if validated["needs_skey"] and not validated["skey_natural_key"]:
-            raise ValueError("SKEY istendi ama skey_natural_key belirtilmedi.")
+            raise ValueError("SKEY was requested but skey_natural_key was not specified.")
 
         self._add_log("validate_params", "SUCCESS",
                        f"{validated['src_table']} -> {validated['tgt_table']}")
         return validated
 
-    # ── ODI Datastore Kayit ──────────────────────────────────────────────────────
+    # ── ODI Datastore Registration ──────────────────────────────────────────────────────
 
     def _register_odi_datastores(self, params: dict) -> dict:
-        """Kaynak ve hedef tablolari ODI modeline datastore olarak kaydeder.
+        """Register source and target tables as datastores in the ODI model.
 
-        create_mapping.groovy, datastorelari dsFinder.findByName() ile arar.
-        Eger datastore ODI'de kayitli degilse mapping olusturulamaz.
-        Bu adim register_datastore.groovy kullanarak eksik datastore'lari kaydeder.
+        create_mapping.groovy looks up datastores with dsFinder.findByName().
+        A mapping cannot be created if the datastore is not registered in ODI.
+        This step registers missing datastores using register_datastore.groovy.
 
         Args:
-            params: Dogrulanmis parametre sozlugu.
+            params: Validated parameters dictionary.
 
         Returns:
-            Sozluk: src_result, tgt_result.
+            Dictionary: src_result, tgt_result.
         """
         from odi_orchestrator import OdiOrchestrator
         orch = OdiOrchestrator()
@@ -886,17 +886,17 @@ class MappingGenerator:
 
         results = {"src_result": None, "tgt_result": None}
 
-        # ── Kaynak datastore kaydi ──
+        # ── Source datastore registration ──
         src_model = params["src_model"]
         src_table = params["src_table"]
-        # SQL Server tablosu: Schema.Table formatindan tablo adini cikar
+        # SQL Server table: extract the table name from Schema.Table format
         if "." in src_table:
             parts = src_table.split(".", 1)
             src_ds_name = parts[1]
         else:
             src_ds_name = src_table
 
-        # Kaynak kolon bilgilerini cek
+        # Fetch source column details
         _src_upper_reg = src_model.upper()
         _is_mssql_reg = ("SQL_SERVER" in _src_upper_reg or "MSSQL" in _src_upper_reg
                          or "ADVENTUREWORK" in _src_upper_reg)
@@ -908,7 +908,7 @@ class MappingGenerator:
 
             src_col_defs = self._odi_register_column_defs(src_columns)
 
-            # ODI model/datastore adini repository tablolarindan belirle.
+            # Resolve the ODI model/datastore name from repository tables.
             odi_src_model_code = self._resolved_odi_source_model_code(params)
             src_ds_name = params.get("_odi_src_datastore_name") or src_ds_name
 
@@ -920,7 +920,7 @@ class MappingGenerator:
                     "datastore": src_ds_name,
                 }
                 self._add_log("register_datastores", "SKIPPED",
-                              f"Kaynak datastore mevcut: {odi_src_model_code}.{src_ds_name}")
+                              f"Source datastore exists: {odi_src_model_code}.{src_ds_name}")
             else:
                 src_result = orch.register_datastore(
                     model_code=odi_src_model_code,
@@ -931,25 +931,25 @@ class MappingGenerator:
                 results["src_result"] = src_result
 
                 if "Hata:" in src_result and "zaten mevcut" not in src_result.lower():
-                    logger.warning("Kaynak datastore kaydi uyarisi: %s", src_result)
+                    logger.warning("Source datastore registration warning: %s", src_result)
                 else:
                     self._add_log("register_datastores", "SUCCESS",
-                                   f"Kaynak: {odi_src_model_code}.{src_ds_name}")
+                                   f"Source: {odi_src_model_code}.{src_ds_name}")
         except Exception as e:
-            logger.warning("Kaynak datastore kaydi basarisiz (devam): %s", e)
+            logger.warning("Source datastore registration failed (continuing): %s", e)
             results["src_result"] = f"WARNING: {e}"
 
-        # ── Hedef datastore kaydi ──
+        # ── Target datastore registration ──
         tgt_model = params["tgt_model"]
         tgt_table = params["tgt_table"]
         tgt_owner = params["tgt_owner"]
 
         try:
-            # Hedef Oracle kolonlarini oku
+            # Read target Oracle columns
             tgt_columns = self._get_source_columns_oracle(f"{tgt_owner}.{tgt_table}")
             tgt_col_defs = self._odi_register_column_defs(tgt_columns)
 
-            # ODI model/datastore adini repository tablolarindan belirle.
+            # Resolve the ODI model/datastore name from repository tables.
             odi_tgt_model_code = self._resolved_odi_target_model_code(params)
             tgt_ds_name = params.get("_odi_tgt_datastore_name") or tgt_table
 
@@ -961,7 +961,7 @@ class MappingGenerator:
                     "datastore": tgt_ds_name,
                 }
                 self._add_log("register_datastores", "SKIPPED",
-                              f"Hedef datastore mevcut: {odi_tgt_model_code}.{tgt_ds_name}")
+                              f"Target datastore exists: {odi_tgt_model_code}.{tgt_ds_name}")
             else:
                 tgt_result = orch.register_datastore(
                     model_code=odi_tgt_model_code,
@@ -972,26 +972,26 @@ class MappingGenerator:
                 results["tgt_result"] = tgt_result
 
                 if "Hata:" in tgt_result and "zaten mevcut" not in tgt_result.lower():
-                    logger.warning("Hedef datastore kaydi uyarisi: %s", tgt_result)
+                    logger.warning("Target datastore registration warning: %s", tgt_result)
                 else:
                     self._add_log("register_datastores", "SUCCESS",
-                                   f"Hedef: {odi_tgt_model_code}.{tgt_ds_name}")
+                                   f"Target: {odi_tgt_model_code}.{tgt_ds_name}")
         except Exception as e:
-            logger.warning("Hedef datastore kaydi basarisiz (devam): %s", e)
+            logger.warning("Target datastore registration failed (continuing): %s", e)
             results["tgt_result"] = f"WARNING: {e}"
 
         return results
 
-    # ── ODI Mapping Olusturma ──────────────────────────────────────────────────
+    # ── Create ODI Mapping ──────────────────────────────────────────────────
 
     def _create_odi_mapping(self, params: dict) -> dict:
-        """OdiOrchestrator uzerinden ODI mapping olusturur.
+        """Create an ODI mapping through OdiOrchestrator.
 
         Args:
-            params: Dogrulanmis parametre sozlugu.
+            params: Validated parameters dictionary.
 
         Returns:
-            Sozluk: odi_result (komut ciktisi) ve sequence_name.
+            Dictionary: odi_result (command output) and sequence_name.
         """
         from odi_orchestrator import OdiOrchestrator
 
@@ -1009,7 +1009,7 @@ class MappingGenerator:
 
         orch = OdiOrchestrator()
         
-        # SKEY Tablolarinda NK ve SK kolonlari icin ozel expressions 
+        # Special expressions for NK and SK columns in SKEY tables
         expressions = {}
         ikm_override = None
 
@@ -1018,20 +1018,20 @@ class MappingGenerator:
             if not nk_src.upper().startswith("SRC."):
                 nk_src = f"SRC.{nk_src}"
             
-            # 1. Hedef SKEY sözlük tablosuysa: ODI Best Practice = SEQ.NEXTVAL + IKM Merge + UpdateKey(NATURAL_KEY)
+            # 1. If the target is an SKEY lookup table: ODI Best Practice = SEQ.NEXTVAL + IKM Merge + UpdateKey(NATURAL_KEY)
             if params["tgt_table"].startswith("SKEY_") or params["tgt_table"].startswith("SKEY_MAP_"):
-                # Sequence adını oluştur: SKEY_SALES_CUSTOMER → SEQ_SALES_CUSTOMER
+                # Create sequence name: SKEY_SALES_CUSTOMER → SEQ_SALES_CUSTOMER
                 seq_suffix = params["tgt_table"].replace("SKEY_MAP_", "").replace("SKEY_", "")
                 expressions["SKEY"] = f"{params['tgt_owner']}.SEQ_{seq_suffix}.NEXTVAL"
                 expressions["NATURAL_KEY"] = f"TO_CHAR({nk_src})"
-                # NOT EXISTS filter YOK — IKM Merge zaten UpdateKey(NATURAL_KEY) üzerinden MERGE INTO yazar
-                # (ORA-00001 tamamen önlenir, duplicate kaydı insert etmez, var olanı günceller)
+                # No NOT EXISTS filter — IKM Merge already writes MERGE INTO through UpdateKey(NATURAL_KEY)
+                # (prevents ORA-00001 entirely, avoids inserting duplicate records, updates existing records)
                 ikm_override = "IKM Oracle Incremental Update (MERGE)"
                 logger.info(
-                    "SKEY sozlugu mapping (Best Practice): SEQ.NEXTVAL + IKM=%s, filter yok.", ikm_override
+                    "SKEY lookup mapping (Best Practice): SEQ.NEXTVAL + IKM=%s, no filter.", ikm_override
                 )
                 
-            # 2. Gerçek boyut/fact tablosuysa: CASE WHEN EXISTS (SKEY lookup)
+            # 2. For an actual dimension/fact table: CASE WHEN EXISTS (SKEY lookup)
             else:
                 from skey_manager import SkeyManager
                 with SkeyManager() as sm:
@@ -1057,14 +1057,14 @@ class MappingGenerator:
             sequence_name=seq_name,
             expressions=expressions,
             replace_existing_mapping=params.get("replace_existing_mapping") is True,
-            filter_condition=None,          # NOT EXISTS YOK — IKM Merge halleder
-            ikm_name=ikm_override,           # SKEY sözlükleri için override IKM
+            filter_condition=None,          # No NOT EXISTS — IKM Merge handles it
+            ikm_name=ikm_override,           # IKM override for SKEY lookup tables
         )
 
-        # OdiOrchestrator stub modda "KOMUT HAZIRLANDI: ..." doner
+        # OdiOrchestrator returns "KOMUT HAZIRLANDI: ..." in stub mode
         if "Hata:" in result:
             self._add_log("create_mapping", "FAILED", result)
-            raise RuntimeError(f"ODI mapping olusturulamadi: {result}")
+            raise RuntimeError(f"Could not create ODI mapping: {result}")
 
         self._add_log("create_mapping", "SUCCESS", result[:100])
         return {
@@ -1076,16 +1076,16 @@ class MappingGenerator:
             "target_datastore": tgt_table,
         }
 
-    # ── SKEY Olusturma ─────────────────────────────────────────────────────────
+    # ── Create SKEY ─────────────────────────────────────────────────────────
 
     def _create_skey(self, params: dict) -> dict:
-        """Surrogate Key nesnelerini olusturur (tablo + sequence + expression).
+        """Create surrogate key objects (table + sequence + expression).
 
         Args:
-            params: Dogrulanmis parametre sozlugu (needs_skey=True olmali).
+            params: Validated parameters dictionary (needs_skey must be True).
 
         Returns:
-            Sozluk: skey_result (create sonucu) ve skey_expression.
+            Dictionary: skey_result (creation result) and skey_expression.
         """
         from skey_manager import SkeyManager
 
@@ -1113,16 +1113,16 @@ class MappingGenerator:
             "skey_expression": skey_expr,
         }
 
-    # ── Lineage Kaydi ──────────────────────────────────────────────────────────
+    # ── Lineage Record ──────────────────────────────────────────────────────────
 
     def _populate_lineage(self, params: dict) -> dict:
-        """Mapping icin DATA_LINEAGE kaydini olusturur.
+        """Create the DATA_LINEAGE record for the mapping.
 
         Args:
-            params: Dogrulanmis parametre sozlugu.
+            params: Validated parameters dictionary.
 
         Returns:
-            Sozluk: lineage_result.
+            Dictionary: lineage_result.
         """
         from lineage_manager import LineageManager
 
@@ -1133,20 +1133,20 @@ class MappingGenerator:
                                f"Inserted: {lineage_result.get('inserted', 0)}")
                 return {"lineage_result": lineage_result}
             except Exception as e:
-                # Lineage populate hatasi kritik degil, devam et
+                # Lineage population failure is noncritical; continue
                 self._add_log("populate_lineage", "SKIPPED", str(e))
                 return {"lineage_result": {"error": str(e), "inserted": 0}}
 
-    # ── DQ Test Uretimi ────────────────────────────────────────────────────────
+    # ── DQ Test Generation ────────────────────────────────────────────────────────
 
     def _generate_tests(self, params: dict) -> dict:
-        """Hedef tablo icin DQ testleri uretir ve RAG'a kaydeder.
+        """Generate DQ tests for the target table and register them in RAG.
 
         Args:
-            params: Dogrulanmis parametre sozlugu.
+            params: Validated parameters dictionary.
 
         Returns:
-            Sozluk: tests listesi.
+            Dictionary: tests list.
         """
         from test_generator import TestGenerator
 
@@ -1156,10 +1156,10 @@ class MappingGenerator:
                 owner=params["tgt_owner"],
                 table_name=params["tgt_table"],
             )
-            self._add_log("generate_tests", "SUCCESS", f"{len(tests)} test uretildi")
+            self._add_log("generate_tests", "SUCCESS", f"{len(tests)} tests generated")
             return {"tests": tests}
         except Exception as e:
-            # Test uretimi kritik degil
+            # Test generation is noncritical
             self._add_log("generate_tests", "SKIPPED", str(e))
             return {"tests": [], "error": str(e)}
         finally:
@@ -1168,13 +1168,13 @@ class MappingGenerator:
     # ── Snapshot ───────────────────────────────────────────────────────────────
 
     def _take_snapshot(self, params: dict) -> dict:
-        """Mapping'in ilk snapshot'ini alir.
+        """Take the initial snapshot of the mapping.
 
         Args:
-            params: Dogrulanmis parametre sozlugu.
+            params: Validated parameters dictionary.
 
         Returns:
-            Sozluk: snap_id.
+            Dictionary: snap_id.
         """
         from mapping_snapshot_manager import MappingSnapshotManager
 
@@ -1206,16 +1206,16 @@ class MappingGenerator:
             self._add_log("take_snapshot", "SKIPPED", str(e))
             return {"snap_id": None, "error": str(e)}
 
-    # ── MAPPING_LOG Kaydi ──────────────────────────────────────────────────────
+    # ── MAPPING_LOG Record ──────────────────────────────────────────────────────
 
     def _log_to_mapping_log(self, params: dict, status: str = "SUCCESS",
                              error_message: str = None):
-        """Sonucu AUDIT_USER.MAPPING_LOG'a kaydeder.
+        """Record the result in AUDIT_USER.MAPPING_LOG.
 
         Args:
-            params: Dogrulanmis parametre sozlugu.
-            status: "SUCCESS" veya "FAILED".
-            error_message: Hata mesaji (opsiyonel).
+            params: Validated parameters dictionary.
+            status: "SUCCESS" or "FAILED".
+            error_message: Error message (optional).
         """
         from skey_manager import SkeyManager
 
@@ -1238,42 +1238,42 @@ class MappingGenerator:
         except Exception as e:
             logger.error("MAPPING_LOG write failed: %s", type(e).__name__)
 
-    # ── Ana Orkestrasyon ───────────────────────────────────────────────────────
+    # ── Main orchestration ───────────────────────────────────────────────────────
 
     def generate_from_prompt(self, user_prompt: str) -> dict:
-        """Dogal dil prompt'undan uctan uca mapping olusturur.
+        """Create an end-to-end mapping from a natural-language prompt.
 
-        Bu metod tum adimlari sirayla calistirir:
-          1. AI ile prompt parse
-          2. Parametre dogrulama
-          3. Hedef tablo olusturma (tip donusumu + ODS default kolonlar)
-          4. ODI mapping olusturma
-          5. SKEY olusturma (opsiyonel)
-          6. Lineage kaydi
-          7. DQ test uretimi
+        This method runs all steps in order:
+          1. Parse prompt with AI
+          2. Validate parameters
+          3. Create target table (type conversion + ODS default columns)
+          4. Create ODI mapping
+          5. Create SKEY (optional)
+          6. Record lineage
+          7. Generate DQ tests
           8. Snapshot
 
         Args:
-            user_prompt: Kullanicinin dogal dil istegi.
+            user_prompt: User's natural-language request.
 
         Returns:
-            Sozluk: batch_id, params, steps (her adimin sonucu),
-            overall_status ve log.
+            Dictionary: batch_id, params, steps (result of each step),
+            overall_status and log.
         """
-        # Adim 1: Prompt parse
+        # Step 1: Parse prompt
         params = self.parse_prompt(user_prompt)
         return self.generate_from_params(params)
 
     def generate_from_params(self, params: dict) -> dict:
-        """Yapisal parametrelerden uctan uca mapping olusturur.
+        """Create an end-to-end mapping from structured parameters.
 
         Args:
-            params: Mapping parametreleri (parse_prompt ciktisi veya
-                kullanici tarafindan saglanmis).
+            params: Mapping parameters (parse_prompt output or
+                provided by the user).
 
         Returns:
-            Sozluk: batch_id, params, steps (her adimin sonucu),
-            overall_status ve log.
+            Dictionary: batch_id, params, steps (result of each step),
+            overall_status and log.
         """
         result = {
             "batch_id": self._batch_id,
@@ -1284,46 +1284,46 @@ class MappingGenerator:
         }
 
         try:
-            # Adim 2: Dogrulama
+            # Step 2: Validation
             validated = self.validate_params(params)
             result["params"] = validated
 
-            # Adim 3: Hedef tablo olustur (SQL Server → Oracle tip donusumu + ODS default kolonlar)
+            # Step 3: Create target table (SQL Server → Oracle type conversion + ODS default columns)
             tgt_result = self._create_target_table(validated)
             result["steps"]["create_target_table"] = tgt_result
 
             repo_result = self._resolve_odi_repository_bindings(validated)
             result["steps"]["resolve_odi_repository"] = repo_result
 
-            # Adim 4: ODI Datastore kaydi (kaynak + hedef)
+            # Step 4: Register ODI datastores (source + target)
             ds_result = self._register_odi_datastores(validated)
             result["steps"]["register_datastores"] = ds_result
 
-            # Adim 5: ODI Mapping
+            # Step 5: ODI Mapping
             odi_result = self._create_odi_mapping(validated)
             result["steps"]["create_mapping"] = odi_result
 
-            # Adim 6: SKEY (opsiyonel)
+            # Step 6: SKEY (optional)
             if validated["needs_skey"]:
                 skey_result = self._create_skey(validated)
                 result["steps"]["create_skey"] = skey_result
             else:
-                self._add_log("create_skey", "SKIPPED", "SKEY istenmedi")
+                self._add_log("create_skey", "SKIPPED", "SKEY not requested")
                 result["steps"]["create_skey"] = {"skipped": True}
 
-            # Adim 6: Lineage
+            # Step 6: Lineage
             lineage_result = self._populate_lineage(validated)
             result["steps"]["populate_lineage"] = lineage_result
 
-            # Adim 7: DQ Testleri
+            # Step 7: DQ Tests
             test_result = self._generate_tests(validated)
             result["steps"]["generate_tests"] = test_result
 
-            # Adim 8: Snapshot
+            # Step 8: Snapshot
             snap_result = self._take_snapshot(validated)
             result["steps"]["take_snapshot"] = snap_result
 
-            # MAPPING_LOG'a basarili kayit
+            # Successful MAPPING_LOG record
             self._log_to_mapping_log(validated, "SUCCESS")
 
         except (ValueError, RuntimeError) as e:
@@ -1331,47 +1331,47 @@ class MappingGenerator:
             result["error"] = str(e)
             self._add_log("pipeline", "FAILED", str(e))
 
-            # MAPPING_LOG'a hatali kayit
+            # Failed MAPPING_LOG record
             if result.get("params"):
                 self._log_to_mapping_log(result["params"], "FAILED", str(e))
 
         except Exception as e:
             result["overall_status"] = "FAILED"
-            result["error"] = f"Beklenmeyen hata: {str(e)}"
+            result["error"] = f"Unexpected error: {str(e)}"
             self._add_log("pipeline", "FAILED", str(e))
-            logger.error("MappingGenerator beklenmeyen hata: %s", e, exc_info=True)
+            logger.error("MappingGenerator unexpected error: %s", e, exc_info=True)
 
         result["log"] = self._log_entries
         return result
 
-    # ── Mapping Guncelleme ───────────────────────────────────────────────────
+    # ── Update Mapping ───────────────────────────────────────────────────
 
     def update_mapping(self, mapping_name: str, changes: dict) -> dict:
-        """Mevcut bir ODI mapping'i gunceller.
+        """Update an existing ODI mapping.
 
-        Guncelleme adimlari:
-          1. Mevcut mapping'in snapshot'ini al (onceki durum)
-          2. ODI mapping guncelle (OdiOrchestrator)
-          3. SKEY guncelle (gerekirse)
-          4. Lineage yenile
-          5. DQ testleri yeniden uret
-          6. Yeni snapshot al (sonraki durum)
+        Update steps:
+          1. Take a snapshot of the existing mapping (previous state)
+          2. Update ODI mapping (OdiOrchestrator)
+          3. Update SKEY (if needed)
+          4. Refresh lineage
+          5. Regenerate DQ tests
+          6. Take a new snapshot (subsequent state)
 
         Args:
-            mapping_name: Guncellenecek mapping adi.
-            changes: Degisiklik sozlugu. Desteklenen anahtarlar:
-                - expressions: dict — Kolon expression guncelleme (orn: {"NAMEE": "Product.Name"})
-                - filter_action: str — Filter islem tipi (add/modify/remove)
-                - filter_condition: str — Filter kosulu
-                - filter_name: str — Mevcut filter adi
-                - ikm_name: str — IKM degistirme
-                - lkm_name: str — LKM degistirme
+            mapping_name: Name of the mapping to update.
+            changes: Changes dictionary. Supported keys:
+                - expressions: dict — Column expression update (e.g.: {"NAMEE": "Product.Name"})
+                - filter_action: str — Filter operation type (add/modify/remove)
+                - filter_condition: str — Filter condition
+                - filter_name: str — Existing filter name
+                - ikm_name: str — Change IKM
+                - lkm_name: str — Change LKM
                 - new_mapping_name: Mapping rename
-                - tgt_table, tgt_owner: Pre-validation icin hedef tablo bilgisi
-                - needs_skey, skey_natural_key: SKEY degisikligi
+                - tgt_table, tgt_owner: Target table details for pre-validation
+                - needs_skey, skey_natural_key: SKEY change
 
         Returns:
-            Sozluk: batch_id, mapping_name, changes_applied, steps, log.
+            Dictionary: batch_id, mapping_name, changes_applied, steps, log.
         """
         result = {
             "batch_id": self._batch_id,
@@ -1386,30 +1386,30 @@ class MappingGenerator:
         try:
             mapping_name = self._validate_identifier(mapping_name, "mapping_name")
 
-            # Mapping var mi kontrol et, yoksa en benzerini bul
+            # Check whether the mapping exists; otherwise find the closest match
             exists, suggested = self._check_mapping_exists(mapping_name)
             if not exists:
                 if suggested:
-                    err_msg = f"Mapping found: {mapping_name} bulunamadı. En benzer mapping bulundu: {suggested}. Lütfen bunu kullanın."
+                    err_msg = f"Mapping found: {mapping_name} was not found. Closest mapping: {suggested}. Please use it."
                     self._add_log("check_mapping", "FAILED", err_msg)
                     raise ValueError(err_msg)
                 else:
-                    err_msg = f"Mapping not found: {mapping_name} bulunamadı ve benzer bir eşleşme de bulunamadı."
+                    err_msg = f"Mapping not found: {mapping_name} was not found and no similar match was found."
                     self._add_log("check_mapping", "FAILED", err_msg)
                     raise ValueError(err_msg)
 
-            # Adim 1: Onceki snapshot (degisiklik oncesi durum)
+            # Step 1: Previous snapshot (state before changes)
             pre_snap = self._take_snapshot_for_update(mapping_name, "PRE_UPDATE")
             result["steps"]["pre_snapshot"] = pre_snap
 
-            # Adim 2: ODI mapping guncelle
+            # Step 2: Update ODI mapping
             update_params = {"mapping_name": mapping_name}
             update_params.update(changes)
 
-            # Degisikliklerde yeni tablo adlari varsa dogrula
+            # Validate any new table names in the changes
             for field in ["src_table", "tgt_table"]:
                 if field in changes and changes[field]:
-                    # Schema temizligi yap: "SCHEMA.TABLE" -> "TABLE"
+                    # Clean schema: "SCHEMA.TABLE" -> "TABLE"
                     val = str(changes[field]).strip().upper()
                     if "." in val:
                         val = val.split('.')[-1]
@@ -1418,13 +1418,13 @@ class MappingGenerator:
             if "tgt_owner" in changes:
                 allowed = {"DWH", "ODS", "AUDIT_USER", "DWH_FLAT"}
                 if changes["tgt_owner"].upper() not in allowed:
-                    raise ValueError(f"Gecersiz tgt_owner: {changes['tgt_owner']}")
+                    raise ValueError(f"Invalid tgt_owner: {changes['tgt_owner']}")
                 changes["tgt_owner"] = changes["tgt_owner"].upper()
 
             odi_result = self._update_odi_mapping(mapping_name, changes)
             result["steps"]["update_mapping"] = odi_result
 
-            # Adim 3: SKEY guncelle (gerekirse)
+            # Step 3: Update SKEY (if needed)
             if changes.get("needs_skey"):
                 tgt_owner = changes.get("tgt_owner", "DWH")
                 tgt_table = changes.get("tgt_table", mapping_name.replace("MAP_", ""))
@@ -1438,24 +1438,24 @@ class MappingGenerator:
                     skey_result = self._create_skey(skey_params)
                     result["steps"]["update_skey"] = skey_result
                 else:
-                    self._add_log("update_skey", "SKIPPED", "skey_natural_key belirtilmedi")
+                    self._add_log("update_skey", "SKIPPED", "skey_natural_key was not specified")
             else:
-                self._add_log("update_skey", "SKIPPED", "SKEY degisikligi yok")
+                self._add_log("update_skey", "SKIPPED", "No SKEY change")
 
-            # Adim 4: Lineage yenile
+            # Step 4: Refresh lineage
             lineage_result = self._populate_lineage(update_params)
             result["steps"]["refresh_lineage"] = lineage_result
 
-            # Adim 5: DQ testleri yeniden uret
+            # Step 5: Regenerate DQ tests
             tgt_owner = changes.get("tgt_owner", "DWH")
             tgt_table = changes.get("tgt_table")
             if tgt_table:
                 test_result = self._generate_tests({"tgt_owner": tgt_owner, "tgt_table": tgt_table})
                 result["steps"]["regenerate_tests"] = test_result
             else:
-                self._add_log("regenerate_tests", "SKIPPED", "Hedef tablo degismedi")
+                self._add_log("regenerate_tests", "SKIPPED", "Target table did not change")
 
-            # Adim 6: Sonraki snapshot (degisiklik sonrasi durum)
+            # Step 6: Subsequent snapshot (state after changes)
             final_name = changes.get("new_mapping_name", mapping_name)
             post_snap = self._take_snapshot_for_update(final_name, "POST_UPDATE")
             result["steps"]["post_snapshot"] = post_snap
@@ -1473,26 +1473,26 @@ class MappingGenerator:
             self._add_log("update_pipeline", "FAILED", str(e))
         except Exception as e:
             result["overall_status"] = "FAILED"
-            result["error"] = f"Beklenmeyen hata: {str(e)}"
+            result["error"] = f"Unexpected error: {str(e)}"
             self._add_log("update_pipeline", "FAILED", str(e))
-            logger.error("MappingGenerator update hatasi: %s", e, exc_info=True)
+            logger.error("MappingGenerator update failed: %s", e, exc_info=True)
 
         result["log"] = self._log_entries
         return result
 
     def _update_odi_mapping(self, mapping_name: str, changes: dict) -> dict:
-        """Cerrah (Surgeon) update: OdiOrchestrator uzerinden mevcut mapping'i gunceller.
+        """Surgical update: modify the existing mapping through OdiOrchestrator.
 
-        Operasyon tipi changes dict'teki anahtarlardan otomatik tespit edilir:
+        The operation type is detected automatically from the keys in the changes dictionary:
             - expressions key → update_expression
             - filter_action key → update_filter
             - ikm_name/lkm_name key → update_km
             - new_mapping_name key → rename
 
         Args:
-            mapping_name: Guncellenecek mapping adi.
-            changes: Degisiklik sozlugu. Desteklenen anahtarlar:
-                - expressions: dict (orn: {"NAMEE": "Product.Name"})
+            mapping_name: Name of the mapping to update.
+            changes: Changes dictionary. Supported keys:
+                - expressions: dict (e.g. {"NAMEE": "Product.Name"})
                 - filter_action: str (add/modify/remove)
                 - filter_condition: str
                 - filter_name: str
@@ -1507,13 +1507,13 @@ class MappingGenerator:
                 - rename_column_new_name: str
 
         Returns:
-            Sozluk: odi_result.
+            Dictionary: odi_result.
         """
         from odi_orchestrator import OdiOrchestrator
 
         orch = OdiOrchestrator()
 
-        # Operasyon tipi otomatik tespit
+        # Detect operation type automatically
         if "expressions" in changes and changes["expressions"]:
             operation = "update_expression"
         elif "filter_action" in changes:
@@ -1525,7 +1525,7 @@ class MappingGenerator:
         else:
             operation = "rename"
 
-        # Pre-validation: Expression update icin Oracle DB'de dogrula
+        # Pre-validation: validate expression updates in the Oracle DB
         if operation == "update_expression":
             tgt_table = changes.get("tgt_table")
             tgt_owner = changes.get("tgt_owner", "DWH")
@@ -1557,20 +1557,20 @@ class MappingGenerator:
 
         if "Hata:" in result or "FATAL ERROR" in result:
             self._add_log("update_mapping", "FAILED", result)
-            raise RuntimeError(f"ODI mapping guncelleme basarisiz: {result}")
+            raise RuntimeError(f"ODI mapping update failed: {result}")
 
         self._add_log("update_mapping", "SUCCESS", result[:100])
         return {"odi_result": result}
 
     def _take_snapshot_for_update(self, mapping_name: str, label_prefix: str) -> dict:
-        """Guncelleme oncesi/sonrasi snapshot alir.
+        """Take a snapshot before/after an update.
 
         Args:
-            mapping_name: Mapping adi.
-            label_prefix: Snapshot etiketi on eki (PRE_UPDATE/POST_UPDATE).
+            mapping_name: Mapping name.
+            label_prefix: Snapshot label prefix (PRE_UPDATE/POST_UPDATE).
 
         Returns:
-            Sozluk: snap_id.
+            Dictionary: snap_id.
         """
         from mapping_snapshot_manager import MappingSnapshotManager
 
@@ -1588,22 +1588,22 @@ class MappingGenerator:
             self._add_log(f"snapshot_{label_prefix.lower()}", "SKIPPED", str(e))
             return {"snap_id": None, "error": str(e)}
 
-    # ── Mapping Silme ──────────────────────────────────────────────────────────
+    # ── Delete Mapping ──────────────────────────────────────────────────────────
 
     def delete_mapping(self, mapping_name: str, tgt_owner: str = "DWH") -> dict:
-        """Bir mapping'i ve iliskili nesneleri siler (rollback).
+        """Delete a mapping and its associated objects (rollback).
 
-        Adimlar:
-          1. Son snapshot al (silme oncesi durum)
-          2. Rollback manager ile iliskili DDL'leri geri al
-          3. MAPPING_LOG'a DELETE islemi kaydet
+        Steps:
+          1. Take a final snapshot (state before deletion)
+          2. Restore associated DDL with the rollback manager
+          3. Record the DELETE operation in MAPPING_LOG
 
         Args:
-            mapping_name: Silinecek mapping adi.
-            tgt_owner: Hedef schema. Varsayilan "DWH".
+            mapping_name: Mapping name to delete.
+            tgt_owner: Target schema. Default: "DWH".
 
         Returns:
-            Sozluk: batch_id, mapping_name, steps, log.
+            Dictionary: batch_id, mapping_name, steps, log.
         """
         result = {
             "batch_id": self._batch_id,
@@ -1617,42 +1617,42 @@ class MappingGenerator:
         try:
             mapping_name = self._validate_identifier(mapping_name, "mapping_name")
 
-            # Adim 1: Silme oncesi snapshot
+            # Step 1: Snapshot before deletion
             pre_snap = self._take_snapshot_for_update(mapping_name, "PRE_DELETE")
             result["steps"]["pre_snapshot"] = pre_snap
 
-            # Adim 2: OdiOrchestrator ile fiziki ODI Mapping nesnesini sil
+            # Step 2: Delete the physical ODI Mapping object with OdiOrchestrator
             from odi_orchestrator import OdiOrchestrator
             orch = OdiOrchestrator()
             odi_del_result = orch.delete_mapping(mapping_name)
             if "Hata:" in odi_del_result:
                 self._add_log("odi_delete", "FAILED", odi_del_result)
-                raise RuntimeError(f"ODI tarafindan silinemedi: {odi_del_result}")
+                raise RuntimeError(f"ODI could not delete it: {odi_del_result}")
             else:
                 self._add_log("odi_delete", "SUCCESS", odi_del_result[:100])
                 result["steps"]["odi_delete"] = odi_del_result
 
-            # Adim 3: Rollback (varsa iliskili DDL nesneleri geri al)
+            # Step 3: Rollback (restore associated DDL objects, if any)
             from rollback_manager import RollbackManager
             with RollbackManager() as rm:
                 try:
-                    # Gecmis batch_id ile tablo/DDL sileceksek MAPPING_LOG'dan en son id'yi de bulabilir.
-                    # Ancak simdilik yeni batch uzerinden islem calisiyor
+                    # If deleting a table/DDL using a previous batch_id, the latest ID can also be retrieved from MAPPING_LOG.
+                    # For now, the operation runs through a new batch
                     rollback_result = rm.rollback_batch(self._batch_id)
                     self._add_log("rollback_objects", "SUCCESS",
                                    f"Rolled back: {rollback_result}")
                     result["steps"]["rollback"] = rollback_result
                 except Exception as e:
                     self._add_log("rollback_objects", "SKIPPED",
-                                   f"Rollback icin kayit bulunamadi: {e}")
+                                   f"No rollback record found: {e}")
                     result["steps"]["rollback"] = {"skipped": True, "reason": str(e)}
 
-            # Adim 3: MAPPING_LOG'a DELETE kaydi
+            # Step 3: DELETE record in MAPPING_LOG
             self._log_to_mapping_log(
                 {"mapping_name": mapping_name, "tgt_owner": tgt_owner},
                 "SUCCESS"
             )
-            self._add_log("delete_log", "SUCCESS", f"{mapping_name} silindi")
+            self._add_log("delete_log", "SUCCESS", f"{mapping_name} deleted")
 
         except (ValueError, RuntimeError) as e:
             result["overall_status"] = "FAILED"
@@ -1660,23 +1660,23 @@ class MappingGenerator:
             self._add_log("delete_pipeline", "FAILED", str(e))
         except Exception as e:
             result["overall_status"] = "FAILED"
-            result["error"] = f"Beklenmeyen hata: {str(e)}"
-            logger.error("MappingGenerator delete hatasi: %s", e, exc_info=True)
+            result["error"] = f"Unexpected error: {str(e)}"
+            logger.error("MappingGenerator delete failed: %s", e, exc_info=True)
 
         result["log"] = self._log_entries
         return result
 
-    # ── Prompt Analizi ─────────────────────────────────────────────────────────
+    # ── Prompt Analysis ─────────────────────────────────────────────────────────
 
     def analyze_prompt(self, user_prompt: str) -> dict:
-        """Prompt'u parse eder ama mapping olusturmaz (on izleme).
+        """Parse the prompt without creating a mapping (preview).
 
         Args:
-            user_prompt: Kullanicinin dogal dil istegi.
+            user_prompt: User's natural-language request.
 
         Returns:
-            Sozluk: params (parse sonucu), validation (dogrulama sonucu),
-            preview (on izleme bilgileri).
+            Dictionary: params (parse result), validation (validation result),
+            preview (preview details).
         """
         result = {"prompt": user_prompt, "params": None, "validation": None, "preview": None}
 
@@ -1687,29 +1687,29 @@ class MappingGenerator:
             validated = self.validate_params(params)
             result["validation"] = {"status": "VALID", "params": validated}
 
-            # On izleme bilgileri
+            # Preview details
             preview = {
                 "mapping_name": validated["mapping_name"],
                 "flow": f"{validated['src_model']}.{validated['src_table']} --> "
                         f"{validated['tgt_owner']}.{validated['tgt_table']}",
                 "will_create_skey": validated["needs_skey"],
                 "steps_to_run": [
-                    f"Hedef tablo olustur: {validated['tgt_owner']}.{validated['tgt_table']}",
-                    "ODI Mapping olustur",
+                    f"Create target table: {validated['tgt_owner']}.{validated['tgt_table']}",
+                    "Create ODI mapping",
                 ],
             }
             if validated["needs_skey"]:
                 preview["steps_to_run"].append(
-                    f"SKEY nesneleri olustur (SKEY_MAP_{validated['tgt_table']}, "
+                    f"Create SKEY objects (SKEY_MAP_{validated['tgt_table']}, "
                     f"SEQ_{validated['tgt_table']})"
                 )
                 preview["steps_to_run"].append(
                     f"SKEY Expression: CASE WHEN ... {validated['skey_natural_key']} ..."
                 )
             preview["steps_to_run"].extend([
-                "Lineage kaydi (DATA_LINEAGE)",
-                "DQ testleri uret + RAG kaydi",
-                "Mapping snapshot al",
+                "Record lineage (DATA_LINEAGE)",
+                "Generate DQ tests + register in RAG",
+                "Take mapping snapshot",
             ])
             result["preview"] = preview
 

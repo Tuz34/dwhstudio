@@ -5,7 +5,7 @@ import logging
 import json
 from source_connector import get_source_connector
 
-# Logger ayari
+# Logger setup
 logger = logging.getLogger("data_validation_mcp")
 
 mcp = FastMCP("Data_Validation_MCP_Server")
@@ -38,7 +38,7 @@ def _execute_source(sql: str):
 
 @mcp.tool()
 def compare_row_counts(src_table: str, tgt_table: str) -> str:
-    """Aktif kaynak connector ve hedef Oracle tablolarinin satir sayilarini karsilastirir."""
+    """Compares row counts of the active source connector and target Oracle tables."""
     try:
         src_df = _execute_source(f"SELECT COUNT(*) as CNT FROM {_q_source_table(src_table)}")
         src_count = int(src_df.iloc[0]['CNT'])
@@ -63,7 +63,7 @@ def compare_row_counts(src_table: str, tgt_table: str) -> str:
 
 @mcp.tool()
 def validate_column_sum(src_table: str, tgt_table: str, col_name: str) -> str:
-    """Sayisal bir kolonun toplamlarinin (Source vs Target) esitligini kontrol eder."""
+    """Checks whether sums of a numeric column match (Source vs Target)."""
     try:
         src_df = _execute_source(f"SELECT SUM({_q_oracle(col_name)}) as TOTAL FROM {_q_source_table(src_table)}")
         src_sum = float(src_df.iloc[0]['TOTAL'] or 0)
@@ -87,17 +87,17 @@ def validate_column_sum(src_table: str, tgt_table: str, col_name: str) -> str:
 
 @mcp.tool()
 def find_missing_rows(src_table: str, tgt_table: str, key_column: str, limit: int = 50) -> str:
-    """Kaynak tabloda olup hedef tabloda olmayan (eksik) kayitlari anahtar kolon uzerinden bulur."""
+    """Finds records present in the source table but missing from the target table by key column."""
     try:
-        # Bu islem icin MSSQL'deki tum anahtarları cekiyoruz (buyuk tablolarda limitli olmali)
-        # Ancak burada basitlik icin direkt query atiyoruz
+        # For this operation, fetch all keys from MSSQL (should be limited for large tables)
+        # For simplicity, query directly here
         source_sql = _source_limit_clause(
             f"SELECT {_q_oracle(key_column)} FROM {_q_source_table(src_table)}",
             limit * 100
         )
         source_keys = _execute_source(source_sql)
         
-        # Oracle anahtarlari
+        # Oracle keys
         oracle_keys = db.execute_select(f"SELECT {_q_oracle(key_column)} FROM {tgt_table} WHERE ROWNUM <= {limit*100}")
         
         src_set = set(source_keys[key_column.upper()].astype(str))
@@ -116,7 +116,7 @@ def find_missing_rows(src_table: str, tgt_table: str, key_column: str, limit: in
 
 @mcp.tool()
 def check_duplicate_records(table_name: str, key_columns: str) -> str:
-    """Belirtilen kolon(lar) bazinda mukerrer (duplicate) kayit kontrolu yapar. (Oracle uzerinde)"""
+    """Checks for duplicate records by the specified column(s) (on Oracle)."""
     try:
         sql = f"""
             SELECT {key_columns}, COUNT(*) as CNT 
@@ -131,9 +131,9 @@ def check_duplicate_records(table_name: str, key_columns: str) -> str:
 
 @mcp.tool()
 def validate_column_accuracy_by_pk(src_table: str, tgt_table: str, pk_col: str, col_to_check: str) -> str:
-    """Belirtilen kolondaki verilerin (ozellikle NULL durumunun) kaynak ve hedefte satır satır PK uzerinden ayni olup olmadigini kontrol eder."""
+    """Checks row by row by PK whether values in the specified column (especially NULLs) match in source and target."""
     try:
-        # Hedef (Oracle) tabloda ilgili kolonun bos (NULL) oldugu ornek PK'lari cek:
+        # Fetch sample PKs where the relevant column in the target (Oracle) table is empty (NULL):
         oracle_df = db.execute_select(
             f"SELECT {_q_oracle(pk_col)} FROM {tgt_table} "
             f"WHERE {_q_oracle(col_to_check)} IS NULL AND ROWNUM <= 100"
@@ -141,20 +141,20 @@ def validate_column_accuracy_by_pk(src_table: str, tgt_table: str, pk_col: str, 
         if oracle_df.empty:
             return json.dumps({
                 "status": "PASS",
-                "message": f"Hedef tabloda ({tgt_table}) {col_to_check} kolonu bos hicbir kayit bulunamadi. (Limitli test)"
+                "message": f"No records were found in the target table ({tgt_table}) with an empty {col_to_check} column. (Limited test)"
             }, indent=2)
             
-        # PK listesini cikar
+        # Extract the PK list
         pks = oracle_df[pk_col.upper()].astype(str).tolist()
         pk_list_str = ",".join(f"'{p}'" for p in pks)
         
-        # Bu PK'lar kaynak (MSSQL) uzerinde ne alemde? Orada da bos mu?
+        # What is the state of these PKs in the source (MSSQL)? Are they empty there too?
         source_df = _execute_source(
             f"SELECT {_q_oracle(pk_col)}, {_q_oracle(col_to_check)} "
             f"FROM {_q_source_table(src_table)} WHERE {_q_oracle(pk_col)} IN ({pk_list_str})"
         )
         
-        # MSSQL'de dolu olanlari (NULL olmayanlari) bul
+        # Find nonempty (non-NULL) values in MSSQL
         mismatched_pks = []
         for index, row in source_df.iterrows():
             val = row[col_to_check.upper()]
@@ -164,14 +164,14 @@ def validate_column_accuracy_by_pk(src_table: str, tgt_table: str, pk_col: str, 
         if mismatched_pks:
             return json.dumps({
                 "status": "FAIL (MISMATCH)",
-                "message": f"Hedefte NULL olan ama kaynakta DOLU olan kayitlar tespit edildi!",
+                "message": f"Records were found that are NULL in the target but NONEMPTY in the source!",
                 "mismatched_pk_samples": mismatched_pks[:10],
                 "total_mismatch_in_sample": len(mismatched_pks)
             }, indent=2)
         else:
              return json.dumps({
                 "status": "PASS",
-                "message": f"Hedef tabloda NULL olan kayitlarin tamami kaynakta da NULL. Veri tutarli.",
+                "message": f"All records that are NULL in the target are also NULL in the source. Data is consistent.",
                 "verified_null_count": len(pks)
             }, indent=2)           
     except Exception as e:

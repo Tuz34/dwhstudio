@@ -13,14 +13,14 @@ def _chk_oracle():
     except Exception: return False
 
 def _chk_source():
-    """Aktif kaynak (SOURCE_DB_TYPE: oracle|mssql) erisimini kontrol eder."""
+    """Checks access to the active source (SOURCE_DB_TYPE: oracle|mssql)."""
     try:
         from source_connector import get_source_connector
         return len(get_source_connector().get_tables()) > 0
     except Exception:
         return False
 
-# Geriye donuk uyum: eski "mssql" check'i artik source connector'a delege eder.
+# Backward compatibility: the old "mssql" check now delegates to the source connector.
 def _chk_mssql():
     return _chk_source()
 
@@ -31,14 +31,14 @@ def _chk_rag():
     except Exception: return False
 
 def _chk_llm():
-    """Ollama (lokal LLM) kontrol ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â embedding icin gerekli."""
+    """Checks Ollama (local LLM), which is needed for embeddings."""
     try:
         res = requests.get(config.OLLAMA_TAGS_URL, timeout=4)
         return res.status_code == 200
     except Exception: return False
 
 def _chk_claude():
-    """Claude API (Anthropic) kontrol ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â AI Agent icin ana motor."""
+    """Checks the Claude API (Anthropic), the main engine for AI Agent."""
     try:
         key = os.getenv("ANTHROPIC_API_KEY") or getattr(config, "ANTHROPIC_API_KEY", "")
         return bool(key and len(key) > 10)

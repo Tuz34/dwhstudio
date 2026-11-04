@@ -1,16 +1,16 @@
 """
-Test Generator — DWH Tablo Test Sablonlari
+Test Generator — DWH Table Test Templates
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Boyut ve fakt tablolari icin otomatik SQL test sablonlari uretir.
-5 test sablonu:
-  1. SKEY Uniqueness — Surrogate key tekrarsizlik
-  2. NOT NULL — Zorunlu alanlar dolu mu
+Generate automatic SQL test templates for dimension and fact tables.
+5 test templates:
+  1. SKEY Uniqueness — surrogate key uniqueness
+  2. NOT NULL — required fields are populated
   3. SCD2 Date Order — START_DATE < END_DATE
-  4. CURRENT_FLAG Values — Sadece 'Y' veya 'N'
-  5. CURRENT_FLAG Unique per NK — Her NK icin tek 'Y' kaydi
+  4. CURRENT_FLAG Values — only 'Y' or 'N'
+  5. CURRENT_FLAG Unique per NK — one 'Y' record per NK
 
-Opsiyonel: Uretilen testleri RAG business_rules koleksiyonuna kaydeder.
+Optionally store generated tests in the RAG business_rules collection.
 """
 
 import logging
@@ -22,7 +22,7 @@ logger = logging.getLogger("test_generator")
 
 
 class TestGenerator:
-    """DWH tablo test sablonu ureticisi."""
+    """Generate DWH table test templates."""
 
     def __init__(self):
         self.conn = None
@@ -42,7 +42,7 @@ class TestGenerator:
             self.conn = None
 
     def _get_pk_columns(self, owner: str, table_name: str) -> list[str]:
-        """PK kolonlarini getirir."""
+        """Fetch PK columns."""
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
@@ -60,7 +60,7 @@ class TestGenerator:
             cursor.close()
 
     def _get_not_null_columns(self, owner: str, table_name: str) -> list[str]:
-        """NOT NULL kisitli (nullable='N') kolonlari getirir."""
+        """Returns columns with a NOT NULL constraint (nullable='N')."""
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
@@ -74,7 +74,7 @@ class TestGenerator:
             cursor.close()
 
     def _has_column(self, owner: str, table_name: str, col_name: str) -> bool:
-        """Tabloda belirtilen kolon var mi?"""
+        """Check whether the specified column exists in the table."""
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
@@ -88,7 +88,7 @@ class TestGenerator:
 
     def generate_tests(self, owner: str, table_name: str) -> list[dict]:
         """
-        Tablo icin uygulanabilir test sablonlarini uretir.
+        Generate applicable test templates for the table.
         Returns: [{"test_name": "...", "sql": "...", "description": "..."}]
         """
         owner = owner.upper()
@@ -102,17 +102,17 @@ class TestGenerator:
             pk_col = pk_cols[0]
             tests.append({
                 "test_name": f"SKEY_UNIQUE_{table_name}",
-                "description": f"{pk_col} kolonu tekrarsiz olmali",
+                "description": f"{pk_col} column must be unique",
                 "sql": f"SELECT {pk_col}, COUNT(*) AS CNT FROM {full_name} GROUP BY {pk_col} HAVING COUNT(*) > 1",
-                "expected": "Sonuc bos olmali (0 satir)",
+                "expected": "Result must be empty (0 rows)",
             })
 
         # 2. NOT NULL
         nn_cols = self._get_not_null_columns(owner, table_name)
-        for col in nn_cols[:5]:  # En fazla 5 kolon icin
+        for col in nn_cols[:5]:  # At most 5 columns.
             tests.append({
                 "test_name": f"NOT_NULL_{table_name}_{col}",
-                "description": f"{col} kolonu NULL olmamali",
+                "description": f"{col} column must not be NULL",
                 "sql": f"SELECT COUNT(*) AS NULL_COUNT FROM {full_name} WHERE {col} IS NULL",
                 "expected": "NULL_COUNT = 0",
             })
@@ -123,7 +123,7 @@ class TestGenerator:
         if has_start and has_end:
             tests.append({
                 "test_name": f"SCD2_DATE_ORDER_{table_name}",
-                "description": "START_DATE her zaman END_DATE'den kucuk olmali",
+                "description": "START_DATE must always be earlier than END_DATE",
                 "sql": f"SELECT COUNT(*) AS BAD_DATES FROM {full_name} WHERE START_DATE > END_DATE",
                 "expected": "BAD_DATES = 0",
             })
@@ -133,35 +133,35 @@ class TestGenerator:
         if has_flag:
             tests.append({
                 "test_name": f"CURRENT_FLAG_VALUES_{table_name}",
-                "description": "CURRENT_FLAG yalnizca 'Y' veya 'N' olmali",
+                "description": "CURRENT_FLAG must only be 'Y' or 'N'",
                 "sql": f"SELECT DISTINCT CURRENT_FLAG FROM {full_name} WHERE CURRENT_FLAG NOT IN ('Y', 'N')",
-                "expected": "Sonuc bos olmali (0 satir)",
+                "expected": "Result must be empty (0 rows)",
             })
 
             # 5. CURRENT_FLAG Unique per NK
-            # NK icin PK disi bir UNIQUE constraint varsa kullan, yoksa tum NOT NULL kolonlari
+            # Use a UNIQUE constraint other than the PK for NK, or all NOT NULL columns otherwise.
             if len(pk_cols) > 0 and len(nn_cols) > 1:
-                # PK haricindeki ilk NOT NULL kolonu NK olarak varsay
+                # Treat the first NOT NULL column other than the PK as NK.
                 nk_candidates = [c for c in nn_cols if c not in pk_cols and c != "CURRENT_FLAG"]
                 if nk_candidates:
                     nk_col = nk_candidates[0]
                     tests.append({
                         "test_name": f"CURRENT_FLAG_UNIQUE_NK_{table_name}",
-                        "description": f"Her {nk_col} icin sadece bir CURRENT_FLAG='Y' olmali",
+                        "description": f"Each {nk_col} must have only one CURRENT_FLAG='Y'",
                         "sql": (
                             f"SELECT {nk_col}, COUNT(*) AS Y_COUNT "
                             f"FROM {full_name} WHERE CURRENT_FLAG = 'Y' "
                             f"GROUP BY {nk_col} HAVING COUNT(*) > 1"
                         ),
-                        "expected": "Sonuc bos olmali (0 satir)",
+                        "expected": "Result must be empty (0 rows)",
                     })
 
-        logger.info("%s icin %d test sablonu uretildi", full_name, len(tests))
+        logger.info("%s: %d test templates generated", full_name, len(tests))
         return tests
 
     def generate_and_store_in_rag(self, owner: str, table_name: str) -> list[dict]:
         """
-        Testleri uretir ve RAG business_rules koleksiyonuna kaydeder.
+        Generate tests and store them in the RAG business_rules collection.
         """
         tests = self.generate_tests(owner, table_name)
 
@@ -180,8 +180,8 @@ class TestGenerator:
                         {"type": "dq_test", "table": f"{owner}.{table_name}",
                          "test_name": t["test_name"]}
                     )
-                logger.info("%d test RAG'a kaydedildi: %s.%s", len(tests), owner, table_name)
+                logger.info("%d tests stored in RAG: %s.%s", len(tests), owner, table_name)
             except Exception as e:
-                logger.error("RAG kaydi basarisiz: %s", e)
+                logger.error("RAG record failed: %s", e)
 
         return tests

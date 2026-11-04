@@ -1,23 +1,23 @@
 """
-Mapping Graph — LangGraph Tabanlı Mapping Orkestratörü
+Mapping Graph — LangGraph-Based Mapping Orchestrator
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Mevcut MappingGenerator pipeline'ını LangGraph durum makinesi olarak
-yeniden yapılandırır. Avantajlar:
-  - Checkpoint: Çökerse kaldığı adımdan devam
-  - Dallanma: SKEY gerekli mi? → koşullu yol
-  - Hata yönetimi: Her node'da hata → error_handler'a dallanma
-  - Human-in-the-loop: Onay adımı (UI Wizard ile entegre)
+Structures the existing MappingGenerator pipeline as a LangGraph state machine
+Benefits:
+  - Checkpoint: resume from the last step after a crash
+  - Branching: conditional path based on whether SKEY is needed
+  - Error handling: each node branches to error_handler on failure
+  - Human-in-the-loop: approval step (integrated with UI Wizard)
 
-Mevcut MappingGenerator'daki iş mantığı (metotlar) aynen kullanılır.
-Bu modül sadece orkestrasyon akışını yönetir.
+The existing MappingGenerator business logic (methods) is reused unchanged.
+This module manages only the orchestration flow.
 
-Kullanım:
+Usage:
     from mapping_graph import run_mapping_graph, get_graph
 
-    # Tek seferlik çalıştırma
-    result = run_mapping_graph(user_prompt="Customer tablosunu ODS'ye aktar")
+    # One-off run
+    result = run_mapping_graph(user_prompt="Transfer the Customer table to ODS")
 
-    # Veya parametrelerle
+    # Or with parameters
     result = run_mapping_graph(params={
         "mapping_name": "MAP_SALES_CUSTOMER_TO_ODS",
         "src_model": "SQL_SERVER",
@@ -28,10 +28,10 @@ Kullanım:
         "needs_skey": False,
     })
 
-    # Human-in-the-loop ile (UI Wizard entegrasyonu)
+    # With human-in-the-loop (UI Wizard integration)
     result = run_mapping_graph(
         params={...},
-        require_approval=True,   # preview adımında durur
+        require_approval=True,   # stop at the preview step
     )
 """
 
@@ -60,55 +60,55 @@ def _persist_graph_state(graph, config: dict, thread_id: str | None = None) -> N
         raw_values = graph.get_state(config).values
         state = dict(raw_values) if raw_values else {}
         if not state:
-            logger.warning("Graph state bos doniyor — checkpoint okunamadi (thread=%s).", thread_id)
+            logger.warning("Graph state is empty — checkpoint could not be read (thread=%s).", thread_id)
             return
         with MappingStateManager() as msm:
             msm.upsert_state(state, thread_id=thread_id)
     except Exception as exc:
-        # Tani: yetki, baglanti, sema, vs. gibi sorunlar gorunsun
-        logger.error("Graph state persist edilemedi (thread=%s): %s", thread_id, exc, exc_info=True)
+        # Diagnosis: expose issues such as permissions, connections, and schemas
+        logger.error("Graph state could not be persisted (thread=%s): %s", thread_id, exc, exc_info=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STATE SCHEMA — Tüm adımlar arasında paylaşılan durum
+# STATE SCHEMA — State shared across all steps
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class MappingState(TypedDict, total=False):
-    """LangGraph durum nesnesi. Her node bu state'i okur/yazar."""
-    # ── Giriş ──
-    user_prompt: str               # Doğal dil isteği (opsiyonel)
-    raw_params: dict               # Kullanıcının verdiği parametreler
-    require_approval: bool         # True ise preview'da durur
+    """LangGraph state object. Every node reads and writes this state."""
+    # ── Input ──
+    user_prompt: str               # Natural-language request (optional)
+    raw_params: dict               # User-provided parameters
+    require_approval: bool         # Stops at preview when True
 
-    # ── Pipeline durumu ──
-    batch_id: str                  # İşlem batch ID'si
-    current_step: str              # Aktif adım adı
-    validated_params: dict         # Doğrulanmış parametreler
+    # ── Pipeline state ──
+    batch_id: str                  # Operation batch ID
+    current_step: str              # Active step name
+    validated_params: dict         # Validated parameters
 
-    # ── Adım sonuçları ──
-    parse_result: dict             # Prompt parse sonucu
-    validate_result: dict          # Doğrulama sonucu
-    target_table_result: dict      # Hedef tablo oluşturma sonucu
-    datastore_result: dict         # ODI datastore kayıt sonucu
-    mapping_result: dict           # ODI mapping oluşturma sonucu
-    skey_result: dict              # SKEY oluşturma sonucu
-    lineage_result: dict           # Lineage kayıt sonucu
-    test_result: dict              # DQ test üretim sonucu
-    snapshot_result: dict          # Snapshot sonucu
+    # ── Step results ──
+    parse_result: dict             # Prompt parsing result
+    validate_result: dict          # Validation result
+    target_table_result: dict      # Target table creation result
+    datastore_result: dict         # ODI datastore registration result
+    mapping_result: dict           # ODI mapping creation result
+    skey_result: dict              # SKEY creation result
+    lineage_result: dict           # Lineage registration result
+    test_result: dict              # DQ test generation result
+    snapshot_result: dict          # Snapshot result
 
-    # ── Kontrol ──
+    # ── Control ──
     approval_status: str           # "pending" / "approved" / "rejected"
     overall_status: str            # "running" / "success" / "failed"
-    error: str | None              # Son hata mesajı
-    log: list[dict]                # Tüm adım logları
-    completed_steps: list[str]     # Tamamlanan adım isimleri
+    error: str | None              # Last error message
+    log: list[dict]                # All step logs
+    completed_steps: list[str]     # Completed step names
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# NODE FONKSİYONLARI — Her biri bir graph node'u
+# NODE FUNCTIONS — Each is a graph node
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _add_log(state: MappingState, step: str, status: str, detail: str = "") -> list[dict]:
-    """Log listesine yeni giriş ekler."""
+    """Add a new entry to the log list."""
     logs = list(state.get("log", []))
     logs.append({
         "step": step,
@@ -153,9 +153,9 @@ def _repository_step_status(result: dict) -> tuple[str, str]:
 
 
 def node_init(state: MappingState) -> dict:
-    """Pipeline'ı başlatır, batch_id atar."""
+    """Start the pipeline and assign batch_id."""
     batch_id = state.get("batch_id") or str(uuid.uuid4())[:8]
-    logger.info("[%s] Pipeline başlatıldı", batch_id)
+    logger.info("[%s] Pipeline started", batch_id)
     return {
         "batch_id": batch_id,
         "current_step": "init",
@@ -166,16 +166,16 @@ def node_init(state: MappingState) -> dict:
 
 
 def node_parse_prompt(state: MappingState) -> dict:
-    """Doğal dil prompt'unu parametrelere dönüştürür."""
+    """Convert a natural-language prompt into parameters."""
     from mapping_generator import MappingGenerator
 
     prompt = state.get("user_prompt", "")
     if not prompt:
-        # Prompt yok, direkt raw_params kullan
+        # No prompt; use raw_params directly
         return {
             "current_step": "parse_prompt",
             "parse_result": {"skipped": True, "reason": "No prompt, using raw_params"},
-            "log": _add_log(state, "parse_prompt", "SKIPPED", "raw_params kullanılıyor"),
+            "log": _add_log(state, "parse_prompt", "SKIPPED", "Using raw_params"),
         }
 
     try:
@@ -192,13 +192,13 @@ def node_parse_prompt(state: MappingState) -> dict:
         return {
             "current_step": "parse_prompt",
             "overall_status": "failed",
-            "error": f"Prompt parse hatası: {e}",
+            "error": f"Prompt parsing failed: {e}",
             "log": _add_log(state, "parse_prompt", "FAILED", str(e)),
         }
 
 
 def node_validate(state: MappingState) -> dict:
-    """Parametreleri doğrular ve normalize eder."""
+    """Validate and normalize parameters."""
     from mapping_generator import MappingGenerator
 
     if state.get("overall_status") == "failed":
@@ -208,8 +208,8 @@ def node_validate(state: MappingState) -> dict:
     if not raw:
         return {
             "overall_status": "failed",
-            "error": "Parametre bulunamadı",
-            "log": _add_log(state, "validate", "FAILED", "raw_params boş"),
+            "error": "No parameters found",
+            "log": _add_log(state, "validate", "FAILED", "raw_params is empty"),
         }
 
     try:
@@ -227,13 +227,13 @@ def node_validate(state: MappingState) -> dict:
         return {
             "current_step": "validate",
             "overall_status": "failed",
-            "error": f"Doğrulama hatası: {e}",
+            "error": f"Validation failed: {e}",
             "log": _add_log(state, "validate", "FAILED", str(e)),
         }
 
 
 def node_preview(state: MappingState) -> dict:
-    """Onay bekleyen preview adımı. require_approval=True ise durur."""
+    """Preview step awaiting approval. Stops if require_approval=True."""
     if state.get("overall_status") == "failed":
         return {"overall_status": "failed"}
 
@@ -243,10 +243,10 @@ def node_preview(state: MappingState) -> dict:
             "current_step": "preview",
             "approval_status": "pending",
             "log": _add_log(state, "preview", "WAITING",
-                           f"Kullanıcı onayı bekleniyor: {params.get('mapping_name')}"),
+                           f"Waiting for user approval: {params.get('mapping_name')}"),
         }
 
-    # Otomatik onay
+    # Automatic approval
     return {
         "current_step": "preview",
         "approval_status": "approved",
@@ -256,7 +256,7 @@ def node_preview(state: MappingState) -> dict:
 
 
 def node_create_table(state: MappingState) -> dict:
-    """Hedef Oracle tablosunu oluşturur."""
+    """Create the target Oracle table."""
     from mapping_generator import MappingGenerator
 
     if state.get("overall_status") == "failed":
@@ -270,7 +270,7 @@ def node_create_table(state: MappingState) -> dict:
         return {
             "current_step": "create_table",
             "target_table_result": result,
-            # Eğer create_table src_table'ı güncellerse (full_src_name tespiti)
+            # If create_table updates src_table (full_src_name detection)
             "validated_params": params,
             "log": _add_log(state, "create_table", result.get("status", "SUCCESS"),
                            _target_table_detail(result)),
@@ -280,13 +280,13 @@ def node_create_table(state: MappingState) -> dict:
         return {
             "current_step": "create_table",
             "overall_status": "failed",
-            "error": f"Tablo oluşturma hatası: {e}",
+            "error": f"Table creation failed: {e}",
             "log": _add_log(state, "create_table", "FAILED", str(e)),
         }
 
 
 def node_register_datastores(state: MappingState) -> dict:
-    """ODI'da kaynak ve hedef datastore'ları kaydeder."""
+    """Register source and target datastores in ODI."""
     from mapping_generator import MappingGenerator
 
     if state.get("overall_status") == "failed":
@@ -308,13 +308,13 @@ def node_register_datastores(state: MappingState) -> dict:
         return {
             "current_step": "register_datastores",
             "overall_status": "failed",
-            "error": f"Datastore kayıt hatası: {e}",
+            "error": f"Datastore registration failed: {e}",
             "log": _add_log(state, "register_datastores", "FAILED", str(e)),
         }
 
 
 def node_create_mapping(state: MappingState) -> dict:
-    """ODI mapping'i oluşturur."""
+    """Create the ODI mapping."""
     from mapping_generator import MappingGenerator
 
     if state.get("overall_status") == "failed":
@@ -336,13 +336,13 @@ def node_create_mapping(state: MappingState) -> dict:
         return {
             "current_step": "create_mapping",
             "overall_status": "failed",
-            "error": f"Mapping oluşturma hatası: {e}",
+            "error": f"Mapping creation failed: {e}",
             "log": _add_log(state, "create_mapping", "FAILED", str(e)),
         }
 
 
 def node_create_skey(state: MappingState) -> dict:
-    """Surrogate Key nesnelerini oluşturur."""
+    """Create surrogate key objects."""
     from mapping_generator import MappingGenerator
 
     if state.get("overall_status") == "failed":
@@ -356,11 +356,11 @@ def node_create_skey(state: MappingState) -> dict:
         return {
             "current_step": "create_skey",
             "skey_result": result,
-            "log": _add_log(state, "create_skey", "SUCCESS", "SKEY oluşturuldu"),
+            "log": _add_log(state, "create_skey", "SUCCESS", "SKEY created"),
             "completed_steps": list(state.get("completed_steps", [])) + ["create_skey"],
         }
     except Exception as e:
-        # SKEY hatası kritik değil
+        # SKEY failure is noncritical
         return {
             "current_step": "create_skey",
             "skey_result": {"error": str(e)},
@@ -370,17 +370,17 @@ def node_create_skey(state: MappingState) -> dict:
 
 
 def node_skip_skey(state: MappingState) -> dict:
-    """SKEY gerekmiyorsa atla."""
+    """Skip if SKEY is not needed."""
     return {
         "current_step": "skip_skey",
         "skey_result": {"skipped": True},
-        "log": _add_log(state, "create_skey", "SKIPPED", "SKEY istenmedi"),
+        "log": _add_log(state, "create_skey", "SKIPPED", "SKEY not requested"),
         "completed_steps": list(state.get("completed_steps", [])) + ["skip_skey"],
     }
 
 
 def node_post_steps(state: MappingState) -> dict:
-    """Lineage, DQ test ve snapshot adımlarını çalıştırır."""
+    """Run lineage, DQ test, and snapshot steps."""
     from mapping_generator import MappingGenerator
 
     if state.get("overall_status") == "failed":
@@ -440,7 +440,7 @@ def node_post_steps(state: MappingState) -> dict:
 
 
 def node_finalize(state: MappingState) -> dict:
-    """Pipeline'ı tamamlar, MAPPING_LOG'a yazar."""
+    """Complete the pipeline and write to MAPPING_LOG."""
     from mapping_generator import MappingGenerator
 
     params = state.get("validated_params", {})
@@ -457,9 +457,9 @@ def node_finalize(state: MappingState) -> dict:
         mg._batch_id = state.get("batch_id", "unknown")
         mg._log_to_mapping_log(params, final_status.upper(), state.get("error"))
     except Exception as e:
-        logger.warning("MAPPING_LOG yazılamadı: %s", e)
+        logger.warning("Could not write MAPPING_LOG: %s", e)
 
-    logger.info("[%s] Pipeline tamamlandı: %s", state.get("batch_id"), final_status)
+    logger.info("[%s] Pipeline completed: %s", state.get("batch_id"), final_status)
 
     return {
         "current_step": "finalize",
@@ -471,28 +471,28 @@ def node_finalize(state: MappingState) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# KOŞULLU DALLANMA FONKSİYONLARI
+# CONDITIONAL BRANCH FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def should_continue_after_validate(state: MappingState) -> str:
-    """Doğrulama sonrası: hata varsa finalize'a git, yoksa preview'a."""
+    """After validation: go to finalize on error; otherwise go to preview."""
     if state.get("overall_status") == "failed":
         return "finalize"
     return "preview"
 
 
 def should_continue_after_preview(state: MappingState) -> str:
-    """Preview sonrası: onay durumuna göre dallan."""
+    """After preview: branch based on approval status."""
     approval = state.get("approval_status", "approved")
     if approval == "rejected":
         return "finalize"
     if approval == "pending":
-        return "finalize"  # UI'dan onay gelene kadar durur (interrupt)
+        return "finalize"  # Pause until UI approval arrives (interrupt)
     return "create_table"
 
 
 def needs_skey(state: MappingState) -> str:
-    """SKEY gerekli mi?"""
+    """Is SKEY needed?"""
     params = state.get("validated_params", {})
     if state.get("overall_status") == "failed":
         return "skip_skey"
@@ -502,24 +502,24 @@ def needs_skey(state: MappingState) -> str:
 
 
 def should_continue_after_mapping(state: MappingState) -> str:
-    """Mapping sonrası: hata varsa finalize, yoksa SKEY kontrolü."""
+    """After mapping: finalize on error; otherwise check SKEY."""
     if state.get("overall_status") == "failed":
         return "finalize"
     return "skey_check"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GRAPH OLUŞTURMA
+# GRAPH CREATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def build_mapping_graph() -> StateGraph:
-    """LangGraph state machine'i oluşturur.
+    """Create the LangGraph state machine.
 
-    Graph yapısı:
+    Graph structure:
     ```
     START → init → parse_prompt → validate ─┬→ preview ─┬→ create_table
                                              │           │   → register_ds
-           finalize ←──── (hata) ←───────────┘           │   → create_mapping
+           finalize ←──── (error) ←───────────┘           │   → create_mapping
               ↑                              (red) ──────┘        │
               │                                              skey_check
               │                                             ┌─────┴─────┐
@@ -531,7 +531,7 @@ def build_mapping_graph() -> StateGraph:
     """
     graph = StateGraph(MappingState)
 
-    # ── Node'ları ekle ──
+    # ── Add nodes ──
     graph.add_node("init", node_init)
     graph.add_node("parse_prompt", node_parse_prompt)
     graph.add_node("validate", node_validate)
@@ -544,34 +544,34 @@ def build_mapping_graph() -> StateGraph:
     graph.add_node("post_steps", node_post_steps)
     graph.add_node("finalize", node_finalize)
 
-    # ── Edge'leri tanımla ──
+    # ── Define edges ──
 
-    # Başlangıç
+    # Start
     graph.add_edge(START, "init")
     graph.add_edge("init", "parse_prompt")
     graph.add_edge("parse_prompt", "validate")
 
-    # Validate sonrası: hata → finalize, başarı → preview
+    # After validation: error → finalize; success → preview
     graph.add_conditional_edges("validate", should_continue_after_validate,
                                 {"finalize": "finalize", "preview": "preview"})
 
-    # Preview sonrası: onay → create_table, red → finalize
+    # After preview: approval → create_table; rejection → finalize
     graph.add_conditional_edges("preview", should_continue_after_preview,
                                 {"create_table": "create_table", "finalize": "finalize"})
 
-    # Sıralı adımlar
+    # Sequential steps
     graph.add_edge("create_table", "register_datastores")
     graph.add_edge("register_datastores", "create_mapping")
 
-    # Mapping sonrası: SKEY kontrolü
+    # After mapping: check SKEY
     graph.add_conditional_edges("create_mapping", should_continue_after_mapping,
                                 {"skey_check": "skey_check", "finalize": "finalize"})
 
-    # SKEY dallanma (sanal node — conditional edge olarak)
+        # SKEY branching (virtual node — as a conditional edge)
     graph.add_conditional_edges("skey_check", needs_skey,
                                 {"create_skey": "create_skey", "skip_skey": "skip_skey"})
 
-    # SKEY birleşme → post_steps
+    # SKEY join → post_steps
     graph.add_edge("create_skey", "post_steps")
     graph.add_edge("skip_skey", "post_steps")
 
@@ -582,25 +582,25 @@ def build_mapping_graph() -> StateGraph:
     return graph
 
 
-# "skey_check" sanal node — sadece routing için
+# "skey_check" virtual node — routing only
 def _skey_check_passthrough(state: MappingState) -> dict:
-    """SKEY kontrolü — sadece dallanma noktası."""
+    """SKEY check — branch point only."""
     return {"current_step": "skey_check"}
 
 
 def get_graph(use_memory_checkpoint: bool = True):
-    """Derlenmiş graph döner. Checkpoint ile veya olmadan.
+    """Return the compiled graph, with or without checkpointing.
 
     Args:
-        use_memory_checkpoint: True ise MemorySaver ile checkpoint aktif.
-            Production'da SQLiteSaver kullanılabilir.
+        use_memory_checkpoint: If True, checkpointing is enabled with MemorySaver.
+            SQLiteSaver can be used in production.
 
     Returns:
-        Derlenmiş LangGraph CompiledGraph nesnesi.
+        Compiled LangGraph CompiledGraph object.
     """
     builder = build_mapping_graph()
 
-    # skey_check sanal node'u ekle
+    # Add the virtual skey_check node
     builder.add_node("skey_check", _skey_check_passthrough)
 
     checkpointer = MemorySaver() if use_memory_checkpoint else None
@@ -608,7 +608,7 @@ def get_graph(use_memory_checkpoint: bool = True):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ANA ÇALIŞTIRMA FONKSİYONU
+# MAIN RUN FUNCTION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_mapping_graph(
@@ -617,16 +617,16 @@ def run_mapping_graph(
     require_approval: bool = False,
     thread_id: str | None = None,
 ) -> dict:
-    """LangGraph mapping pipeline'ını çalıştırır.
+    """Run the LangGraph mapping pipeline.
 
     Args:
-        user_prompt: Doğal dil isteği (opsiyonel).
-        params: Yapısal parametreler (opsiyonel). user_prompt verilmezse bu kullanılır.
-        require_approval: True ise preview adımında durur.
-        thread_id: Checkpoint thread ID. Belirtilmezse UUID üretilir.
+        user_prompt: Natural-language request (optional).
+        params: Structured parameters (optional). Used if user_prompt is not provided.
+        require_approval: If True, stop at the preview step.
+        thread_id: Checkpoint thread ID. A UUID is generated if omitted.
 
     Returns:
-        Son state'in kopyası (tüm adım sonuçları, loglar, status).
+        Copy of the final state (all step results, logs, status).
     """
     graph = get_graph(use_memory_checkpoint=True)
     resolved_thread_id = thread_id or str(uuid.uuid4())
@@ -643,10 +643,10 @@ def run_mapping_graph(
         }
     }
 
-    # Graph'ı çalıştır
+    # Run the graph
     final_state = None
     for step_output in graph.stream(initial_state, config=config):
-        # Her adımın çıktısını logla
+        # Log the output of each step
         for node_name, node_output in step_output.items():
             logger.info("Graph step: %s → %s",
                        node_name,
@@ -654,28 +654,28 @@ def run_mapping_graph(
         _persist_graph_state(graph, config, resolved_thread_id)
         final_state = step_output
 
-    # Son state'i düzleştir
+    # Flatten the final state
     if final_state:
-        # stream son çıktıda {node_name: state_update} döner
+        # The stream returns {node_name: state_update} as its final output
         last_node = list(final_state.keys())[0]
         result = graph.get_state(config).values
         _persist_graph_state(graph, config, resolved_thread_id)
         return dict(result)
 
-    return {"overall_status": "failed", "error": "Graph hiç çalışmadı"}
+    return {"overall_status": "failed", "error": "Graph did not run"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# YARDIMCI: Graph görselleştirme (ASCII)
+# HELPER: Graph visualization (ASCII)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def print_graph_ascii():
-    """Graph'ın ASCII temsilini yazdırır."""
+    """Print the graph as ASCII."""
     graph = get_graph(use_memory_checkpoint=False)
     try:
         print(graph.get_graph().draw_ascii())
     except Exception:
-        # ASCII draw mevcut değilse node listesini göster
+        # Show the node list if ASCII drawing is unavailable
         nodes = graph.get_graph().nodes
         print("=== Mapping Graph Nodes ===")
         for name in nodes:
@@ -683,12 +683,12 @@ def print_graph_ascii():
 
 
 if __name__ == "__main__":
-    # Test: Graph'ı oluştur ve ASCII olarak göster
+    # Test: create the graph and display it as ASCII
     import sys
     sys.stdout.reconfigure(encoding='utf-8')
 
     print("=== LangGraph Mapping Pipeline ===\n")
     print_graph_ascii()
 
-    print("\n=== Graph compile başarılı ===")
-    print("Kullanım: run_mapping_graph(params={...})")
+    print("\n=== Graph compilation succeeded ===")
+    print("Usage: run_mapping_graph(params={...})")

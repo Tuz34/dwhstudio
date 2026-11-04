@@ -22,8 +22,8 @@ from config import LOCAL_OPENAI_API_KEY, LOCAL_OPENAI_BASE_URL, LOCAL_OPENAI_MOD
 
 
 DEFAULT_PROMPT = (
-    "HR.EMPLOYEES tablosunu ODS katmanina modellemek icin kolon stratejisi, "
-    "audit kolonlari ve reconciliation testlerini kisa maddelerle oner."
+    "Suggest a column strategy for modeling HR.EMPLOYEES in the ODS layer, "
+    "audit columns, and reconciliation tests in short bullet points."
 )
 
 
@@ -63,7 +63,7 @@ def call_openai_compatible(base_url: str, model: str, prompt: str, api_key: str 
         "messages": [
             {
                 "role": "system",
-                "content": "Sen Oracle, ODI ve DWH konusunda kisa, teknik ve test odakli cevap veren bir local asistansin.",
+                "content": "You are a local assistant giving concise, technical, test focused answers about Oracle, ODI, and DWH.",
             },
             {"role": "user", "content": prompt},
         ],

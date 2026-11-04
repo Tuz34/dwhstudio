@@ -1,25 +1,25 @@
 """
-pytest Fixture'lari
+pytest Fixtures
 ━━━━━━━━━━━━━━━━━━━
 
-Tum test dosyalari icin ortak fixture'lar.
+Shared fixtures for all test files.
 """
 
 import sys
 import os
 import pytest
 
-# Proje kokunu Python path'ine ekle
+# Add the project root to the Python path.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
 @pytest.fixture
 def app_client():
-    """Flask test client'i olusturur."""
+    """Create a Flask test client."""
     from app import app, limiter
     app.config["TESTING"] = True
-    app.config["WTF_CSRF_ENABLED"] = False  # Test sirasinda CSRF devre disi
-    app.config["RATELIMIT_ENABLED"] = False  # Test suite ayni endpoint'e hizli vurur
+    app.config["WTF_CSRF_ENABLED"] = False  # Disable CSRF during tests.
+    app.config["RATELIMIT_ENABLED"] = False  # The test suite calls the same endpoint rapidly.
     old_limiter_enabled = limiter.enabled
     limiter.enabled = False
     try:
@@ -31,7 +31,7 @@ def app_client():
 
 @pytest.fixture
 def dqm():
-    """DataQualityManager instance'i olusturur ve sonra kapatir."""
+    """Create and then close a DataQualityManager instance."""
     from data_quality import DataQualityManager
     manager = DataQualityManager()
     yield manager
@@ -40,7 +40,7 @@ def dqm():
 
 @pytest.fixture
 def wm():
-    """WatermarkManager instance'i olusturur ve sonra kapatir."""
+    """Create and then close a WatermarkManager instance."""
     from watermark_manager import WatermarkManager
     manager = WatermarkManager()
     yield manager

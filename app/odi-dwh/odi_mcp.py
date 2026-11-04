@@ -5,12 +5,12 @@ from config import ODI_REPO_SCHEMA, ODI_REPO_USER, ODI_REPO_PASSWORD, ODI_REPO_D
 from diagnostic_errors import safe_error_json
 from odi_orchestrator import OdiOrchestrator
 
-# FastMCP kullanarak yeni bir MCP sunucusu olusturuyoruz
+# Create a new MCP server using FastMCP
 mcp = FastMCP("ODI_Repository_MCP_Server")
 odi_orch = OdiOrchestrator()
 
 def execute_odi_select(sql: str) -> pd.DataFrame:
-    """Verilen SQL'i configured ODI repository kullanicisi ile calistirir ve DataFrame doner."""
+    """Execute the given SQL as the configured ODI repository user and return a DataFrame."""
     conn = oracledb.connect(user=ODI_REPO_USER, password=ODI_REPO_PASSWORD, dsn=ODI_REPO_DSN or ORACLE_DSN)
     try:
         df = pd.read_sql(sql, conn)
@@ -23,7 +23,7 @@ def execute_odi_select(sql: str) -> pd.DataFrame:
 
 
 def execute_odi_lob_query(sql: str, params: dict = None) -> list:
-    """CLOB/LOB iceren sorgulari cursor ile calistirir, LOB degerlerini string'e cevirir."""
+    """Execute CLOB/LOB queries with a cursor and convert LOB values to strings."""
     conn = oracledb.connect(user=ODI_REPO_USER, password=ODI_REPO_PASSWORD, dsn=ODI_REPO_DSN or ORACLE_DSN)
     try:
         cur = conn.cursor()
@@ -48,9 +48,9 @@ def execute_odi_lob_query(sql: str, params: dict = None) -> list:
 @mcp.tool()
 def odi_generate_mapping(mapping_name: str, src_model: str, src_table: str, tgt_model: str, tgt_table: str, sequence_name: str = "NONE") -> str:
     """
-    Belirtilen kaynak ve hedef tablo arasinda yeni bir ODI Mapping olusturmak ve Senaryo paketlemek icin gerekli Groovy komutunu hazirlar.
-    SKEY varsa `sequence_name` parametresi ile (örn: SEQ_ODS_CUST_SKEY) gonderilir, yoksa bos birakilir.
-    Ornek: odi_generate_mapping("MAP_CUSTOMER", "MSSQL", "CUSTOMER", "ORACLE_ODS", "ODS_CUSTOMER", "SEQ_CUSTOMER_ID")
+    Prepare the Groovy command needed to create an ODI mapping between the specified source and target tables and package a scenario.
+    If SKEY is used, pass it through `sequence_name` (e.g. SEQ_ODS_CUST_SKEY); otherwise leave it empty.
+    Example: odi_generate_mapping("MAP_CUSTOMER", "MSSQL", "CUSTOMER", "ORACLE_ODS", "ODS_CUSTOMER", "SEQ_CUSTOMER_ID")
     """
     try:
         return odi_orch.generate_mapping(mapping_name, src_model, src_table, tgt_model, tgt_table, sequence_name)
@@ -59,7 +59,7 @@ def odi_generate_mapping(mapping_name: str, src_model: str, src_table: str, tgt_
 
 @mcp.tool()
 def odi_get_recent_sessions(limit: int = 20) -> str:
-    """ODI (Oracle Data Integrator) uzerinde calisan en son senaryo ve mapping oturumlarinin (session) durumunu dondurur."""
+    """Return the status of the latest scenario and mapping sessions running on ODI (Oracle Data Integrator)."""
     sql = f"""
         SELECT 
             SESS_NO AS SESSION_NO,
@@ -84,7 +84,7 @@ def odi_get_recent_sessions(limit: int = 20) -> str:
 
 @mcp.tool()
 def odi_get_scenario_list() -> str:
-    """ODI'de kullanilabilecek mevcut Senaryolari (Execution Packages) listeler."""
+    """List available scenarios (Execution Packages) in ODI."""
     sql = f"""
         SELECT 
             SCEN_NAME AS SCENARIO_NAME,
@@ -100,7 +100,7 @@ def odi_get_scenario_list() -> str:
 
 @mcp.tool()
 def odi_get_knowledge_modules() -> str:
-    """ODI Reposu uzerindeki tum Bilgi Modullerini listeler. TRT_TYPE kodlari: KI=IKM, KL=LKM, CK=CKM, EK=EKM."""
+    """List all knowledge modules in the ODI repository. TRT_TYPE codes: KI=IKM, KL=LKM, CK=CKM, EK=EKM."""
     sql = f"""
         SELECT 
             I_TRT AS KM_ID,
@@ -118,7 +118,7 @@ def odi_get_knowledge_modules() -> str:
 
 @mcp.tool()
 def odi_get_mapping_lineage(limit: int = 50) -> str:
-    """ODI Mappings bileşenlerini (Data Lineage) filtre, distinct, join gibi objelerle beraber çeker."""
+    """Retrieve ODI mapping components (Data Lineage), including filters, distinct, and join objects."""
     sql = f"""
         SELECT
             m.NAME as MAPPING_NAME,
@@ -145,17 +145,17 @@ def odi_get_mapping_lineage(limit: int = 50) -> str:
 @mcp.tool()
 def odi_get_mapping_details(mapping_name: str) -> str:
     """
-    Belirli bir mapping'in tüm bileşenlerini (DATASTORE, FILE, FILTER vb.) döndürür.
-    Her bileşenin kolon-bazlı eşleşmelerini (lineage) ve FILTER koşulunu içerir.
+    Return all components of a given mapping (DATASTORE, FILE, FILTER, etc.).
+    Include column-level mappings (lineage) and FILTER conditions for each component.
 
-    Dönen JSON alanları: MAPPING_NAME, COMP_NAME, COMP_TYPE, ATTR_NAME, EXPRESSION,
+    Returned JSON fields: MAPPING_NAME, COMP_NAME, COMP_TYPE, ATTR_NAME, EXPRESSION,
                          DATA_TYPE, COL_LENGTH, COL_PREC, COL_SCALE
-    - DATASTORE/FILE + EXPRESSION dolu    → hedef (target) bileşeni kolon eşlemesi
-    - DATASTORE/FILE + EXPRESSION null    → kaynak (source) bileşeni kolonu
-    - FILTER + ATTR_NAME=FILTER_CONDITION → filtre koşulu ifadesi
+    - DATASTORE/FILE + EXPRESSION populated → target component column mapping
+    - DATASTORE/FILE + EXPRESSION null    → source component column
+    - FILTER + ATTR_NAME=FILTER_CONDITION → filter condition expression
     """
-    # S-1: String birleştirme yerine bind variable (:mname) kullan — SQL injection engeli
-    # SNP_MAP_REF join ile gercek tablo adini (QUALIFIED_NAME) cekiyoruz
+    # S-1: Use bind variable (:mname) instead of string concatenation — prevents SQL injection
+    # Fetch the actual table name (QUALIFIED_NAME) with the SNP_MAP_REF join
     sql = f"""
         SELECT
             m.NAME              AS MAPPING_NAME,
@@ -211,10 +211,10 @@ def odi_get_mapping_details(mapping_name: str) -> str:
         return safe_error_json("ODI mapping details read", e)
 
 
-# ── Senaryo Uretme & Calistirma ─────────────────────────────────────────────
+# ── Scenario Generation & Execution ─────────────────────────────────────────────
 
 def odi_create_scenario(name: str, mapping: str, version: str = "001") -> str:
-    """Bir ODI mapping'den senaryo uretir. Returns: komut string veya sonuc."""
+    """Generates a scenario from an ODI mapping. Returns: command string or result."""
     import json as _json
     try:
         result = odi_orch.generate_scenario(name, mapping, version)
@@ -224,7 +224,7 @@ def odi_create_scenario(name: str, mapping: str, version: str = "001") -> str:
 
 
 def odi_run_scenario(name: str, version: str = "001", context: str = "GLOBAL") -> str:
-    """Mevcut bir ODI senaryosunu calistirir. Returns: komut string veya sonuc."""
+    """Run an existing ODI scenario. Returns: command string or result."""
     import json as _json
     try:
         result = odi_orch.run_scenario(name, version, context)

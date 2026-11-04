@@ -1,13 +1,13 @@
 """
-SKEY Manager — Surrogate Key Yonetimi
+SKEY Manager — Surrogate Key Management
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-DWH boyut tablolari icin Surrogate Key (SKEY) nesneleri olusturur:
-- SKEY_MAP_<TABLE> tablosu (Natural Key → Surrogate Key eslesmesi)
-- SEQ_<TABLE> sequence'i
-- ODI mapping icin SKEY expression'i
+DWH dimension tables use the following Surrogate Key (SKEY) objects:
+- SKEY_MAP_<TABLE> table (Natural Key → Surrogate Key mapping)
+- SEQ_<TABLE> sequence
+- SKEY expression for ODI mapping
 
-Tum DDL islemleri MAPPING_LOG'a loglanir (rollback destegiyle).
+All DDL operations are logged in MAPPING_LOG (with rollback support).
 """
 
 import json
@@ -22,7 +22,7 @@ logger = logging.getLogger("skey_manager")
 
 
 class SkeyManager:
-    """Surrogate Key nesne yonetimi."""
+    """Manage Surrogate Key objects."""
 
     SKEY_TABLE_TEMPLATE = """
 CREATE TABLE {owner}.SKEY_MAP_{table} (
@@ -57,14 +57,14 @@ CREATE SEQUENCE {owner}.SEQ_{table}
     ELSE {owner}.SEQ_{table}.NEXTVAL
 END""".strip()
 
-    # APP_USER'a verilecek yetkiler
+    # Privileges to grant to APP_USER.
     APP_USER = "APP_USER"
 
     def __init__(self):
         self.conn = None
 
     def _get_conn(self):
-        """DDL kullanicisi ile baglanti (CREATE/ALTER yetkileri gerekli)."""
+        """Connect as the DDL user (CREATE/ALTER privileges required)."""
         if self.conn is None or not self.conn.is_healthy():
             self.conn = oracledb.connect(
                 user=ORACLE_DDL_USER,
@@ -74,7 +74,7 @@ END""".strip()
         return self.conn
 
     def _auto_grant(self, conn, owner: str, object_name: str, object_type: str = "TABLE"):
-        """Yeni olusturulan nesneye APP_USER icin otomatik GRANT verir."""
+        """Automatically GRANT APP_USER access to the newly created object."""
         try:
             cur = conn.cursor()
             if object_type == "TABLE":
@@ -85,7 +85,7 @@ END""".strip()
             cur.close()
             logger.info("AUTO-GRANT: %s.%s -> %s", owner, object_name, self.APP_USER)
         except Exception as e:
-            logger.warning("AUTO-GRANT basarisiz (devam ediliyor): %s.%s — %s", owner, object_name, e)
+            logger.warning("AUTO-GRANT failed (continuing): %s.%s — %s", owner, object_name, e)
 
     def close(self):
         if self.conn:
@@ -103,7 +103,7 @@ END""".strip()
                        object_owner: str, object_name: str,
                        ddl_text: str, status: str = "SUCCESS",
                        error_message: str = None):
-        """MAPPING_LOG'a DDL islemini loglar."""
+        """Log the DDL operation in MAPPING_LOG."""
         cursor = conn.cursor()
         try:
             cursor.execute("""
@@ -123,20 +123,20 @@ END""".strip()
             })
             conn.commit()
         except Exception as e:
-            logger.error("MAPPING_LOG yazma hatasi: %s", e)
+            logger.error("MAPPING_LOG write error: %s", e)
         finally:
             cursor.close()
 
     def create_skey_objects(self, owner: str, table: str) -> dict:
-        """SKEY_MAP tablosu ve SEQ sequence'i DDL ile olusturur.
+        """Create the SKEY_MAP table and SEQ sequence with DDL.
 
         Args:
-            owner: Hedef schema adi (orn. "DWH").
-            table: Boyut tablo adi (orn. "PRODUCT").
+            owner: Target schema name (e.g. "DWH").
+            table: Dimension table name (e.g. "PRODUCT").
 
         Returns:
-            Sozluk: batch_id, created (olusturulan nesneler), skipped
-            (zaten mevcut olanlar) ve errors listelerini icerir.
+            Dictionary containing batch_id, created (created objects), skipped
+            (objects already present), and errors lists.
         """
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -145,7 +145,7 @@ END""".strip()
         owner = owner.upper()
         table = table.upper()
 
-        # 1. SKEY_MAP tablosu
+        # 1. SKEY_MAP table.
         skey_ddl = self.SKEY_TABLE_TEMPLATE.format(owner=owner, table=table)
         try:
             cursor.execute(skey_ddl)
@@ -153,13 +153,13 @@ END""".strip()
             result["created"].append(f"SKEY_MAP_{table}")
             self._log_operation(conn, batch_id, "CREATE_TABLE", owner,
                                 f"SKEY_MAP_{table}", skey_ddl)
-            logger.info("SKEY tablosu olusturuldu: %s.SKEY_MAP_%s", owner, table)
-            # Otomatik yetki ver
+            logger.info("SKEY table created: %s.SKEY_MAP_%s", owner, table)
+            # Grant access automatically.
             self._auto_grant(conn, owner, f"SKEY_MAP_{table}", "TABLE")
         except oracledb.DatabaseError as e:
             if "ORA-00955" in str(e):
                 result["skipped"].append(f"SKEY_MAP_{table}")
-                # Tablo zaten varsa grant de kontrol et
+                # Check the grant even if the table already exists.
                 self._auto_grant(conn, owner, f"SKEY_MAP_{table}", "TABLE")
             else:
                 result["errors"].append({"object": f"SKEY_MAP_{table}", "error": str(e)})
@@ -174,8 +174,8 @@ END""".strip()
             result["created"].append(f"SEQ_{table}")
             self._log_operation(conn, batch_id, "CREATE_SEQUENCE", owner,
                                 f"SEQ_{table}", seq_ddl)
-            logger.info("SKEY sequence olusturuldu: %s.SEQ_%s", owner, table)
-            # Otomatik yetki ver
+            logger.info("SKEY sequence created: %s.SEQ_%s", owner, table)
+            # Grant access automatically.
             self._auto_grant(conn, owner, f"SEQ_{table}", "SEQUENCE")
         except oracledb.DatabaseError as e:
             if "ORA-00955" in str(e):
@@ -190,21 +190,21 @@ END""".strip()
         return result
 
     def get_skey_expression(self, owner: str, table: str, nk_expr: str) -> str:
-        """ODI mapping icin SKEY CASE WHEN expression'i doner.
+        """Return the SKEY CASE WHEN expression for ODI mapping.
 
         Args:
-            owner: SKEY_MAP tablosunun bulundugu schema.
-            table: Boyut tablo adi.
-            nk_expr: Natural key SQL ifadesi
-                (orn. "SRC.PRODUCT_ID || '-' || SRC.CATEGORY_ID").
+            owner: Schema containing the SKEY_MAP table.
+            table: Dimension table name.
+            nk_expr: Natural key SQL expression
+                (e.g. "SRC.PRODUCT_ID || '-' || SRC.CATEGORY_ID").
 
         Returns:
-            CASE WHEN EXISTS ... THEN ... ELSE SEQ.NEXTVAL END ifadesi.
+            CASE WHEN EXISTS ... THEN ... ELSE SEQ.NEXTVAL END expression.
         """
         expr = self.EXPRESSION_TEMPLATE.format(
             owner=owner.upper(),
             table=table.upper(),
             nk_expr=nk_expr,
         )
-        # Regex filtresine ve komut satiri parametrelerine takilmamasi icin yeni satirlari temizle
+        # Remove newlines to pass the regex filter and command-line parameters.
         return expr.replace("\n", " ").replace("\r", " ").replace("  ", " ").strip()

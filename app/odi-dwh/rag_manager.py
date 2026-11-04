@@ -10,15 +10,15 @@ from config import OLLAMA_EMBEDDINGS_URL
 
 logger = logging.getLogger("rag_manager")
 
-# Python 3.14 üzerinde Pydantic V1 (ChromaDB) uyumsuzluk hatası aldığımız için,
-# çok daha hafif, hatasız ve yerel çalışan bir JSON tabanlı SimpleRAG (Vektör Motoru Alternatifi) kullanıyoruz.
+# Python 3.14 causes a Pydantic V1 (ChromaDB) compatibility error,
+# so we use a lighter, reliable local JSON-based SimpleRAG (vector engine alternative).
 CHROMA_DB_FILE = os.path.join(os.path.dirname(__file__), "rag_database.json")
 
-# O1: Eş zamanlı yazma işlemlerinden kaynaklanan race condition'ı önlemek için kilit
+# O1: Lock to prevent race conditions from concurrent writes.
 _db_lock = threading.Lock()
 
-# M-1: In-memory cache — her sorguda 8.3MB JSON yeniden okunmasın
-_CACHE_TTL = 60  # saniye
+# M-1: In-memory cache — avoid rereading 8.3 MB of JSON on every query.
+_CACHE_TTL = 60  # seconds
 _cache: dict = {"db": None, "ts": 0.0}
 
 COLLECTIONS = [
@@ -82,7 +82,7 @@ def init_collections():
     _save_db(_load_db())
 
 def get_embedding(text: str) -> list[float]:
-    """N-1: Timeout 5s, 3 deneme — Ollama idle/restart sonrası düşen embedding isteklerini tolere eder."""
+    """N-1: Timeout 5s, 3 attempts — tolerate embedding requests lost after Ollama idle/restart."""
     import requests
     payload = {"model": "nomic-embed-text:latest", "prompt": text}
     try:
@@ -91,7 +91,7 @@ def get_embedding(text: str) -> list[float]:
         if emb:
             return emb
     except Exception as e:
-        logger.debug("Embedding istegi basarisiz; lexical RAG fallback kullanilacak: %s", e)
+        logger.debug("Embedding request failed; using lexical RAG fallback: %s", e)
     return []
 
 def cosine_similarity(v1: list[float], v2: list[float]) -> float:
@@ -104,7 +104,7 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
     return dot_product / (norm_v1 * norm_v2)
 
 def add_document(collection_name: str, document_text: str, metadata: dict[str, Any] | None = None, doc_id: str | None = None) -> str:
-    # Embedding hesaplaması lock dışında yapılır (ağ çağrısı, kilitli tutmaya gerek yok)
+    # Compute the embedding outside the lock (network call; no need to hold the lock).
     embedding = get_embedding(document_text)
     doc = {
         "id": doc_id or str(uuid.uuid4()),
@@ -113,13 +113,13 @@ def add_document(collection_name: str, document_text: str, metadata: dict[str, A
         "embedding": embedding
     }
 
-    # O1: Yazma işlemi kilit altında — aynı anda iki istek JSON'u bozmasın
+    # O1: Keep writes under the lock so concurrent requests cannot corrupt JSON.
     with _db_lock:
         db = _load_db()
         if collection_name not in db:
             db[collection_name] = []
 
-        # ID varsa güncelle, yoksa ekle
+        # Update the existing ID or add a new entry.
         for i, existing in enumerate(db[collection_name]):
             if existing["id"] == doc["id"]:
                 db[collection_name][i] = doc
@@ -131,7 +131,7 @@ def add_document(collection_name: str, document_text: str, metadata: dict[str, A
     return doc["id"]
 
 def delete_document(collection_name: str, doc_id: str) -> bool:
-    # O1: Yazma işlemi kilit altında
+    # O1: Keep writes under the lock.
     with _db_lock:
         db = _load_db()
         if collection_name not in db:
@@ -151,7 +151,7 @@ def search_documents(collection_name: str, query: str, n_results: int = 3, query
     if not items:
         return []
     
-    # Gerçek Semantik Arama (Mock search devreden çıkarıldı)
+    # Real semantic search (mock search disabled).
     if query_emb is None:
         query_emb = get_embedding(query)
     scored = []
@@ -159,14 +159,14 @@ def search_documents(collection_name: str, query: str, n_results: int = 3, query
     if query_emb:
         for item in items:
             item_emb = item.get("embedding", [])
-            # Cosine similarity ile uzaklığı tespit et
+            # Measure distance using cosine similarity.
             score = cosine_similarity(query_emb, item_emb) if item_emb else 0.0
             
-            # "Tablo" veya "Table" kelimesi geciyorsa ve bu bir mapping run kaydiysa skoru artir
+            # Boost mapping-run records when the query contains the Turkish or English word for table.
             if ("tablo" in query.lower() or "table" in query.lower()) and collection_name == "mapping_runs":
                 score += 0.2
 
-            # Tablo adi birebir cumlede geciyorsa skorunu ucur
+            # Boost the score when the table name appears verbatim in the sentence.
             m = item.get("metadata", {})
             table_keys = ["table_name", "src_table", "tgt_table", "mapping_name"]
             for k in table_keys:
@@ -176,7 +176,7 @@ def search_documents(collection_name: str, query: str, n_results: int = 3, query
                     
             scored.append((score, item["text"]))
     else:
-        # Fallback (Embedding servisi çökerse kelime bazlı ilkel arama)
+        # Fallback to basic word matching if the embedding service fails.
         query_words = set(query.lower().split())
         for item in items:
             text_lower = item["text"].lower()
@@ -188,7 +188,7 @@ def search_documents(collection_name: str, query: str, n_results: int = 3, query
     scored.sort(key=lambda x: x[0], reverse=True)
     
     if query_emb:
-        # 0.35 threshold (ilkisiz sonuçlar RAG'ı kirletmesin diye filtreliyoruz)
+        # 0.35 threshold filters irrelevant results from the RAG context.
         return [s[1] for s in scored[:n_results] if s[0] > 0.35]
     else:
         return [s[1] for s in scored[:n_results] if s[0] > 0]
@@ -197,42 +197,42 @@ def get_rag_context(user_query: str) -> str:
     context_parts = []
     try:
         query_emb = get_embedding(user_query)
-        # İş kuralları (en kritik — tablo seçimi, JOIN kuralları, güvenlik)
+        # Business rules (most critical: table selection, JOIN rules, security).
         business = search_documents("business_rules", user_query, n_results=3, query_emb=query_emb)
         if business:
-            context_parts.append("--- İŞ KURALLARI ---\n" + "\n".join(business))
+            context_parts.append("--- BUSINESS RULES ---\n" + "\n".join(business))
 
-        # Şema metadata (tablo yapısı, kolon bilgisi)
+        # Schema metadata (table structure, column information).
         schema = search_documents("schema_metadata", user_query, n_results=3, query_emb=query_emb)
         if schema:
-            context_parts.append("--- İLGİLİ TABLO ŞEMALARI ---\n" + "\n".join(schema))
+            context_parts.append("--- RELEVANT TABLE SCHEMAS ---\n" + "\n".join(schema))
 
-        # DWH modelleme kuralları
+        # DWH modeling rules.
         modeling_rules = search_documents("dwh_modeling", user_query, n_results=2, query_emb=query_emb)
         if modeling_rules:
-            context_parts.append("--- DWH MODELLEME KURALLARI ---\n" + "\n".join(modeling_rules))
+            context_parts.append("--- DWH MODELING RULES ---\n" + "\n".join(modeling_rules))
 
-        # Hata pattern'ları (benzer hata daha önce yaşandıysa çözümü getir)
+        # Error patterns (retrieve solutions for similar errors encountered before).
         errors = search_documents("error_patterns", user_query, n_results=1, query_emb=query_emb)
         if errors:
-            context_parts.append("--- BİLİNEN HATA ÇÖZÜMLERİ ---\n" + "\n".join(errors))
+            context_parts.append("--- KNOWN ERROR SOLUTIONS ---\n" + "\n".join(errors))
 
-        # ODI pattern'ları (mapping soruları için)
+        # ODI patterns (for mapping questions).
         patterns = search_documents("odi_patterns", user_query, n_results=1, query_emb=query_emb)
         if patterns:
-            context_parts.append("--- ODI MAPPING ÖRNEKLERİ ---\n" + "\n".join(patterns))
+            context_parts.append("--- ODI MAPPING EXAMPLES ---\n" + "\n".join(patterns))
 
-        # Gecmis Mapping Runlari (bu mapping nasil yapildi sorulari icin)
+        # Past mapping runs (for questions about how a mapping was done).
         runs = search_documents("mapping_runs", user_query, n_results=2, query_emb=query_emb)
         if runs:
             context_parts.append("--- GEÇMİŞ MAPPING ÇALIŞTIRMA KAYITLARI ---\n" + "\n".join(runs))
 
     except Exception as e:
-        logger.error("RAG arama hatasi: %s", e)
+        logger.error("RAG search error: %s", e)
 
     return "\n\n".join(context_parts)
 
 if __name__ == "__main__":
     init_collections()
-    print("SimpleRAG altyapısı hazır!")
-    print(f"Veri Dosyası: {CHROMA_DB_FILE}")
+    print("SimpleRAG infrastructure is ready!")
+    print(f"Data file: {CHROMA_DB_FILE}")

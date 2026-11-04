@@ -1,12 +1,12 @@
 """
-Veri Kalitesi Yöneticisi
+Data Quality Manager
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-ODS'e yüklenmeden önce veri kalitesi kontrollerini çalıştırır.
-Kural tabanlı doğrulama: NULL kontrol, tip kontrol, domain kontrol,
-benzersizlik kontrol, aralık kontrol.
+Runs data quality checks before loading into ODS.
+Rule based validation: NULL, type, and domain checks,
+uniqueness and range checks.
 
-Kullanım:
+Usage:
   from data_quality import DataQualityManager
   dqm = DataQualityManager()
   result = dqm.validate_table("DWH", "SALES")
@@ -34,18 +34,18 @@ from config import (
 logger = logging.getLogger("data_quality")
 
 
-# ── Kural Tanımları ───────────────────────────────────────────────────────────
+# ── Rule Definitions ───────────────────────────────────────────────────────────
 
 @dataclass
 class QualityRule:
-    """Tek bir veri kalitesi kuralı.
+    """A single data quality rule.
 
     Attributes:
-        rule_name: Kural adı (ör. "PK_NOT_NULL").
-        column: Hedef kolon adı.
+        rule_name: Rule name (e.g. "PK_NOT_NULL").
+        column: Target column name.
         rule_type: 'not_null', 'data_type', 'domain', 'unique', 'range', 'regex'.
-        params: Kural parametreleri (ör. {"min": 0}).
-        severity: 'ERROR' (yüklemeyi durdur) veya 'WARNING' (sadece logla).
+        params: Rule parameters (e.g. {"min": 0}).
+        severity: 'ERROR' (stop the load) or 'WARNING' (log only).
     """
 
     rule_name: str
@@ -318,7 +318,7 @@ def _safe_dq_error(exc: Exception) -> str:
     return text[:240]
 
 
-# ── Varsayılan Kural Şablonları ───────────────────────────────────────────────
+# ── Default Rule Templates ───────────────────────────────────────────────
 
 DEFAULT_RULES = {
     "pk_not_null": lambda col: QualityRule(
@@ -334,10 +334,10 @@ DEFAULT_RULES = {
 }
 
 
-# ── Doğrulama Sonucu ─────────────────────────────────────────────────────────
+# ── Validation Result ─────────────────────────────────────────────────────────
 
 class ValidationResult:
-    """Bir doğrulama çalışmasının sonucu."""
+    """Result of one validation run."""
 
     def __init__(self, table_owner: str, table_name: str):
         self.table_owner = table_owner
@@ -346,7 +346,7 @@ class ValidationResult:
         self.finished_at = None
         self.total_rows = 0
         self.violations: list[dict] = []
-        self.rules_run: list[dict] = []   # Tüm kurallar (geçen + ihlal eden)
+        self.rules_run: list[dict] = []   # All rules (passed + violated)
         self.passed = True
 
     def add_violation(self, rule: QualityRule, count: int, sample_values: list = None):
@@ -363,7 +363,7 @@ class ValidationResult:
             self.passed = False
 
     def record_rule(self, rule: QualityRule, passed: bool, violation_count: int = 0) -> None:
-        """Çalışan her kuralı (geçen veya ihlal eden) kaydeder."""
+        """Records every executed rule (passed or violated)."""
         self.rules_run.append({
             "rule_name":       rule.rule_name,
             "column":          rule.column,
@@ -426,10 +426,10 @@ class ValidationResult:
         }
 
 
-# ── Ana Yönetici ──────────────────────────────────────────────────────────────
+# ── Main Manager ──────────────────────────────────────────────────────────────
 
 class DataQualityManager:
-    """Veri kalitesi kontrol motoru."""
+    """Data quality check engine."""
 
     def __init__(self):
         self.conn = None
@@ -472,24 +472,24 @@ class DataQualityManager:
         self.close()
         return False
 
-    # ── Otomatik Kural Üretimi ────────────────────────────────────────────────
+    # ── Automatic Rule Generation ────────────────────────────────────────────────
     def generate_rules(self, owner: str, table_name: str) -> list[QualityRule]:
         """
-        Tablo yapısına göre otomatik kalite kuralları üretir.
-        - NOT NULL kısıtlı kolonlar → not_null kuralı
-        - NUMBER kolonlar → tip kontrolü
-        - DATE kolonlar → aralık kontrolü
+        Generates quality rules automatically based on the table structure.
+        - NOT NULL constrained columns → not_null rule
+        - NUMBER columns → type check
+        - DATE columns → range check
         """
-        # Kullanıcı talebi üzerine otomatik kural üretimi devre dışı bırakıldı.
-        # Artık sadece manuel olarak eklenen "Kural Setleri" dikkate alınacak.
+        # Automatic rule generation was disabled at the user's request.
+        # Only manually added "Rule Sets" are now considered.
         rules = []
-        logger.info("📏 %s.%s için otomatik kural üretimi kapalı.", owner, table_name)
+        logger.info("📏 %s.%s automatic rule generation is disabled.", owner, table_name)
         return rules
 
-    # ── Kural Çalıştırma ─────────────────────────────────────────────────────
+    # ── Rule Execution ─────────────────────────────────────────────────────
     @staticmethod
     def _qi(name: str) -> str:
-        """S-11: Identifier'ı tırnak içine al — kolon/tablo adında injection engeli."""
+        """S-11: Quote the identifier to prevent injection through column/table names."""
         return '"' + name.upper().replace('"', '') + '"'
 
     def _audit_table_name(self, table_name: str) -> str:
@@ -547,12 +547,12 @@ class DataQualityManager:
             rule.rule_name,
         )
 
-    # ── Tablo Doğrulama ──────────────────────────────────────────────────────
+    # ── Table Validation ──────────────────────────────────────────────────────
     def validate_table(self, owner: str, table_name: str,
                        custom_rules: list[QualityRule] = None) -> ValidationResult:
         """
-        Belirtilen tablo için veri kalitesi kontrollerini çalıştırır.
-        custom_rules verilmezse otomatik kurallar üretilir.
+        Runs data quality checks for the specified table.
+        If custom_rules is not provided, automatic rules are generated.
         """
         result = ValidationResult(owner, table_name)
         conn = self._get_conn()
@@ -575,7 +575,7 @@ class DataQualityManager:
                         self._record_unsupported_rule(result, owner, table_name, rule)
                         continue
 
-                # Her kuralı kaydediyoruz (geçen veya ihlal eden)
+                # Record each rule (passed or violated)
                 result.record_rule(rule, passed=(violation_count == 0), violation_count=violation_count)
 
                 if violation_count > 0:
@@ -589,25 +589,25 @@ class DataQualityManager:
                     logger.debug("✅ %s.%s — %s: OK", owner, table_name, rule.rule_name)
 
         except Exception as e:
-            logger.error("Doğrulama hatası %s.%s: %s", owner, table_name, e)
+            logger.error("Validation error %s.%s: %s", owner, table_name, e)
             result.passed = False
         finally:
             result.finish()
 
         return result
 
-    # ── Hata Tablosu Oluşturma ────────────────────────────────────────────────
+    # ── Error Table Creation ────────────────────────────────────────────────
     def create_error_table(self, owner: str, table_name: str):
         """
-        Belirtilen tablo için ERR_<TABLE> hata tablosunu oluşturur.
-        Kaynak tablonun tüm kolonlarını + hata bilgi kolonlarını içerir.
+        Creates the ERR_<TABLE> error table for the specified table.
+        Contains all source table columns plus error detail columns.
         """
         err_table = f"ERR_{table_name}"
         conn = self._get_audit_conn()
         cursor = conn.cursor()
 
         try:
-            # Kaynak kolon listesi
+            # Source column list
             cursor.execute("""
                 SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE
                 FROM ALL_TAB_COLUMNS
@@ -627,7 +627,7 @@ class DataQualityManager:
                 else:
                     cols.append(f"  {col_name} {dtype}")
 
-            # Hata bilgi kolonları ekle
+            # Add error detail columns
             cols.append("  ERR_RULE_NAME   VARCHAR2(128)")
             cols.append("  ERR_COLUMN      VARCHAR2(128)")
             cols.append("  ERR_SEVERITY    VARCHAR2(20)")
@@ -638,25 +638,25 @@ class DataQualityManager:
             ddl += ",\n".join(cols)
             ddl += "\n)"
 
-            # Var olan tabloyu atla
+            # Skip the existing table
             try:
                 cursor.execute(ddl)
                 conn.commit()
-                logger.info("✅ Hata tablosu oluşturuldu: %s.%s", self.audit_owner, err_table)
+                logger.info("✅ Error table created: %s.%s", self.audit_owner, err_table)
             except oracledb.DatabaseError as e:
                 if "ORA-00955" in str(e):  # table already exists
-                    logger.info("ℹ️  Hata tablosu zaten mevcut: %s.%s", self.audit_owner, err_table)
+                    logger.info("ℹ️  Error table already exists: %s.%s", self.audit_owner, err_table)
                 else:
                     raise
 
         finally:
             cursor.close()
 
-    # ── Toplu ERR_ Tablo Olusturma ──────────────────────────────────────────
+    # ── Bulk ERR_ Table Creation ──────────────────────────────────────────
     def create_all_error_tables(self, owner: str) -> dict:
         """
-        Belirtilen sema altindaki tum tablolar icin ERR_ tablolarini toplu olusturur.
-        Zaten mevcut olan ERR_ tablolari atlanir.
+        Creates ERR_ tables in bulk for all tables in the specified schema.
+        Existing ERR_ tables are skipped.
         Returns: {"created": [...], "skipped": [...], "errors": [...]}
         """
         conn = self._get_audit_conn()
@@ -677,7 +677,7 @@ class DataQualityManager:
             for tname in tables:
                 try:
                     self.create_error_table(owner, tname)
-                    # Basarili mi yoksa zaten var miydi kontrol et
+                    # Check whether creation succeeded or the table already existed
                     cursor.execute("""
                         SELECT COUNT(*) FROM ALL_TABLES
                         WHERE OWNER = :owner AND TABLE_NAME = :ename
@@ -695,26 +695,26 @@ class DataQualityManager:
             cursor.close()
 
         logger.info(
-            "Toplu ERR_ olusturma: %d olusturuldu, %d atlandi, %d hata",
+            "Bulk ERR_ creation: %d created, %d skipped, %d errors",
             len(result["created"]), len(result["skipped"]), len(result["errors"])
         )
         return result
 
-    # ── Hata Kaydi Ekleme ────────────────────────────────────────────────────
+    # ── Error Record Insertion ────────────────────────────────────────────────────
     def insert_error_record(self, owner: str, table_name: str,
                             row_data: dict, rule_name: str,
                             column: str, severity: str,
                             message: str):
         """
-        ERR_<TABLE> tablosuna bir ihlal kaydi ekler.
-        row_data: kaynak satirin kolon->deger dict'i (uyusan kolonlar yazilir).
+        Adds a violation record to the ERR_<TABLE> table.
+        row_data: source row column->value dict (matching columns are written).
         """
         err_table = self._audit_table_name(table_name)
         conn = self._get_conn()
         cursor = conn.cursor()
 
         try:
-            # ERR_ tablosundaki kolonlari al
+            # Get the columns in the ERR_ table
             cursor.execute("""
                 SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS
                 WHERE OWNER = :owner AND TABLE_NAME = :ename
@@ -722,7 +722,7 @@ class DataQualityManager:
             """, {"owner": self.audit_owner, "ename": f"ERR_{table_name}"})
             err_cols = {row[0] for row in cursor.fetchall()}
 
-            # Kaynak satir verileri + hata bilgileri
+            # Source row data + error details
             insert_data = {}
             for k, v in row_data.items():
                 if k.upper() in err_cols:
@@ -743,14 +743,14 @@ class DataQualityManager:
         finally:
             cursor.close()
 
-    # ── Dogrulama + Otomatik Hata Kaydi ──────────────────────────────────────
+    # ── Validation + Automatic Error Recording ──────────────────────────────────────
     def validate_and_insert_errors(self, owner: str, table_name: str,
                                    custom_rules: list[QualityRule] = None,
                                    max_errors_per_rule: int = 100) -> ValidationResult:
         """
-        validate_table gibi calisir, ek olarak ihlal eden satirlari
-        ERR_<TABLE> tablosuna yazar. max_errors_per_rule ile kural basina
-        kaydedilecek hata sayisi sinirlanir.
+        Works like validate_table and also writes violating rows
+        to the ERR_<TABLE> table. max_errors_per_rule limits the number
+        of errors recorded per rule.
         """
         result = ValidationResult(owner, table_name)
         conn = self._get_conn()
@@ -759,7 +759,7 @@ class DataQualityManager:
             result.total_rows = self._get_row_count(conn, owner, table_name)
             rules = custom_rules or self.generate_rules(owner, table_name)
 
-            # ERR_ tablosunun var oldugundan emin ol
+            # Ensure the ERR_ table exists
             self.create_error_table(owner, table_name)
 
             for rule in rules:
@@ -771,7 +771,7 @@ class DataQualityManager:
                     case "not_null":
                         violation_count = self._check_not_null(conn, owner, table_name, rule)
                         if violation_count > 0:
-                            # Ihlal eden satirlari cek ve ERR_'ye yaz
+                            # Fetch violating rows and write them to ERR_
                             self._insert_null_violations(
                                 conn, owner, table_name, rule, max_errors_per_rule
                             )
@@ -794,7 +794,7 @@ class DataQualityManager:
                     )
 
         except Exception as e:
-            logger.error("validate_and_insert hatasi %s.%s: %s", owner, table_name, e)
+            logger.error("validate_and_insert error %s.%s: %s", owner, table_name, e)
             result.passed = False
         finally:
             result.finish()
@@ -803,7 +803,7 @@ class DataQualityManager:
 
     def _insert_null_violations(self, conn, owner: str, table: str,
                                 rule: QualityRule, limit: int):
-        """NOT NULL ihlali yapan satirlari ERR_ tablosuna yazar."""
+        """Writes rows violating NOT NULL to the ERR_ table."""
         cursor = conn.cursor()
         try:
             cursor.execute(f"""
@@ -816,14 +816,14 @@ class DataQualityManager:
                 self.insert_error_record(
                     owner, table, row_data, rule.rule_name,
                     rule.column, rule.severity,
-                    f"{rule.column} kolonu NULL olamaz"
+                    f"{rule.column} column must not be NULL"
                 )
         finally:
             cursor.close()
 
     def _insert_date_violations(self, conn, owner: str, table: str,
                                 rule: QualityRule, limit: int):
-        """Tarih araligi ihlali yapan satirlari ERR_ tablosuna yazar."""
+        """Writes rows violating the date range to the ERR_ table."""
         min_year = rule.params.get("min_year", 2000)
         max_year = rule.params.get("max_year", 2030)
         cursor = conn.cursor()
@@ -841,7 +841,7 @@ class DataQualityManager:
                 self.insert_error_record(
                     owner, table, row_data, rule.rule_name,
                     rule.column, rule.severity,
-                    f"{rule.column} degeri {min_year}-{max_year} araliginda olmali"
+                    f"{rule.column} value must be within the {min_year}-{max_year} range"
                 )
         finally:
             cursor.close()
@@ -851,14 +851,14 @@ class DataQualityManager:
 if __name__ == "__main__":
     import argparse, json
 
-    parser = argparse.ArgumentParser(description="Veri Kalitesi Yöneticisi")
+    parser = argparse.ArgumentParser(description="Data Quality Manager")
     sub = parser.add_subparsers(dest="cmd")
 
-    v = sub.add_parser("validate", help="Tablo kalite kontrolü")
+    v = sub.add_parser("validate", help="Table quality check")
     v.add_argument("--owner", default="DWH")
     v.add_argument("--table", required=True)
 
-    e = sub.add_parser("create-err", help="Hata tablosu oluştur")
+    e = sub.add_parser("create-err", help="Create error table")
     e.add_argument("--owner", default="DWH")
     e.add_argument("--table", required=True)
 
@@ -870,22 +870,22 @@ if __name__ == "__main__":
             result = dqm.validate_table(args.owner, args.table)
             summary = result.summary()
             print(f"\n{'━' * 60}")
-            print(f"  Tablo: {summary['table']}")
-            print(f"  Toplam Satır: {summary['total_rows']:,}")
-            print(f"  Sonuç: {'✅ GEÇTİ' if summary['passed'] else '❌ BAŞARISIZ'}")
-            print(f"  Hatalar: {summary['errors']}  |  Uyarılar: {summary['warnings']}")
-            print(f"  Süre: {summary['duration_ms']}ms")
+            print(f"  Table: {summary['table']}")
+            print(f"  Total Rows: {summary['total_rows']:,}")
+            print(f"  Result: {'✅ PASSED' if summary['passed'] else '❌ FAILED'}")
+            print(f"  Errors: {summary['errors']}  |  Warnings: {summary['warnings']}")
+            print(f"  Duration: {summary['duration_ms']}ms")
             print(f"{'━' * 60}")
             if summary['violations']:
-                print("\n  İhlaller:")
+                print("\n  Violations:")
                 for v in summary['violations']:
                     icon = "🔴" if v['severity'] == "ERROR" else "🟡"
-                    print(f"    {icon} {v['rule_name']}: {v['violation_count']} satır")
+                    print(f"    {icon} {v['rule_name']}: {v['violation_count']} rows")
             print()
 
         elif args.cmd == "create-err":
             dqm.create_error_table(args.owner, args.table)
-            print(f"\n✅ {dqm.audit_owner}.ERR_{args.table} tablosu hazır.\n")
+            print(f"\n✅ {dqm.audit_owner}.ERR_{args.table} table is ready.\n")
 
         else:
             parser.print_help()

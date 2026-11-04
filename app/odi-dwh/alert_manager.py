@@ -1,11 +1,11 @@
 """
-Alert Manager — Sistem Uyari Yonetimi
+Alert Manager — System Alert Management
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-AUDIT_USER.ALERT_LOG tablosu uzerinden alert CRUD islemleri.
-Opsiyonel RAG entegrasyonu: alert'i business_rules koleksiyonuna kaydeder.
+Alert CRUD operations through the AUDIT_USER.ALERT_LOG table.
+Optional RAG integration: stores the alert in the business_rules collection.
 
-Kanallar: UI Banner + Log + RAG (email/webhook yok).
+Channels: UI banner + log + RAG (no email/webhook).
 """
 
 import json
@@ -23,7 +23,7 @@ class AlertCheckError(RuntimeError):
 
 
 class AlertManager:
-    """Sistem alert yonetim sinifi."""
+    """System alert management class."""
 
     def __init__(self):
         self.conn = None
@@ -49,25 +49,25 @@ class AlertManager:
         self.close()
         return False
 
-    # ── Alert Olusturma ──────────────────────────────────────────────────────
+    # ── Alert Creation ──────────────────────────────────────────────────────
     def create_alert(self, alert_type: str, source: str, message: str,
                      table_owner: str = None, table_name: str = None,
                      details: dict = None, severity: str = "WARNING",
                      store_in_rag: bool = False) -> int:
-        """ALERT_LOG'a yeni alert kaydi olusturur.
+        """Creates a new alert record in ALERT_LOG.
 
         Args:
-            alert_type: Alert kategorisi (orn. "FRESHNESS", "SCHEMA_CHANGE").
-            source: Aleti tetikleyen kaynak (orn. "DWH.SALES").
-            message: Kisa aciklama metni (max 2000 karakter).
-            table_owner: Ilgili tablo schema'si (opsiyonel).
-            table_name: Ilgili tablo adi (opsiyonel).
-            details: Ek detay sozlugu (JSON olarak kaydedilir).
-            severity: "INFO", "WARNING" veya "CRITICAL".
-            store_in_rag: True ise RAG business_rules koleksiyonuna da ekler.
+            alert_type: Alert category (e.g. "FRESHNESS", "SCHEMA_CHANGE").
+            source: Source that triggers the alert (e.g. "DWH.SALES").
+            message: Short description text (max 2000 characters).
+            table_owner: Related table schema (optional).
+            table_name: Related table name (optional).
+            details: Additional details dictionary (stored as JSON).
+            severity: "INFO", "WARNING", or "CRITICAL".
+            store_in_rag: If True, also adds it to the RAG business_rules collection.
 
         Returns:
-            Olusturulan ALERT_LOG.ALERT_ID degeri.
+            Created ALERT_LOG.ALERT_ID value.
         """
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -100,7 +100,7 @@ class AlertManager:
                 severity, alert_type, source, message[:100], alert_id
             )
 
-            # RAG entegrasyonu
+            # RAG integration
             if store_in_rag:
                 try:
                     from rag_manager import add_document
@@ -122,9 +122,9 @@ class AlertManager:
         finally:
             cursor.close()
 
-    # ── Bekleyen Alertleri Getir ─────────────────────────────────────────────
+    # ── Get Pending Alerts ─────────────────────────────────────────────
     def get_unacknowledged(self, limit: int = 50) -> list[dict]:
-        """Onaylanmamis alertleri doner."""
+        """Returns unacknowledged alerts."""
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
@@ -160,9 +160,9 @@ class AlertManager:
         finally:
             cursor.close()
 
-    # ── Onayla ───────────────────────────────────────────────────────────────
+    # ── Acknowledge ───────────────────────────────────────────────────────────────
     def acknowledge(self, alert_id: int) -> bool:
-        """Tek bir alert'i onaylar."""
+        """Acknowledges a single alert."""
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
@@ -177,7 +177,7 @@ class AlertManager:
             cursor.close()
 
     def acknowledge_all(self) -> int:
-        """Tum bekleyen alertleri toplu onaylar. Returns: onaylanan sayi."""
+        """Acknowledges all pending alerts in bulk. Returns: acknowledged count."""
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
@@ -188,14 +188,14 @@ class AlertManager:
             """)
             conn.commit()
             count = cursor.rowcount
-            logger.info("Toplu onay: %d alert onaylandi", count)
+            logger.info("Bulk acknowledgment: %d alerts acknowledged", count)
             return count
         finally:
             cursor.close()
 
-    # ── Gecmis ───────────────────────────────────────────────────────────────
+    # ── History ───────────────────────────────────────────────────────────────
     def get_history(self, limit: int = 50) -> list[dict]:
-        """Tum alertleri (onaylanmis dahil) doner."""
+        """Returns all alerts (including acknowledged ones)."""
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
@@ -225,7 +225,7 @@ class AlertManager:
         finally:
             cursor.close()
 
-    # ── Otomatik Kontrol & Alert Olusturma ────────────────────────────────────
+    # ── Automatic Checks & Alert Creation ────────────────────────────────────
     def has_unacknowledged(self, alert_type: str, source: str) -> bool:
         """Return True when the same open alert is already visible to operators."""
         conn = self._get_conn()
@@ -248,23 +248,23 @@ class AlertManager:
             cursor.close()
 
     def check_and_alert(self, freshness_days: int = 2) -> list[dict]:
-        """Otomatik kontrol calistirir; gerektiginde alert olusturur.
+        """Runs automatic checks and creates alerts as needed.
 
-        Kontroller:
-            1. Veri tazeligi: LAST_EXTRACT_DATE freshness_days'den eski ise FRESHNESS alert.
-            2. Sema degisikligi: Son 24 saatte degisiklik varsa SCHEMA_CHANGE alert.
+        Checks:
+            1. Data freshness: FRESHNESS alert if LAST_EXTRACT_DATE is older than freshness_days.
+            2. Schema change: SCHEMA_CHANGE alert if a change occurred in the past 24 hours.
 
         Args:
-            freshness_days: Veri tazeligi esigi (gun). Varsayilan: 2.
+            freshness_days: Data freshness threshold (days). Default: 2.
 
         Returns:
-            Olusturulan her alert icin alert_id, type ve source alanlari
-            icerien sozluk listesi.
+            alert_id, type, and source fields for each created alert
+            as a list of dictionaries.
         """
         created_alerts = []
         failed_checks = []
 
-        # 1. Veri tazeligi kontrolu
+        # 1. Data freshness check
         cursor = None
         try:
             conn = self._get_conn()
@@ -305,7 +305,7 @@ class AlertManager:
             if cursor is not None:
                 cursor.close()
 
-        # 2. Sema degisikligi kontrolu
+        # 2. Schema change check
         try:
             from schema_change_detector import get_recent_changes
             changes = get_recent_changes(limit=10)

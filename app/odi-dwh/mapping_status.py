@@ -1,29 +1,29 @@
 """Domain status vocabulary for the LangGraph mapping pipeline.
 
-Bu modul, MAPPING_RUN_STATE.OVERALL_STATUS icin standart sozluk ve yardimci
-fonksiyonlari saglar. mapping_graph node'lari ve UI bu sabitleri kullanarak
-ayni dilde konusur.
+This module provides standard values and helper functions for
+MAPPING_RUN_STATE.OVERALL_STATUS. mapping_graph nodes and the UI use these constants
+to use the same vocabulary.
 
-Standart sozluk:
+Standard vocabulary:
   Lifecycle:
-    PENDING            — pipeline baslamadi
-    RUNNING            — pipeline calisiyor
-    SUCCEEDED          — pipeline basariyla bitti
-    FAILED             — pipeline bilinmeyen/genel hata ile dustu
+    PENDING            — pipeline has not started
+    RUNNING            — pipeline is running
+    SUCCEEDED          — pipeline completed successfully
+    FAILED             — pipeline failed with an unknown/general error
 
-  Domain (sirayla):
-    DQ_FAILED          — DQ uzlastirma adimi hata verdi
-    ODI_SYNC_REQUIRED  — DDL sonrasi ODI metaverisi senkronize edilmeli
-    ODI_SYNCED         — ODI Datastore/Mapping senkronize edildi
-    IMPACT_READY       — Impact lineage kayitlari hazir
-    RUN_READY          — Mapping calistirilmaya hazir (senaryo uretildi)
-    RUN_FAILED         — Senaryo calistirma hatali bitti
+  Domain (in order):
+    DQ_FAILED          — DQ reconciliation step failed
+    ODI_SYNC_REQUIRED  — ODI metadata must be synchronized after DDL
+    ODI_SYNCED         — ODI Datastore/Mapping synchronized
+    IMPACT_READY       — Impact lineage records are ready
+    RUN_READY          — Mapping is ready to run (scenario generated)
+    RUN_FAILED         — Scenario execution failed
 
-Geriye donuk uyum:
-    Eski eski durum stringleri ("running", "success", "failed", buyuk-kucuk
-    karisik) `normalize()` fonksiyonu uzerinden yeni standart sozluge
-    haritalanir. Boylece eski state kayitlari okunurken UI/Backend birden
-    fazla varyantla ugrasmak zorunda kalmaz.
+Backward compatibility:
+    Legacy status strings ("running", "success", "failed", mixed
+    case) are mapped to the new standard vocabulary by `normalize()`
+    so the UI/backend can read old state records without handling
+    multiple variants.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ ALL = {
     IMPACT_READY, RUN_READY, RUN_FAILED,
 }
 
-# ── Eski -> Yeni esleme ────────────────────────────────────────────────────
+# ── Legacy -> Current mapping ────────────────────────────────────────────────────
 _LEGACY_MAP = {
     "running":  RUNNING,
     "pending":  PENDING,
@@ -65,21 +65,21 @@ _FAILURE = {FAILED, DQ_FAILED, RUN_FAILED}
 _TERMINAL = {SUCCEEDED, FAILED, DQ_FAILED, RUN_FAILED, RUN_READY, IMPACT_READY, ODI_SYNCED}
 
 _LABELS_TR = {
-    PENDING:           "Bekliyor",
-    RUNNING:           "Calisiyor",
-    SUCCEEDED:         "Basarili",
-    FAILED:            "Hata",
-    DQ_FAILED:         "DQ Hatasi",
-    ODI_SYNC_REQUIRED: "ODI Senkron Bekliyor",
-    ODI_SYNCED:        "ODI Senkronize",
-    IMPACT_READY:      "Impact Hazir",
-    RUN_READY:         "Calistirilmaya Hazir",
-    RUN_FAILED:        "Calistirma Hatasi",
+    PENDING:           "Pending",
+    RUNNING:           "Running",
+    SUCCEEDED:         "Succeeded",
+    FAILED:            "Error",
+    DQ_FAILED:         "DQ Failed",
+    ODI_SYNC_REQUIRED: "ODI Sync Required",
+    ODI_SYNCED:        "ODI Synced",
+    IMPACT_READY:      "Impact Ready",
+    RUN_READY:         "Ready to Run",
+    RUN_FAILED:        "Run Failed",
 }
 
 
 def normalize(status: str | None) -> str:
-    """Eski/karisik harf duzeniyle gelen durumu standart sozluge cevirir."""
+    """Normalize a legacy or mixed-case status to the standard vocabulary."""
     if not status:
         return PENDING
     s = str(status).strip()

@@ -32,10 +32,10 @@ def execute_automation():
         subprocess.run([sys.executable, str(generator)], check=True)
     
     # 1. CREATE MAPPING (Fixed Project/Folder)
-    print("--- Phase 1: Creating mapping in TUTORIOL/First Folder [ATLANDI] ---")
+    print("--- Phase 1: Creating mapping in TUTORIOL/First Folder [SKIPPED] ---")
 
     # 2. GENERATE SCENARIO (Dynamic Call Fix)
-    print("--- Phase 2: Generating scenario [ATLANDI] ---")
+    print("--- Phase 2: Generating scenario [SKIPPED] ---")
 
     # 3. RUN SCENARIO (Via OdiStartScen)
     print("--- Phase 3: Triggering RUN via Agent ---")
@@ -49,8 +49,8 @@ def execute_automation():
                 k, v = line.strip().split("=", 1)
                 props[k] = v
 
-    # OdiStartScen repo baglanti parametrelerini KOMUT SATIRI ARGUMANI olarak ister.
-    # `-D` system property'leri bu tool tarafindan okunmuyor — "Repository connections must be set" hatasi onun isareti.
+    # OdiStartScen requires repository connection parameters as COMMAND-LINE ARGUMENTS.
+    # This tool does not read `-D` system properties — "Repository connections must be set" indicates that failure.
     run_cmd = [
         java_exe, "-cp", cp,
         "com.sunopsis.dwg.tools.OdiStartScen",
@@ -66,7 +66,7 @@ def execute_automation():
         "-CONTEXT=GLOBAL",
         "-AGENT_NAME=OracleDIAgent1",
     ]
-    # Sifre log'a sizmasin diye redacted versiyon yazdiralim
+    # Print a redacted version so passwords do not leak into logs.
     safe_cmd = [a if not (a.startswith("-USER_PASSWORD=") or a.startswith("-ODI_PASSWORD=")) else a.split("=", 1)[0] + "=***" for a in run_cmd]
     print(f"Running: {' '.join(safe_cmd)}")
     result = subprocess.run(run_cmd, check=False)

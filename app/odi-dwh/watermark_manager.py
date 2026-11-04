@@ -1,11 +1,11 @@
 """
-ETL Watermark Yöneticisi
+ETL Watermark Manager
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-Artımlı (incremental) yükleme için watermark tabanlı delta takibi sağlar.
-Her tablo için son extract tarihini/değerini saklar ve delta sorguları üretir.
+Provides watermark-based delta tracking for incremental loads.
+Stores each table's last extraction date/value and generates delta queries.
 
-Kullanım:
+Usage:
   from watermark_manager import WatermarkManager
   wm = WatermarkManager()
   delta_sql = wm.get_delta_query("DWH", "SALES", "MODIFIED_DATE")
@@ -674,7 +674,7 @@ def _validate_identifier(identifier: str) -> None:
 
 
 class WatermarkManager:
-    """Artımlı yükleme için watermark yönetimi."""
+    """Manage watermarks for incremental loads."""
 
     def __init__(self):
         self.conn = None
@@ -700,17 +700,17 @@ class WatermarkManager:
         self.close()
         return False
 
-    # ── Watermark Okuma ───────────────────────────────────────────────────────
+    # ── Read Watermark ────────────────────────────────────────────────────────
     def get_watermark(self, owner: str, table_name: str) -> dict | None:
-        """Belirtilen tablo icin mevcut watermark bilgisini doner.
+        """Return current watermark information for the specified table.
 
         Args:
-            owner: Tablo sahibi schema adi (orn. "DWH").
-            table_name: Tablo adi (orn. "SALES").
+            owner: Table owner schema name (e.g. "DWH").
+            table_name: Table name (e.g. "SALES").
 
         Returns:
-            Watermark sozlugu (last_extract_date, last_extract_value, row_count,
-            updated_at) ya da kayit yoksa None.
+            Watermark dictionary (last_extract_date, last_extract_value, row_count,
+            updated_at), or None if no record exists.
         """
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -733,19 +733,19 @@ class WatermarkManager:
         finally:
             cursor.close()
 
-    # ── Watermark Güncelleme ──────────────────────────────────────────────────
+    # ── Update Watermark ──────────────────────────────────────────────────────
     def update_watermark(self, owner: str, table_name: str,
                          extract_date: datetime = None,
                          extract_value: str = None,
                          row_count: int = None) -> None:
-        """Watermark kaydini gunceller; kayit yoksa yeni olusturur (MERGE).
+        """Update the watermark record; create one with MERGE if absent.
 
         Args:
-            owner: Tablo sahibi schema adi.
-            table_name: Tablo adi.
-            extract_date: Son extract tarihi; verilmezse SYSDATE kullanilir.
-            extract_value: Numerik/metin watermark degeri (opsiyonel).
-            row_count: Eklenen/guncellenen satir sayisi (opsiyonel).
+            owner: Table owner schema name.
+            table_name: Table name.
+            extract_date: Last extraction date; uses SYSDATE if omitted.
+            extract_value: Numeric/text watermark value (optional).
+            row_count: Number of inserted/updated rows (optional).
         """
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -777,24 +777,24 @@ class WatermarkManager:
             })
             conn.commit()
             logger.info(
-                "✅ Watermark güncellendi: %s.%s → %s (%d satır)",
+                "✅ Watermark updated: %s.%s → %s (%d rows)",
                 owner, table_name, extract_value, row_count or 0
             )
         finally:
             cursor.close()
 
-    # ── Delta Sorgusu Üretme ──────────────────────────────────────────────────
+    # ── Generate Delta Query ──────────────────────────────────────────────────
     def get_delta_query(self, owner: str, table_name: str,
                         date_column: str = "MODIFIED_DATE") -> str:
-        """Watermark'a gore delta sorgusu uretir.
+        """Generate a delta query based on the watermark.
 
         Args:
-            owner: Tablo sahibi schema adi.
-            table_name: Tablo adi.
-            date_column: Tarih filtresi uygulanacak kolon adi.
+            owner: Table owner schema name.
+            table_name: Table name.
+            date_column: Column name to filter by date.
 
         Returns:
-            Watermark varsa WHERE filtreli delta SELECT; yoksa full-load SELECT.
+            Delta SELECT with a WHERE filter if a watermark exists; otherwise full-load SELECT.
         """
         wm = self.get_watermark(owner, table_name)
         qualified_name = _qname(owner, table_name)
@@ -808,7 +808,7 @@ class WatermarkManager:
                 f"ORDER BY {watermark_column}"
             )
             logger.info(
-                "📊 Delta sorgusu üretildi: %s.%s (watermark: %s)",
+                "📊 Delta query generated: %s.%s (watermark: %s)",
                 owner, table_name, watermark_date
             )
         else:
@@ -817,15 +817,15 @@ class WatermarkManager:
                 f"ORDER BY {watermark_column}"
             )
             logger.info(
-                "📊 Full-load sorgusu üretildi: %s.%s (ilk yükleme)",
+                "📊 Full-load query generated: %s.%s (initial load)",
                 owner, table_name
             )
 
         return sql
 
-    # ── Tüm Watermark'ları Listele (UI için) ─────────────────────────────────
+    # ── List All Watermarks (for UI) ──────────────────────────────────────────
     def list_all_watermarks(self) -> list[dict]:
-        """Tüm watermark kayıtlarını döner."""
+        """Return all watermark records."""
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
@@ -838,14 +838,14 @@ class WatermarkManager:
             cols = [d[0] for d in cursor.description]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
         except Exception as e:
-            logger.error("Watermark listesi alınamadı: %s", e)
+            logger.error("Could not retrieve watermark list: %s", e)
             return []
         finally:
             cursor.close()
 
-    # ── Watermark Sıfırlama ──────────────────────────────────────────────────
+    # ── Reset Watermark ───────────────────────────────────────────────────────
     def reset_watermark(self, owner: str, table_name: str):
-        """Belirtilen tablonun watermark'ını siler (full-load tetikler)."""
+        """Delete the specified table's watermark (triggers a full load)."""
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
@@ -854,7 +854,7 @@ class WatermarkManager:
                 WHERE TABLE_OWNER = :owner AND TABLE_NAME = :tname
             """, {"owner": owner.upper(), "tname": table_name.upper()})
             conn.commit()
-            logger.warning("⚠️  Watermark sıfırlandı: %s.%s", owner, table_name)
+            logger.warning("⚠️  Watermark reset: %s.%s", owner, table_name)
         finally:
             cursor.close()
 
@@ -863,20 +863,20 @@ class WatermarkManager:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="ETL Watermark Yöneticisi")
+    parser = argparse.ArgumentParser(description="ETL Watermark Manager")
     sub = parser.add_subparsers(dest="cmd")
 
-    # list komutu
-    sub.add_parser("list", help="Tüm watermark'ları listele")
+    # list command.
+    sub.add_parser("list", help="List all watermarks")
 
-    # query komutu
-    q = sub.add_parser("query", help="Delta sorgusu üret")
+    # query command.
+    q = sub.add_parser("query", help="Generate delta query")
     q.add_argument("--owner", default="DWH")
     q.add_argument("--table", required=True)
     q.add_argument("--date-col", default="MODIFIED_DATE")
 
-    # reset komutu
-    r = sub.add_parser("reset", help="Watermark sıfırla")
+    # reset command.
+    r = sub.add_parser("reset", help="Reset watermark")
     r.add_argument("--owner", default="DWH")
     r.add_argument("--table", required=True)
 
@@ -894,15 +894,15 @@ if __name__ == "__main__":
                     dt_str = dt.strftime("%Y-%m-%d %H:%M") if dt else "—"
                     print(f"{m['TABLE_OWNER']:<12} {m['TABLE_NAME']:<30} {dt_str:<22} {m['ROW_COUNT'] or 0:>10}")
             else:
-                print("\n📭 Henüz watermark kaydı yok.\n")
+                print("\n📭 No watermark records yet.\n")
 
         elif args.cmd == "query":
             sql = wm.get_delta_query(args.owner, args.table, args.date_col)
-            print(f"\n-- Delta sorgusu: {args.owner}.{args.table}\n{sql}\n")
+            print(f"\n-- Delta query: {args.owner}.{args.table}\n{sql}\n")
 
         elif args.cmd == "reset":
             wm.reset_watermark(args.owner, args.table)
-            print(f"\n✅ {args.owner}.{args.table} watermark sıfırlandı.\n")
+            print(f"\n✅ {args.owner}.{args.table} watermark reset.\n")
 
         else:
             parser.print_help()

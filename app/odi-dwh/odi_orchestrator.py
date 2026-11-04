@@ -93,7 +93,7 @@ _ODI26_ALLOWED_LOAD_PLANS = {"LP_HR_SH_ODS_LOAD"}
 # K5: Allowed param key/value patterns (alphanumeric, dots, dashes, underscores, slashes, spaces, hashtag)
 _PARAM_KEY_RE   = re.compile(r'^[a-zA-Z0-9._-]+$')
 _PARAM_VAL_RE   = re.compile(r'^[a-zA-Z0-9._\-/\\ :,()#]+$')
-# Expression values icin genisletilmis regex (=, ;, ', ||, CASE WHEN, LIKE '%X%', !=, &, [] vb.)
+# Extended regex for expression values (=, ;, ', ||, CASE WHEN, LIKE '%X%', !=, &, [], etc.)
 _EXPR_VAL_RE    = re.compile(r"^[a-zA-Z0-9._\-/\\ :,()#=;'|*+<>%!&\[\]{}\"]+$")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
 _STRICT_STRUCTURED_ERROR_CONTRACTS = {
@@ -258,7 +258,7 @@ def _resolve_java_bin(java_home: str | None) -> str:
 
 _JAVA_BIN    = _resolve_java_bin(_JAVA_HOME)
 
-# Classpath bilesenleri — JAR isimleri config'den gelir (versiyon bagimsiz)
+# Classpath components — JAR names come from config (version-independent)
 _ODI_SDK_LIB   = os.path.join(_ODI_MW_HOME, "odi", "sdk", "lib")
 _OJDBC_JAR     = os.path.join(_ODI_MW_HOME, "oracle_common", "modules", "oracle.jdbc", OJDBC_JAR_NAME)
 _GROOVY_JAR    = os.path.join(_ODI_MW_HOME, "oracle_common", "modules", "thirdparty", GROOVY_JAR_NAME)
@@ -268,9 +268,9 @@ _PROPS_PLACEHOLDER = "<set-in-local-generated-file>"
 
 
 def _ensure_local_props_file():
-    """`.env`/ortam degiskenlerinden gercek degerli, git-ignored bir ODI baglanti
-    properties dosyasi uretir ve yolunu doner. Eksik deger varsa None doner.
-    Secret degerleri loglanmaz; dosya local kalir (template placeholder olarak korunur)."""
+    """Creates a git-ignored ODI connection properties file with actual values from
+    `.env`/environment variables and returns its path. Returns None if values are missing.
+    Secret values are not logged; the file stays local (template placeholder is preserved)."""
     dsn  = os.getenv("ODI_REPO_DSN") or ""
     m_us = os.getenv("ODI_REPO_USER") or ""
     m_pw = os.getenv("ODI_REPO_PASSWORD") or ""
@@ -312,13 +312,13 @@ class OdiOrchestrator:
         self.scripts_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "odi_automation")
 
     def _build_classpath(self) -> str:
-        """ODI SDK + OJDBC + Groovy classpath olusturur."""
+        """Builds the ODI SDK + OJDBC + Groovy classpath."""
         sep = ";"
         # odi-core.jar buyuk jar (29MB) — mapping, project, domain siniflari
         odi_core = os.path.join(_ODI_SDK_LIB, "odi-core.jar")
-        # sdk/lib altindaki tum jar'lar (wildcard)
+        # All JARs under sdk/lib (wildcard)
         sdk_wildcard = os.path.join(_ODI_SDK_LIB, "*")
-        # eclipselink — JPA/persistence icin gerekli
+        # eclipselink — required for JPA/persistence
         eclipselink = os.path.join(_ODI_MW_HOME, "oracle_common", "modules", "oracle.toplink", "eclipselink.jar")
         return sep.join([odi_core, _OJDBC_JAR, _GROOVY_JAR, sdk_wildcard, eclipselink])
 
@@ -441,19 +441,19 @@ class OdiOrchestrator:
                          truncate_target_table: bool | None = None,
                          replace_existing_mapping: bool = False,
                          required_update_key_columns: list[str] | None = None):
-        """create_mapping.groovy ile yeni ODI mapping olusturur.
+        """Creates a new ODI mapping with create_mapping.groovy.
 
         Args:
-            expressions: Ozel kolon eslesmeleri dict. Ornek:
-                {"SKEY": "NVL(JOIN.SKEY, -1)"} — SRC./JOIN. prefix'leri Groovy'de cozumlenir.
-            join_table: LEFT JOIN yapilacak tablo adi (orn: SKEY_PROD_PRODUCT).
-            join_model: Join tablosunun modeli (varsayilan: tgt_model).
-            join_condition: Join kosulu (orn: "JOIN.NATURAL_KEY = TO_CHAR(SRC.ProductID)").
+            expressions: Dictionary of custom column mappings. Example:
+                {"SKEY": "NVL(JOIN.SKEY, -1)"} — SRC./JOIN. prefixes are resolved in Groovy.
+            join_table: LEFT Name of table to JOIN (e.g. SKEY_PROD_PRODUCT).
+            join_model: Model of the joined table (default: tgt_model).
+            join_condition: Join condition (e.g. "JOIN.NATURAL_KEY = TO_CHAR(SRC.ProductID)").
             join_type: LEFT_OUTER (varsayilan), INNER, FULL_OUTER.
-            ikm_name: IKM tam adi (orn: "IKM Oracle Incremental Update"). Belirtilmezse otomatik aranir.
-            lkm_name: LKM tam adi (orn: "LKM SQL to Oracle (Built-In)"). Belirtilmezse otomatik aranir.
-            filter_condition: Kaynak tabloya uygulanacak filtre (orn: "NOT EXISTS (...)").
-            truncate_target_table: IKM Oracle Insert option override. None ise script default'una dokunulmaz.
+            ikm_name: Full IKM name (e.g. "IKM Oracle Incremental Update"). Searched automatically if omitted.
+            lkm_name: Full LKM name (e.g. "LKM SQL to Oracle (Built-In)"). Searched automatically if omitted.
+            filter_condition: Filter applied to the source table (e.g. "NOT EXISTS (...)").
+            truncate_target_table: IKM Oracle Insert option override. If None, the script default remains unchanged.
             required_update_key_columns: Mapping creation must fail unless the
                 target datastore exposes an update key with exactly these columns.
         """
@@ -491,7 +491,7 @@ class OdiOrchestrator:
             params["odi.required_update_key_columns"] = ",".join(
                 str(name).strip().upper() for name in required_update_key_columns
             )
-        # KM fallback zinciri config'den gelir (exact match yoksa kullanilir)
+        # KM fallback chain comes from config (used if there is no exact match)
         if not ikm_name:
             params["odi.ikm_priority"] = ODI_IKM_PRIORITY
         if not lkm_name:
@@ -513,31 +513,31 @@ class OdiOrchestrator:
                        rename_column_side: str = None,
                        rename_column_old_name: str = None,
                        rename_column_new_name: str = None) -> str:
-        """Cerrah (Surgeon) update: Mevcut ODI mapping'i YIKIP YENIDEN YARATMADAN gunceller.
+        """Surgical update: Updates an existing ODI mapping without destroying and recreating it.
 
-        Desteklenen operasyonlar:
-            update_expression — Belirli target attribute expression'larini degistirir
-            update_filter     — Filter component ekler/gunceller/siler
-            update_km         — IKM/LKM degistirir (physical design)
-            rename            — Mapping adini degistirir
+        Supported operations:
+            update_expression — Changes specified target attribute expressions
+            update_filter     — Adds, updates, or deletes a filter component
+            update_km         — Changes IKM/LKM (physical design)
+            rename            — Changes the mapping name
 
         Args:
-            mapping_name: Mevcut mapping adi.
+            mapping_name: Existing mapping name.
             operation: Operasyon tipi (update_expression, update_filter, update_km, rename).
-            new_mapping_name: Yeni mapping adi (rename icin).
-            expressions: Kolon eslesmeleri dict (update_expression icin).
-                Ornek: {"NAMEE": "Product.Name", "UPDATE_DATE": "SYSDATE"}
-            filter_action: add, modify, remove (update_filter icin).
-            filter_condition: Filter kosulu (update_filter add/modify icin).
-            filter_name: Mevcut filter adi (update_filter modify/remove icin).
-            ikm_name: IKM tam adi (update_km icin).
-            lkm_name: LKM tam adi (update_km icin).
+            new_mapping_name: New mapping name (for rename).
+            expressions: Column mapping dictionary (for update_expression).
+                Example: {"NAMEE": "Product.Name", "UPDATE_DATE": "SYSDATE"}
+            filter_action: add, modify, remove (for update_filter).
+            filter_condition: Filter condition (for update_filter add/modify).
+            filter_name: Existing filter name (for update_filter modify/remove).
+            ikm_name: Full IKM name (for update_km).
+            lkm_name: Full LKM name (for update_km).
             truncate_target_table: IKM Oracle Insert TRUNCATE_TARGET_TABLE option'i.
-            rename_source_table_name: Source datastore component yeni adi.
-            rename_target_table_name: Target datastore component yeni adi.
-            rename_column_side: Kolon rename kapsami (source veya target).
-            rename_column_old_name: Eski kolon adi.
-            rename_column_new_name: Yeni kolon adi.
+            rename_source_table_name: New source datastore component name.
+            rename_target_table_name: New target datastore component name.
+            rename_column_side: Column rename scope (source or target).
+            rename_column_old_name: Old column name.
+            rename_column_new_name: New column name.
         """
         params = {
             "odi.project": ODI_PROJECT,
@@ -545,7 +545,7 @@ class OdiOrchestrator:
             "odi.mapping": mapping_name,
             "odi.operation": operation,
         }
-        # Operasyona ozel parametreler
+        # Operation-specific parameters
         if operation == "update_expression" and expressions:
             expr_str = ";".join(f"{k}={v}" for k, v in expressions.items())
             params["odi.expressions"] = expr_str
@@ -603,18 +603,18 @@ class OdiOrchestrator:
 
     def validate_expression(self, target_table: str, target_owner: str,
                             expressions: dict) -> dict:
-        """Expression'lari calistirmadan once Oracle DB'de dogrular (EXPLAIN PLAN).
+        """Validates expressions in Oracle DB before execution (EXPLAIN PLAN).
 
-        Basit TABLE.COLUMN referanslari (ODI seviyesi) atlanir, sadece
-        hesaplanmis ifadeler (SYSDATE, CASE WHEN, CAST vb.) dogrulanir.
+        Simple TABLE.COLUMN references (ODI level) are skipped; only
+        computed expressions (SYSDATE, CASE WHEN, CAST, etc.) are validated.
 
         Args:
-            target_table: Hedef tablo adi (orn: ODS_PRODUCTION_PRODUCT).
-            target_owner: Hedef sema (orn: DWH).
-            expressions: Kolon-ifade eslesmesi dict.
+            target_table: Target table name (e.g. ODS_PRODUCTION_PRODUCT).
+            target_owner: Target schema (e.g. DWH).
+            expressions: Column-to-expression mapping dictionary.
 
         Returns:
-            {"valid": True} veya {"valid": False, "errors": {"COL": "ORA-..."}}
+            {"valid": True} or {"valid": False, "errors": {"COL": "ORA-..."}}
         """
         import re as _re
         simple_ref_re = _re.compile(r'^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$')
@@ -624,7 +624,7 @@ class OdiOrchestrator:
             conn = get_connection()
             cur = conn.cursor()
             for col_name, expr in expressions.items():
-                # Basit TABLE.COLUMN referanslarini atla — bunlar ODI seviyesinde cozumlenir
+                # Skip simple TABLE.COLUMN references — these are resolved at the ODI level
                 if simple_ref_re.match(expr.strip()):
                     continue
                 try:
@@ -644,7 +644,7 @@ class OdiOrchestrator:
         return {"valid": True}
 
     def delete_mapping(self, mapping_name: str) -> str:
-        """delete_mapping.groovy ile mevcut ODI mapping'i fiziksel olarak siler."""
+        """Physically deletes an existing ODI mapping with delete_mapping.groovy."""
         params = {
             "odi.project": ODI_PROJECT,
             "odi.folder": ODI_FOLDER,
@@ -792,15 +792,15 @@ class OdiOrchestrator:
 
     def register_datastore(self, model_code: str, table_name: str, columns: list[dict],
                             resource_name: str = None) -> str:
-        """ODI modeline yeni datastore ve kolonlarini kaydeder.
+        """Registers a new datastore and its columns in the ODI model.
 
         Args:
-            model_code: ODI model kodu (orn: DWH, ORACLE_HR, ORACLE_SH)
-            table_name: Datastore adi (orn: ODS_CUSTOMER, Customer)
-            columns: Kolon listesi — her biri {"name": str, "type": str, "length": int, "scale": int}
-            resource_name: Fiziksel tablo adi (varsayilan: table_name)
+            model_code: ODI model code (e.g. DWH, ORACLE_HR, ORACLE_SH)
+            table_name: Datastore name (e.g. ODS_CUSTOMER, Customer)
+            columns: Column list — each item {"name": str, "type": str, "length": int, "scale": int}
+            resource_name: Physical table name (default: table_name)
         """
-        # Kolon string'i olustur: NAME:TYPE:LENGTH:SCALE,...
+        # Build the column string: NAME:TYPE:LENGTH:SCALE,...
         col_parts = []
         for c in columns:
             part = c["name"] + ":" + c.get("type", "VARCHAR2")
@@ -819,11 +819,11 @@ class OdiOrchestrator:
         return self.run_groovy("register_datastore.groovy", params)
 
     def delete_datastore(self, model_code: str, table_name: str) -> str:
-        """ODI modelden datastore kaydini siler. Fiziksel tabloya dokunmaz.
+        """Deletes a datastore registration from the ODI model. Does not touch the physical table.
 
         Args:
-            model_code: ODI model kodu (orn: DWH)
-            table_name: Silinecek datastore adi (orn: DWH_ODS_PRODUCT)
+            model_code: ODI model code (e.g. DWH)
+            table_name: Datastore name to delete (e.g. DWH_ODS_PRODUCT)
         """
         params = {
             "odi.model_code": model_code,
@@ -833,7 +833,7 @@ class OdiOrchestrator:
 
     def add_column(self, model_code: str, table_name: str, col_name: str, 
                    col_type: str = "NUMBER", col_len: int = 10, col_prec: int = 0) -> str:
-        """Mevcut bir ODI datastore'una yeni bir kolon ekler."""
+        """Adds a new column to an existing ODI datastore."""
         params = {
             "odi.model_code": model_code,
             "odi.table_name": table_name,
@@ -845,7 +845,7 @@ class OdiOrchestrator:
         return self.run_groovy("add_column.groovy", params)
 
     def run_scenario(self, name: str, version: str = "001", context: str = "GLOBAL"):
-        """Mevcut bir ODI senaryosunu calistirir."""
+        """Runs an existing ODI scenario."""
         params = {
             "odi.scenario.name": name,
             "odi.scenario.version": version,
@@ -1261,7 +1261,7 @@ class OdiOrchestrator:
                        logical_schema: str, model_name: str, model_code: str,
                        context: str = "GLOBAL", technology: str = "Oracle",
                        tech_code: str = "ORACLE") -> str:
-        """Topology altina physical schema + logical schema + context mapping + model olusturur."""
+        """Creates a physical schema, logical schema, context mapping, and model under Topology."""
         params = {
             "odi.data_server": data_server,
             "odi.schema_name": schema_name,

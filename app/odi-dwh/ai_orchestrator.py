@@ -59,61 +59,61 @@ class OrchestratorState(TypedDict, total=False):
 TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     "oracle.describe_table": {
         "privacy": "local_only",
-        "description": "Source connector ile kolon metadata okur.",
+        "description": "Reads column metadata through the source connector.",
         "input": {"table": "SCHEMA.TABLE"},
         "output": {"columns": "metadata list", "pk_columns": "list[str]"},
     },
     "oracle.preview_rows": {
         "privacy": "local_only",
-        "description": "Ornek satir okur; evidence pack icine ham satir yazilmaz.",
+        "description": "Reads sample rows; raw rows are not written to the evidence pack.",
         "input": {"table": "SCHEMA.TABLE", "limit": "int"},
         "output": {"rows": "masked/local only"},
     },
     "mapping.generate_ods": {
         "privacy": "local_first",
-        "description": "ODS mapping taslagi ve hedef kolon onerisini uretir.",
+        "description": "Produces an ODS mapping draft and target column suggestions.",
         "input": {"source_table": "SCHEMA.TABLE", "target_layer": "ODS"},
         "output": {"mapping_spec": "dict"},
     },
     "oracle.plan_load_strategy": {
         "privacy": "local_only",
-        "description": "Oracle-to-Oracle full/incremental/KM/CDC stratejisi onerir.",
+        "description": "Suggests an Oracle-to-Oracle full/incremental/KM/CDC strategy.",
         "input": {"source_table": "SCHEMA.TABLE", "columns": "metadata list", "pk_columns": "list[str]"},
         "output": {"load_strategy": "dict"},
     },
     "odi.dry_run_mapping": {
         "privacy": "local_only",
-        "description": "ODI mapping parametrelerini dry-run olarak dogrular.",
+        "description": "Validates ODI mapping parameters in a dry run.",
         "input": {"mapping_spec": "dict"},
         "output": {"checks": "list"},
     },
     "odi.read_only_preflight": {
         "privacy": "local_only",
-        "description": "ODI SDK finder/read-only validation icin connectionless approval preflight uretir.",
+        "description": "Produces a connectionless approval preflight for ODI SDK finder/read-only validation.",
         "input": {"mapping_spec": "dict", "approval_plan": "dict"},
         "output": {"status": "blocked_until_approval|ready_for_read_only_connection", "checks": "list"},
     },
     "reconcile.plan_checks": {
         "privacy": "local_only",
-        "description": "Row count, PK, NULL ve sample reconciliation planini hazirlar.",
+        "description": "Prepares a row count, PK, NULL, and sample reconciliation plan.",
         "input": {"source_table": "SCHEMA.TABLE", "target_table": "OWNER.TABLE"},
         "output": {"test_plan": "list"},
     },
     "rag.search": {
         "privacy": "local_only",
-        "description": "Yerel RAG icinde modelleme pattern ve hata cozumlerini arar.",
+        "description": "Searches local RAG for modeling patterns and error solutions.",
         "input": {"query": "string", "collection": "optional string"},
         "output": {"documents": "list"},
     },
     "llm.local": {
         "privacy": "local_only",
-        "description": "Local OpenAI/Ollama/Hermes/Qwen/Nemotron aday modeli cagirir.",
+        "description": "Calls a candidate local OpenAI/Ollama/Hermes/Qwen/Nemotron model.",
         "input": {"messages": "list"},
         "output": {"text": "string"},
     },
     "llm.cloud_review": {
         "privacy": "evidence_pack_only",
-        "description": "Cloud reviewer'a sadece kontrollu evidence pack gonderir.",
+        "description": "Sends only a controlled evidence pack to the cloud reviewer.",
         "input": {"evidence_pack": "dict"},
         "output": {"review": "string"},
     },
@@ -316,7 +316,7 @@ def _oracle_load_strategy(table: str, columns: list[dict[str, Any]], pk_columns:
             "watermark_column": business_date,
             "merge_key": pk_columns,
             "cdc_options": ["watermark", "materialized_view_log", "goldengate"],
-            "rationale": "PK ve tarih/guncelleme kolonu var; once watermark tabanli merge denenebilir.",
+            "rationale": "PK and date/update columns exist; a watermark based merge can be tried first.",
             "approval_required": ["ODI_KM_SELECTION", "INCREMENTAL_LOGIC", "LIVE_ODI_CREATE"],
         }
     if pk_columns:
@@ -326,7 +326,7 @@ def _oracle_load_strategy(table: str, columns: list[dict[str, Any]], pk_columns:
             "watermark_column": None,
             "merge_key": pk_columns,
             "cdc_options": ["add_watermark_column", "materialized_view_log", "goldengate"],
-            "rationale": "PK var ancak guvenilir watermark kolonu yok; incremental icin ek CDC karari gerekir.",
+            "rationale": "A PK exists but no reliable watermark column; incremental loading needs an additional CDC decision.",
             "approval_required": ["CDC_DESIGN", "ODI_KM_SELECTION", "LIVE_ODI_CREATE"],
         }
     if business_date:
@@ -336,7 +336,7 @@ def _oracle_load_strategy(table: str, columns: list[dict[str, Any]], pk_columns:
             "watermark_column": business_date,
             "merge_key": [],
             "cdc_options": ["watermark", "partition_exchange_if_large_fact", "goldengate"],
-            "rationale": "PK yok; fact/append tablo gibi ele alinmali, reconciliation row count ve aggregate kontrol ister.",
+            "rationale": "No PK; treat as a fact/append table, requiring row count and aggregate reconciliation checks.",
             "approval_required": ["FACT_GRAIN_CONFIRMATION", "WATERMARK_CONFIRMATION", "LIVE_ODI_CREATE"],
         }
     return {
@@ -345,7 +345,7 @@ def _oracle_load_strategy(table: str, columns: list[dict[str, Any]], pk_columns:
         "watermark_column": None,
         "merge_key": [],
         "cdc_options": ["source_watermark_required", "materialized_view_log", "goldengate"],
-        "rationale": "PK ve watermark yok; guvenli ilk yol full snapshot, incremental icin kaynak tasarim karari gerekir.",
+        "rationale": "No PK or watermark; the safe initial path is a full snapshot, and incremental loading needs a source design decision.",
         "approval_required": ["SOURCE_GRAIN_CONFIRMATION", "CDC_DESIGN", "LIVE_ODI_CREATE"],
     }
 
@@ -644,10 +644,10 @@ def _summarize_columns(table: str) -> tuple[list[dict[str, Any]], list[str], lis
                 }
             )
         if not columns:
-            warnings.append(f"Kaynak tablo metadata bos dondu: {table}")
+            warnings.append(f"Source table metadata returned empty: {table}")
         return columns, pk_columns, warnings
     except Exception as exc:
-        warnings.append(f"Kaynak metadata okunamadi ({table}): {exc}")
+        warnings.append(f"Source metadata could not be read ({table}): {exc}")
         return [], [], warnings
 
 
@@ -910,9 +910,9 @@ def _routing_decision(state: OrchestratorState, runtime: dict[str, Any]) -> dict
         "primary_worker": "local_llm" if has_local_model else "tool_only_until_model_ready",
         "cloud_policy": "evidence_pack_only" if cloud_allowed else "disabled",
         "reason": [
-            "Hassas veri local sinirda kalir.",
-            "Cloud ham veri degil sadece evidence pack gorebilir.",
-            "Local model listesi bos ise endpoint plan/dry-run modunda kalir.",
+            "Sensitive data stays within the local boundary.",
+            "The cloud can see only the evidence pack, not raw data.",
+            "If the local model list is empty, the endpoint remains in plan/dry-run mode.",
         ],
         "runtime_status": runtime,
     }
@@ -1008,25 +1008,25 @@ def _build_approval_plan(
 def _risk_assessment(state: OrchestratorState, columns: list[dict[str, Any]], pk_columns: list[str]) -> list[dict[str, Any]]:
     risks: list[dict[str, Any]] = []
     if not columns:
-        risks.append({"level": "high", "area": "metadata", "message": "Kaynak kolon metadata okunamadi."})
+        risks.append({"level": "high", "area": "metadata", "message": "Source column metadata could not be read."})
     if not pk_columns:
-        risks.append({"level": "medium", "area": "reconciliation", "message": "PK yok; reconciliation row count ve alternatif key stratejisi ister."})
+        risks.append({"level": "medium", "area": "reconciliation", "message": "No PK; reconciliation requires row count and an alternative key strategy."})
     if state.get("allow_cloud_review"):
-        risks.append({"level": "medium", "area": "privacy", "message": "Cloud review acik; evidence pack disina cikilmamali."})
+        risks.append({"level": "medium", "area": "privacy", "message": "Cloud review is enabled; data must stay within the evidence pack."})
     load_strategy = state.get("oracle_load_strategy", {})
     if load_strategy.get("strategy") in {"full_load_snapshot", "full_load_then_merge_by_pk"}:
-        risks.append({"level": "medium", "area": "cdc", "message": "Incremental yukleme icin Oracle CDC/watermark karari netlesmeli."})
+        risks.append({"level": "medium", "area": "cdc", "message": "The Oracle CDC/watermark decision must be clarified for incremental loading."})
     if not risks:
-        risks.append({"level": "low", "area": "initial_plan", "message": "Dry-run plani icin kritik risk gorulmedi."})
+        risks.append({"level": "low", "area": "initial_plan", "message": "No critical risk was found for the dry-run plan."})
     return risks
 
 
 def _quality_gates(columns: list[dict[str, Any]], pk_columns: list[str]) -> list[dict[str, Any]]:
     return [
-        {"gate": "source_metadata", "status": "pass" if columns else "fail", "detail": f"{len(columns)} kolon"},
-        {"gate": "pk_strategy", "status": "pass" if pk_columns else "review", "detail": ", ".join(pk_columns) or "PK yok"},
-        {"gate": "cloud_payload", "status": "pass", "detail": "Evidence pack ham satir/credential icermez"},
-        {"gate": "live_side_effects", "status": "pass", "detail": "DDL/ODI create dry-run modunda kapali"},
+        {"gate": "source_metadata", "status": "pass" if columns else "fail", "detail": f"{len(columns)} columns"},
+        {"gate": "pk_strategy", "status": "pass" if pk_columns else "review", "detail": ", ".join(pk_columns) or "No PK"},
+        {"gate": "cloud_payload", "status": "pass", "detail": "The evidence pack contains no raw rows or credentials"},
+        {"gate": "live_side_effects", "status": "pass", "detail": "DDL/ODI creation is disabled in dry-run mode"},
     ]
 
 
@@ -1046,7 +1046,7 @@ def node_intent_classifier(state: OrchestratorState) -> dict[str, Any]:
     prompt = state.get("prompt", "")
     if not _is_modeling_request(prompt):
         warnings = list(state.get("warnings", []))
-        warnings.append("Prompt ODS/DWH/ODI modelleme istegi olarak siniflandirilmadi.")
+        warnings.append("The prompt was not classified as an ODS/DWH/ODI modeling request.")
         return {
             "task_type": "unsupported",
             "source_table": "",
@@ -1057,7 +1057,7 @@ def node_intent_classifier(state: OrchestratorState) -> dict[str, Any]:
     source_table = _extract_source_table(prompt)
     if not source_table:
         warnings = list(state.get("warnings", []))
-        warnings.append("Modelleme istegi algilandi ancak kaynak tablo bulunamadi.")
+        warnings.append("A modeling request was detected, but no source table was found.")
         return {
             "task_type": "unsupported",
             "source_table": "",
@@ -1118,19 +1118,19 @@ def node_planner(state: OrchestratorState) -> dict[str, Any]:
                 "job_id": state.get("job_id"),
                 "task_type": "unsupported",
                 "approval_plan": approval_plan,
-                "local_findings": ["Desteklenen ilk is tipi: ods_modeling/dwh_modeling"],
+                "local_findings": ["The initial supported task type: ods_modeling/dwh_modeling"],
                 "question_for_cloud": "",
             }, []),
             "routing_decision": routing,
             "risk_assessment": [
-                {"level": "low", "area": "intent", "message": "Alakasiz prompt icin veri/tool calistirilmadi."}
+                {"level": "low", "area": "intent", "message": "No data or tools were run for an unrelated prompt."}
             ],
             "approval_plan": approval_plan,
             "quality_gates": [
-                {"gate": "intent_supported", "status": "review", "detail": "ODS/DWH/ODI modelleme istegi degil"},
-                {"gate": "live_side_effects", "status": "pass", "detail": "Tool/DDL/ODI calistirilmadi"},
+                {"gate": "intent_supported", "status": "review", "detail": "Not an ODS/DWH/ODI modeling request"},
+                {"gate": "live_side_effects", "status": "pass", "detail": "Tool/DDL/ODI was not run"},
             ],
-            "test_plan": [{"name": "intent_supported", "expected": "ODS/DWH/ODI modelleme promptu"}],
+            "test_plan": [{"name": "intent_supported", "expected": "ODS/DWH/ODI modeling prompt"}],
             "warnings": warnings,
             "log": _log(state, "planner", "SKIPPED", "unsupported prompt"),
         }
@@ -1225,21 +1225,21 @@ def node_planner(state: OrchestratorState) -> dict[str, Any]:
         "odi_read_only_preflight": odi_read_only_preflight,
         "approval_plan": approval_plan,
         "local_findings": [
-            f"{len(columns)} kolon metadata bulundu" if columns else "Kolon metadata okunamadi",
-            f"PK: {', '.join(pk_columns)}" if pk_columns else "PK bulunamadi veya fact tablo olabilir",
+            f"{len(columns)} columns of metadata were found" if columns else "Column metadata could not be read",
+            f"PK: {', '.join(pk_columns)}" if pk_columns else "No PK found, or this may be a fact table",
             f"Load strategy: {load_strategy.get('strategy')}",
             f"ODI dry-run: {'passed' if odi_dry_run['passed'] else 'failed'} ({odi_dry_run['summary']})",
             f"ODI read-only preflight: {odi_read_only_preflight['status']}",
         ],
-        "question_for_cloud": "Mapping stratejisini ve test kapsamını ham veri olmadan gözden geçir.",
+        "question_for_cloud": "Review the mapping strategy and test scope without raw data.",
     }, columns[:80])
     test_plan = [
         {"name": "metadata_available", "expected": "source columns > 0"},
         {"name": "target_naming", "expected": "ODS_<SCHEMA>_<TABLE>"},
-        {"name": "pk_strategy", "expected": "PK varsa reconciliation key olarak kullan"},
+        {"name": "pk_strategy", "expected": "Use the PK as a reconciliation key if present"},
         {"name": "oracle_load_strategy", "expected": "full/incremental/KM/CDC strategy selected"},
         {"name": "row_count_reconciliation", "expected": "source/target row count compare"},
-        {"name": "nullability_check", "expected": "NOT NULL kolonlar icin DQ kontrolu"},
+        {"name": "nullability_check", "expected": "DQ checks for NOT NULL columns"},
     ]
     return {
         "local_steps": local_steps,
@@ -1333,7 +1333,7 @@ def node_final_composer(state: OrchestratorState) -> dict[str, Any]:
         "status": "success",
         "final_response": response,
         "observability": observability,
-        "log": _log(state, "final_composer", "SUCCESS", "dry-run plan hazir"),
+        "log": _log(state, "final_composer", "SUCCESS", "dry-run plan ready"),
     }
 
 
@@ -1395,7 +1395,7 @@ def orchestrate(
     job_id: str | None = None,
 ) -> dict[str, Any]:
     if not prompt or not prompt.strip():
-        raise ValueError("prompt gerekli")
+        raise ValueError("prompt is required")
     graph = get_orchestrator_graph()
     runtime = _runtime_status()
     state: OrchestratorState = {
@@ -1424,8 +1424,8 @@ def orchestrate(
             response = {
                 "job_id": state["job_id"],
                 "status": "failed",
-                "error": "Orchestrator final response uretmedi.",
-                "warnings": ["Ic state API'ye dondurulmedi."],
+                "error": "Orchestrator did not produce a final response.",
+                "warnings": ["Internal state was not returned through the API."],
                 "observability": observability,
             }
         elif "observability" not in response:
@@ -1445,7 +1445,7 @@ def orchestrate(
             "mode": "dry_run" if dry_run else "requires_approval",
             "approval_required_for": _legacy_approval_required_for(),
             "approval_plan": _build_approval_plan(state),
-            "warnings": ["Orchestrator hatasi kontrollu response'a cevrildi; ic state API'ye dondurulmedi."],
+            "warnings": ["The orchestrator error was converted to a controlled response; internal state was not returned through the API."],
             "observability": observability,
         }
         _persist_job({**state, "final_response": response, "observability": observability, "error": str(exc)})

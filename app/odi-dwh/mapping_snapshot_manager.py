@@ -1,11 +1,11 @@
 """
-Mapping Snapshot Manager — ODI Mapping Versiyon Karşılaştırma
+Mapping Snapshot Manager — ODI Mapping Version Comparison
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ODI mapping'lerinin anlık görüntülerini (snapshot) AUDIT_USER.MAPPING_SNAPSHOT
-tablosuna kaydeder ve iki snapshot arasındaki farkları analiz eder.
+Stores ODI mapping snapshots in AUDIT_USER.MAPPING_SNAPSHOT
+and analyzes differences between two snapshots.
 
-Kullanım:
+Usage:
     with MappingSnapshotManager() as msm:
         msm.take_snapshot("MAP_PRODUCT_DIM", mapping_detail_dict)
         diff = msm.compare_latest("MAP_PRODUCT_DIM")
@@ -23,7 +23,7 @@ logger = logging.getLogger("mapping_snapshot_manager")
 
 
 class MappingSnapshotManager:
-    """ODI mapping snapshot alma ve versiyon karşılaştırma."""
+    """ODI mapping snapshots and version comparison."""
 
     def __init__(self):
         self.conn = None
@@ -71,22 +71,22 @@ class MappingSnapshotManager:
     def take_snapshot(self, mapping_name: str,
                       mapping_data: dict[str, Any],
                       label: str = "") -> int:
-        """Mapping'in anlık görüntüsünü kaydeder.
+        """Save a snapshot of the mapping.
 
         Args:
-            mapping_name: ODI mapping adı.
-            mapping_data: Kolon listesini içeren mapping sözlüğü
-                (odi_get_mapping_details çıktısı).
+            mapping_name: ODI mapping name.
+            mapping_data: Mapping dictionary containing the column list
+                (output of odi_get_mapping_details).
             label: Opsiyonel versiyon etiketi (orn. "before_refactor").
 
         Returns:
-            Oluşturulan SNAP_ID.
+            Created SNAP_ID.
         """
         conn = self._get_conn()
         cursor = conn.cursor()
         snap_id_var = cursor.var(int)
 
-        # Sadece karşılaştırmaya dahil edilecek alanları normalize et
+        # Normalize only fields included in comparisons
         normalized = _normalize_mapping(mapping_data)
         snap_json = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
         snap_hash = hashlib.sha256(snap_json.encode()).hexdigest()[:16]
@@ -107,21 +107,21 @@ class MappingSnapshotManager:
             })
             conn.commit()
             snap_id = snap_id_var.getvalue()[0]
-            logger.info("Snapshot alındı: %s (id=%d, hash=%s)", mapping_name, snap_id, snap_hash)
+            logger.info("Snapshot saved: %s (id=%d, hash=%s)", mapping_name, snap_id, snap_hash)
             return snap_id
         finally:
             cursor.close()
 
     # ── Snapshot Listesi ──────────────────────────────────────────────────────
     def get_snapshots(self, mapping_name: str, limit: int = 10) -> list[dict]:
-        """Mapping'e ait snapshot geçmişini döner (en yeni önce).
+        """Return the mapping snapshot history (newest first).
 
         Args:
-            mapping_name: ODI mapping adı.
-            limit: Döndürülecek maksimum snapshot sayısı.
+            mapping_name: ODI mapping name.
+            limit: Maximum number of snapshots to return.
 
         Returns:
-            Her snapshot için SNAP_ID, SNAP_DATE, SNAP_LABEL, SNAP_HASH içeren liste.
+            List containing SNAP_ID, SNAP_DATE, SNAP_LABEL, SNAP_HASH for each snapshot.
         """
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -150,7 +150,7 @@ class MappingSnapshotManager:
             cursor.close()
 
     def _get_snapshot_json(self, snap_id: int) -> dict | None:
-        """Belirtilen snapshot'un JSON içeriğini döner."""
+        """Return the JSON content of the specified snapshot."""
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
@@ -166,55 +166,55 @@ class MappingSnapshotManager:
         finally:
             cursor.close()
 
-    # ── Karşılaştırma ─────────────────────────────────────────────────────────
+    # ── Comparison ─────────────────────────────────────────────────────────
     def compare_snapshots(self, snap_id_old: int, snap_id_new: int) -> dict:
-        """İki snapshot arasındaki farkları analiz eder.
+        """Analyze differences between two snapshots.
 
         Args:
-            snap_id_old: Eski (baz alınan) snapshot ID.
-            snap_id_new: Yeni (karşılaştırılan) snapshot ID.
+            snap_id_old: Old (baseline) snapshot ID.
+            snap_id_new: New (compared) snapshot ID.
 
         Returns:
-            Sözlük: added, removed, changed, unchanged kolon listeleri.
+            Dictionary: added, removed, changed, unchanged column lists.
         """
         old = self._get_snapshot_json(snap_id_old)
         new = self._get_snapshot_json(snap_id_new)
 
         if old is None or new is None:
-            return {"error": "Snapshot bulunamadı."}
+            return {"error": "Snapshot not found."}
 
         return _diff_mappings(old, new)
 
     def compare_latest(self, mapping_name: str) -> dict:
-        """Mapping'in en son iki snapshot'ını karşılaştırır.
+        """Compare the two most recent snapshots of the mapping.
 
         Args:
-            mapping_name: Karşılaştırılacak mapping adı.
+            mapping_name: Mapping name to compare.
 
         Returns:
-            diff sözlüğü (added, removed, changed, unchanged) ya da
-            yeterli snapshot yoksa {"error": "..."}.
+            diff dictionary (added, removed, changed, unchanged) or
+            {"error": "..."} if there are insufficient snapshots.
         """
         snaps = self.get_snapshots(mapping_name, limit=2)
         if len(snaps) < 2:
             return {
-                "error": "Karşılaştırma için en az 2 snapshot gerekli.",
+                "error": "At least 2 snapshots are required for comparison.",
                 "snap_count": len(snaps),
             }
         newer = snaps[0]  # En yeni
-        older = snaps[1]  # Bir önceki
+        older = snaps[1]  # Previous one
         diff = self.compare_snapshots(older["snap_id"], newer["snap_id"])
         diff["snap_old"] = older
         diff["snap_new"] = newer
         return diff
 
 
-# ── Yardımcı Fonksiyonlar ─────────────────────────────────────────────────────
+# ── Helper Functions ─────────────────────────────────────────────────────
 
 def _normalize_mapping(data: dict[str, Any]) -> dict:
-    """Mapping datasını karşılaştırılabilir sözlüğe dönüştürür.
+    """Convert mapping data into a comparable dictionary.
 
-    Yalnızca TARGET kolonları + expression'larını tutar.
+    Keep only TARGET columns and their expressions.
     """
     rows = data if isinstance(data, list) else data.get("rows", data.get("data", []))
     columns: dict[str, str] = {}
@@ -224,7 +224,7 @@ def _normalize_mapping(data: dict[str, Any]) -> dict:
         attr_name = str(row.get("ATTR_NAME") or row.get("attr_name") or "").strip()
         expression = str(row.get("EXPRESSION") or row.get("expression") or "").strip()
 
-        # Yalnızca TARGET satırları
+        # TARGET rows only
         if comp_type == "DATASTORE" and expression and attr_name:
             columns[attr_name.upper()] = expression
 
@@ -232,7 +232,7 @@ def _normalize_mapping(data: dict[str, Any]) -> dict:
 
 
 def _diff_mappings(old: dict, new: dict) -> dict:
-    """İki normalize edilmiş mapping sözlüğünü karşılaştırır."""
+    """Compare two normalized mapping dictionaries."""
     old_cols: dict[str, str] = old.get("columns", {})
     new_cols: dict[str, str] = new.get("columns", {})
 
