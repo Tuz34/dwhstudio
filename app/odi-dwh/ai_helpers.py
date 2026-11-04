@@ -26,6 +26,13 @@ def df_to_jsonable(df):
         rows.append(clean)
     return rows
 
+# English forms of a mapping-creation request ("create mapping", "create a mapping",
+# "make a mapping", "build a mapping", ...). Turkish forms are matched by token lists.
+_CREATE_MAPPING_EN_RE = re.compile(r"\b(?:create|make|build)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?mapping")
+# Whole-word "table" (English) / "tablo..." (Turkish); avoids "stable", "suitable".
+_TABLE_WORD_RE = re.compile(r"\b(?:tablo\w*|tables?)\b")
+
+
 def _is_modeled_tables_question(message: str) -> bool:
     msg = (message or "").lower()
     msg_ascii = msg
@@ -35,8 +42,9 @@ def _is_modeled_tables_question(message: str) -> bool:
                    ("ÃƒÆ’Ã‚Â¼", "u"), ("Ãƒâ€¦Ã…Â¸", "s"), ("ÃƒÆ’Ã‚Â¶", "o"), ("ÃƒÆ’Ã‚Â§", "c")):
         msg_ascii = msg_ascii.replace(_a, _b)
 
-    # YENI MODELLEME ISTEGI (create) -> liste rotasi DEGIL; LLM/mapping akisina dussun.
-    # ("modellemek istiyorum", "X'i modelle", "ods katmanina modelle", "mapping olustur" ...)
+    # NEW MODELING REQUEST (create) -> NOT the list route; let it fall through to the LLM/mapping flow.
+    # Turkish: "modellemek istiyorum", "X'i modelle", "ods katmanina modelle", "mapping olustur" ...
+    # English: "create/make/build (a) mapping" via _CREATE_MAPPING_EN_RE.
     create_intent = (
         "modellemek" in msg_ascii
         or "modelleyel" in msg_ascii
@@ -44,6 +52,7 @@ def _is_modeled_tables_question(message: str) -> bool:
         or "ods katmanina" in msg_ascii
         or "ods a tasi" in msg_ascii
         or "ods'a tasi" in msg_ascii
+        or bool(_CREATE_MAPPING_EN_RE.search(msg_ascii))
         or ("mapping" in msg_ascii and any(v in msg_ascii for v in ["olustur", "yap", "kur", "uret", "yeni"]))
         or (
             "modelle" in msg_ascii
@@ -55,7 +64,7 @@ def _is_modeled_tables_question(message: str) -> bool:
     if create_intent:
         return False
 
-    # MEVCUT modellenmis tablolari LISTELEME/SORMA niyeti
+    # Intent to LIST/ASK ABOUT tables that are ALREADY modeled
     has_table = any(w in msg_ascii for w in ["tablo", "tablolar", "table", "tables"])
     has_list = any(w in msg_ascii for w in ["modelli", "modellenmis", "modellenen", "modeled", "modelled", "mapping"])
     return has_table and has_list
@@ -213,7 +222,8 @@ def _truncate_mapping_intent_answer(message: str) -> dict:
         return {
             "aciklama": (
                 "Which mapping should be updated? Provide the mapping name, for example "
-                "`MAP_HR_EMPLOYEES_TO_ODS truncate ekle`. No ODI metadata update or scenario run was started."
+                "`MAP_HR_EMPLOYEES_TO_ODS truncate ekle` (Turkish) or `MAP_HR_EMPLOYEES_TO_ODS target truncate` (English). "
+                "No ODI metadata update or scenario run was started."
             ),
             "queries": [],
             "requires_mapping": True,
@@ -263,7 +273,9 @@ def _is_unmapped_odi_flow_question(message: str) -> bool:
         "yapilmamis", "yapilmayan", "olmayan", "eksik", "yok",
         "unmapped", "missing", "without", "not mapped", "not modeled",
     ]) or ("yap" in msg and "mam" in msg)
-    has_create_intent = any(token in msg for token in ["olustur", "create mapping", "mapping yap", "kur", "uret"])
+    has_create_intent = any(token in msg for token in ["olustur", "create mapping", "mapping yap", "kur", "uret"]) or bool(
+        _CREATE_MAPPING_EN_RE.search(msg)
+    )
     return has_source_schema and has_target and has_table and has_flow and has_missing and not has_create_intent
 
 
@@ -286,10 +298,10 @@ def _unmapped_odi_flow_answer(message: str):
     ]
     return {
         "aciklama": (
-            f"{source_schema} semasindaki tablolar read-only metadata ile kontrol edildi. "
-            f"{len(rows)} kaynak tablo icinde DWH ODS katmanina ODI akisi olmayan "
-            f"{len(missing_rows)} tablo bulundu. DWH hedef tablosunun mevcut olmasi tek basina "
-            "ODI mapping var anlamina gelmez; ODI repository referanslari da kontrol edildi."
+            f"The tables in the {source_schema} schema were checked using read-only metadata. "
+            f"{len(missing_rows)} of {len(rows)} source tables are missing an ODI flow "
+            "to the DWH ODS layer (no ODI flow to DWH). The existence of a DWH target table alone does not "
+            "mean an ODI mapping exists; ODI repository references were checked as well."
         ),
         "queries": [{
             "action": "select",
@@ -360,7 +372,7 @@ def _has_recent_bulk_model_intent(message: str, history: list) -> bool:
         "modelle", "modelleyelim", "ods katmanina", "mapping olustur",
         "mapping yap", "create mapping", "olustur", "aktarim olustur",
     ])
-    return has_missing_ref and (has_bulk_ref or "tablo" in joined) and has_model_intent
+    return has_missing_ref and (has_bulk_ref or bool(_TABLE_WORD_RE.search(joined))) and has_model_intent
 
 
 def _is_pronoun_bulk_model_intent(message: str) -> bool:
@@ -419,7 +431,7 @@ def _is_remembered_unmapped_flow_mapping_request(message: str, history: list) ->
         return False
     return (
         any(token in msg for token in ["eksik olan", "missing", "bu 5", "5 tablo"])
-        and any(token in msg for token in ["tablo", "flow", "akis", "mapping"])
+        and any(token in msg for token in ["tablo", "table", "flow", "akis", "mapping"])
     )
 
 
@@ -448,8 +460,8 @@ def _remembered_unmapped_flow_mapping_answer(message: str = "", history: list | 
     mapping_requests = [_mapping_request_from_memory(item) for item in remembered or []]
     return {
         "aciklama": (
-            f"Eksik ODI akisi olan {len(mapping_requests)} tablo icin mapping istekleri hazirlandi. "
-            "Bu cevap sadece on hazirliktir; ODI/DB tarafinda kalici islem baslatmak icin her mapping kartini ayri ayri onaylaman gerekir."
+            f"Mapping requests were prepared for {len(mapping_requests)} tables with a missing ODI flow. "
+            "This response is only a preparation step; to start any persistent ODI/DB operation, you must approve each mapping card individually."
         ),
         "queries": [],
         "mapping_requests": mapping_requests,
@@ -511,7 +523,7 @@ def _table_data_clarification_answer():
     if remembered:
         return _table_data_answer(f"{remembered} verisini getir", [])
     return {
-        "aciklama": "Hangi tablonun verisini getirmemi istedigini netlestirir misin? Ornek: `DWH.ODS_HR_EMPLOYEES verisini getir`.",
+        "aciklama": "Which table's data should I fetch? Example: `DWH.ODS_HR_EMPLOYEES verisini getir` (Turkish) or `get data DWH.ODS_HR_EMPLOYEES` (English).",
         "queries": [],
         "raw": "",
     }
@@ -565,9 +577,9 @@ def _table_availability_answer(table_ref: str, modeled_row: dict | None, error_m
         "NEXT_STEP": "Create/grant/load the target table before querying target rows.",
     }]
     explanation = (
-        f"{table_ref} icin ODI model/mapping bilgisi var, ancak fiziksel hedef tablo mevcut "
-        "baglanti kullanicisina gorunmuyor veya henuz olusturulup yuklenmemis. "
-        f"Kaynak taraf: {source_tables}. DDL/grant/load islemi otomatik calistirilmadi."
+        f"ODI model/mapping information exists for {table_ref}, but the physical target table is not "
+        "visible to the current connection user or has not been created and loaded yet. "
+        f"Source side: {source_tables}. No DDL/grant/load operation was run automatically."
     )
     return {
         "aciklama": explanation,
@@ -600,7 +612,7 @@ def _table_data_answer(message: str, history: list):
     try:
         df = execute_select(sql)
         return {
-            "aciklama": f"{table_ref} icin ilk 3 satir getirildi.",
+            "aciklama": f"Fetched the first 3 rows for {table_ref}.",
             "queries": [{
                 "action": "select",
                 "label": f"{table_ref} Preview",
@@ -695,10 +707,10 @@ def _llm_status_answer():
     active_row = next((row for row in rows if row["PROVIDER"] == provider), rows[0])
     note = ""
     if provider in ("local_openai", "hybrid") and checks["LOCAL_OPENAI"] and local_models and local_model not in local_models:
-        note = f" Secili Local OpenAI model id `{local_model}` endpoint model listesinde gorunmuyor; bu chat isteginde 400 hatasina neden olabilir."
+        note = f" The selected Local OpenAI model id `{local_model}` is not in the endpoint model list; this may cause a 400 error in this chat request."
     explanation = (
-        f"Su an secili LLM provider `{provider}`. "
-        f"Aktif satir durumu: {active_row['STATUS']}, model ayari: `{active_row['CONFIGURED_MODEL']}`."
+        f"The currently selected LLM provider is `{provider}`. "
+        f"Active row status: {active_row['STATUS']}, model setting: `{active_row['CONFIGURED_MODEL']}`."
         f"{note}"
     )
     return {

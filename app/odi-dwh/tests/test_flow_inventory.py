@@ -291,8 +291,8 @@ def test_api_ask_rebuilds_bulk_mapping_requests_when_session_memory_is_missing(a
     history = [{
         "role": "assistant",
         "content": (
-            "HR semasindaki tablolar read-only metadata ile kontrol edildi. "
-            "2 kaynak tablo icinde DWH ODS katmanina ODI akisi olmayan 1 tablo bulundu.\n\n"
+            "The tables in the HR schema were checked using read-only metadata. "
+            "1 of 2 source tables is missing an ODI flow to the DWH ODS layer (no ODI flow to DWH).\n\n"
             "[HR Tables Without ODI Flow to DWH]\n"
             "Columns: SOURCE_TABLE, EXPECTED_TARGET_TABLE, TARGET_TABLE_EXISTS, SOURCE_DATASTORE_EXISTS, TARGET_DATASTORE_EXISTS, ODI_MAPPING_EXISTS, MAPPING_NAME, STATUS\n"
             "Rows:\n"
@@ -392,7 +392,7 @@ def test_api_ask_does_not_use_stale_missing_flow_session_after_mappings_exist(ap
     data = resp.get_json()
     assert resp.status_code == 200
     assert data["mapping_requests"] == []
-    assert "0 tablo" in data["aciklama"]
+    assert "for 0 tables" in data["aciklama"]
 
 
 def test_mapping_inventory_includes_repository_folder_metadata():
