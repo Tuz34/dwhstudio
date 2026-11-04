@@ -16,6 +16,7 @@ def register_blueprints(app: Flask) -> None:
     from routes.ops_read import bp as ops_read_bp
     from routes.public_ui import bp as public_ui_bp
     from routes.quality_write import bp as quality_write_bp
+    from routes.scd2_write import bp as scd2_write_bp
     from routes.schema_read import bp as schema_read_bp
     from routes.schema_write import bp as schema_write_bp
     from routes.security_status import bp as security_status_bp
@@ -32,6 +33,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(ops_read_bp)
     app.register_blueprint(public_ui_bp)
     app.register_blueprint(quality_write_bp)
+    app.register_blueprint(scd2_write_bp)
     app.register_blueprint(schema_read_bp)
     app.register_blueprint(schema_write_bp)
     app.register_blueprint(security_status_bp)

@@ -136,6 +136,9 @@ SOURCE_SYSTEM_NAME  = os.getenv("SOURCE_SYSTEM_NAME", "ORACLE_SAMPLE_SCHEMAS")
 TABLE_NAME_MAX_LEN  = int(os.getenv("TABLE_NAME_MAX_LENGTH", "128"))  # Oracle 12.2+/19c and ODI 14c support 128-char identifiers
 OJDBC_JAR_NAME      = os.getenv("OJDBC_JAR_NAME", "ojdbc8.jar")     # ojdbc8 | ojdbc11
 GROOVY_JAR_NAME     = os.getenv("GROOVY_JAR_NAME", "groovy-all-2.4.17.jar")
+# Oracle user that executes ODI loads and needs DML grants on SCD2 targets.
+# Override when the database has no ODI_EXEC user (documented in dwh-scd2-generic-builder.md).
+ODI_EXEC_USER       = (os.getenv("ODI_EXEC_USER", "ODI_EXEC") or "ODI_EXEC").strip().upper()
 ODI_IKM_PRIORITY    = os.getenv("ODI_IKM_PRIORITY", "oracle merge,oracle update,oracle insert")
 ODI_LKM_PRIORITY    = os.getenv("ODI_LKM_PRIORITY", "sql to oracle,mssql to oracle,sql to sql")
 
