@@ -40,6 +40,34 @@ extraction / DDL              (odi_automation/)            |
   +--------------------> Oracle Database (ODS / DWH / audit schemas)
 ```
 
+## Screenshots
+
+Unaltered captures of the running application, using the sample HR and SH schemas.
+
+![Data Ops: ODI Mappings list](docs/img/01-data-ops-mappings.png)
+
+*Data Ops: the list of generated ODI mappings with component and join counts.*
+
+![Data Ops: Run Status](docs/img/02-data-ops-run-status.png)
+
+*Data Ops: the Run Status timeline of recent application-tracked mapping runs.*
+
+![Data Ops: Schema Sync](docs/img/03-data-ops-schema-sync.png)
+
+*Data Ops: Schema Sync, a guided read-only impact and preflight flow before any write step.*
+
+![Data Ops: DQ Checks](docs/img/04-data-ops-dq-checks.png)
+
+*Data Ops: DQ and Reconciliation health scores per DWH table.*
+
+![Data Ops: Incremental Load](docs/img/05-data-ops-incremental-load.png)
+
+*Data Ops: the Incremental Load approval gate with server-side post-load gates.*
+
+![Control: System Health](docs/img/06-control-system-health.png)
+
+*Control: System Health, listing core services and optional integrations.*
+
 ## Problem and motivation
 
 Building ODI mappings and the surrounding warehouse tables by hand is repetitive and error-prone:

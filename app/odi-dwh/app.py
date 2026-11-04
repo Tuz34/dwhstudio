@@ -189,23 +189,6 @@ def _validate_incremental_spec_name(value: str | None) -> str:
     return spec_name
 
 
-def _post_load_gate_results(body: dict) -> dict[str, bool]:
-    gates = body.get("post_load_gate_results") or {}
-    if not isinstance(gates, dict):
-        gates = {}
-    return {
-        "post_load_golden_record_passed": gates.get("post_load_golden_record_passed") is True,
-        "post_load_dq_passed": gates.get("post_load_dq_passed") is True,
-    }
-
-
-def _post_load_gates_confirmed(gates: dict[str, bool]) -> bool:
-    return (
-        gates.get("post_load_golden_record_passed") is True
-        and gates.get("post_load_dq_passed") is True
-    )
-
-
 def _open_incremental_target_connection():
     import oracledb
 

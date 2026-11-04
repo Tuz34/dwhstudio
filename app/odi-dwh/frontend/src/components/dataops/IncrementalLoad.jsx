@@ -39,13 +39,12 @@ export function IncrementalLoad() {
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState(null);
   const [approved, setApproved] = useState(false);
-  const [goldenPassed, setGoldenPassed] = useState(false);
-  const [dqPassed, setDqPassed] = useState(false);
 
   const result = firstResult(preflight);
   const rerunState = result?.rerun_guard?.state;
+  const gates = execution?.post_load_gates;
   const estimatedRows = result?.dry_run_delta?.estimated_new_rows;
-  const canRequestExecution = approved && goldenPassed && dqPassed && rerunState === 'new_window_ready' && !executing;
+  const canRequestExecution = approved && rerunState === 'new_window_ready' && !executing;
 
   const loadPreflight = useCallback(async () => {
     setLoading(true);
@@ -82,13 +81,14 @@ export function IncrementalLoad() {
       const data = await executeIncrementalAppend({
         spec_name: SPEC_NAME,
         approved: true,
-        post_load_gate_results: {
-          post_load_golden_record_passed: goldenPassed,
-          post_load_dq_passed: dqPassed,
-        },
       });
       setExecution(data.execution);
-      setPreflight(data.preflight);
+      setApproved(false);
+      try {
+        setPreflight(await getIncrementalPreflight(SPEC_NAME));
+      } catch {
+        setPreflight(null);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -160,31 +160,20 @@ export function IncrementalLoad() {
             </span>
           </label>
 
-          <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-            <input
-              type="checkbox"
-              checked={goldenPassed}
-              onChange={event => setGoldenPassed(event.target.checked)}
-              className="mt-1"
-            />
-            <span>
-              <span className="block font-bold">Post-load golden record gate passed.</span>
-              <span className="text-xs text-slate-500">This must reflect operator-verified evidence, not a prediction.</span>
-            </span>
-          </label>
-
-          <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-            <input
-              type="checkbox"
-              checked={dqPassed}
-              onChange={event => setDqPassed(event.target.checked)}
-              className="mt-1"
-            />
-            <span>
-              <span className="block font-bold">Post-load DQ gate passed.</span>
-              <span className="text-xs text-slate-500">The server rejects execution unless both post-load gates are confirmed.</span>
-            </span>
-          </label>
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="font-bold">Post-load gates (computed by the server)</div>
+            <div className="text-xs text-slate-500">
+              Golden record and DQ gates run on the server inside the same transaction as the append and watermark update. They cannot be asserted from this page.
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
+              <span className={clsx('rounded-full border px-3 py-1', statusClass(gates ? (gates.post_load_golden_record_passed ? 'passed' : 'failed') : null))}>
+                Golden record: {gates ? (gates.post_load_golden_record_passed ? 'passed' : 'failed') : 'not run'}
+              </span>
+              <span className={clsx('rounded-full border px-3 py-1', statusClass(gates ? (gates.post_load_dq_passed ? 'passed' : 'failed') : null))}>
+                DQ: {gates ? (gates.post_load_dq_passed ? 'passed' : 'failed') : 'not run'}
+              </span>
+            </div>
+          </div>
         </div>
 
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">

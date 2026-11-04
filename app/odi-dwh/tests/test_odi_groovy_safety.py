@@ -1,5 +1,10 @@
 from pathlib import Path
 
+import json
+import subprocess
+
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -235,3 +240,187 @@ def test_run_load_plan_remote_handles_compact_status_codes():
     assert '"R"' in content
     assert "DONE_STATUS_CODES" in content
     assert '"D"' in content
+
+
+DIM_PRODUCT_RUN_SCRIPT = "dim_product_scd2_scenario_run.groovy"
+DIM_PRODUCT_RUN_SCOPE = "odi68_dim_product_odi_scd2_scenario_run_and_rerun_proof"
+DIM_PRODUCT_SCENARIO = {
+    "name": "MAP_ODS_PRODUCTS_TO_DIM_PRODUCT_SCN",
+    "version": "001",
+    "context": "GLOBAL",
+}
+
+
+def _dim_product_run_payload(*, status="passed", side_effects=True):
+    payload = {
+        "tool": "odi.dim_product_scd2_scenario_run",
+        "status": status,
+        "mode": "fixed_scd2_scenario_run",
+        "side_effects": side_effects,
+        "repository_connection_attempted": True,
+        "raw_rows_included": False,
+        "pk_values_included": False,
+        "secret_printed": False,
+        "scenario": DIM_PRODUCT_SCENARIO.copy(),
+    }
+    if status == "passed":
+        payload["session_status"] = "DONE"
+    else:
+        payload["error_type"] = "ScenarioRunFailed"
+    return payload
+
+
+def test_dim_product_scenario_run_script_is_fixed_and_registered():
+    import odi_orchestrator
+
+    script = (PROJECT_ROOT / "odi_automation" / DIM_PRODUCT_RUN_SCRIPT).read_text(
+        encoding="utf-8"
+    )
+    lowered = script.lower()
+    assert odi_orchestrator.GROOVY_ACTION_REGISTRY[DIM_PRODUCT_RUN_SCRIPT].category == "scenario_run"
+    assert DIM_PRODUCT_RUN_SCRIPT in odi_orchestrator._STRICT_STRUCTURED_ERROR_CONTRACTS
+    assert 'final String SCENARIO_NAME = "MAP_ODS_PRODUCTS_TO_DIM_PRODUCT_SCN"' in script
+    assert 'final String SCENARIO_VERSION = "001"' in script
+    assert 'final String CONTEXT_CODE = "GLOBAL"' in script
+    assert "RemoteRuntimeAgentInvoker" in script
+    assert "invokeStartScenario" in script
+    assert "JsonOutput.toJson" in script
+    for forbidden in (
+        "getinternalid",
+        "getsessionid()",
+        "system.getproperty(\"odi.scenario",
+        "println e",
+        "printstacktrace",
+        "drop ",
+        "truncate ",
+        "delete ",
+        ".remove(",
+    ):
+        assert forbidden not in lowered
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"approved": False},
+        {"approved": "yes"},
+        {"approved": 1},
+        {"approval_scope": "odi68_products_ods_scenario_run_and_rerun_proof"},
+        {"scenario_name": "OTHER_SCN"},
+        {"version": "002"},
+        {"context": "OTHER"},
+    ],
+)
+def test_dim_product_scenario_run_wrapper_blocks_invalid_requests_before_groovy(
+    monkeypatch, overrides
+):
+    from odi_orchestrator import OdiOrchestrator
+
+    orchestrator = OdiOrchestrator()
+    calls = []
+    monkeypatch.setattr(orchestrator, "run_groovy", lambda *args: calls.append(args))
+    request = {
+        "approved": True,
+        "approval_scope": DIM_PRODUCT_RUN_SCOPE,
+        "scenario_name": DIM_PRODUCT_SCENARIO["name"],
+        "version": "001",
+        "context": "GLOBAL",
+    }
+    request.update(overrides)
+
+    result = orchestrator.run_dim_product_scd2_scenario_safe(**request)
+
+    assert result["status"].startswith("blocked")
+    assert result["side_effects"] is False
+    assert result["session_id_included"] is False
+    assert calls == []
+
+
+def test_dim_product_scenario_run_wrapper_returns_only_fixed_success(monkeypatch):
+    import odi_orchestrator
+    from odi_orchestrator import OdiOrchestrator
+
+    orchestrator = OdiOrchestrator()
+    calls = []
+
+    def fake_run(script, params):
+        calls.append((script, params, odi_orchestrator._GROOVY_APPROVED.get()))
+        return json.dumps(_dim_product_run_payload())
+
+    monkeypatch.setattr(orchestrator, "run_groovy", fake_run)
+    result = orchestrator.run_dim_product_scd2_scenario_safe(
+        approved=True,
+        approval_scope=DIM_PRODUCT_RUN_SCOPE,
+        scenario_name=DIM_PRODUCT_SCENARIO["name"],
+        version="001",
+        context="GLOBAL",
+    )
+
+    assert calls == [(DIM_PRODUCT_RUN_SCRIPT, {}, True)]
+    assert result == {
+        "status": "passed",
+        "scenario": DIM_PRODUCT_SCENARIO,
+        "session_status": "DONE",
+        "side_effects": True,
+        "raw_rows_included": False,
+        "pk_values_included": False,
+        "secret_printed": False,
+        "raw_output_included": False,
+        "session_id_included": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "raw_output",
+    [
+        "SUCCESS: unstructured",
+        json.dumps({**_dim_product_run_payload(), "session_id": "hidden"}),
+        json.dumps({**_dim_product_run_payload(), "session_status": "RUNNING"}),
+        json.dumps({**_dim_product_run_payload(), "raw_rows_included": True}),
+        json.dumps({**_dim_product_run_payload(), "scenario": {"name": "OTHER", "version": "001", "context": "GLOBAL"}}),
+        json.dumps({**_dim_product_run_payload(status="error"), "error_type": ["unsafe"]}),
+    ],
+)
+def test_dim_product_scenario_run_wrapper_rejects_unsafe_output(monkeypatch, raw_output):
+    from odi_orchestrator import OdiOrchestrator
+
+    orchestrator = OdiOrchestrator()
+    monkeypatch.setattr(orchestrator, "run_groovy", lambda *_: raw_output)
+    result = orchestrator.run_dim_product_scd2_scenario_safe(
+        approved=True,
+        approval_scope=DIM_PRODUCT_RUN_SCOPE,
+        scenario_name=DIM_PRODUCT_SCENARIO["name"],
+        version="001",
+        context="GLOBAL",
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "InvalidScenarioRunOutput"
+    assert "hidden" not in json.dumps(result)
+    assert "OTHER" not in json.dumps(result)
+
+
+def test_dim_product_scenario_run_script_sdk_parse_only():
+    """Compile the Groovy source when a local ODI SDK exists; never execute it."""
+    import odi_orchestrator
+    from odi_orchestrator import OdiOrchestrator
+
+    sdk_jar = Path(odi_orchestrator._ODI_SDK_LIB) / "odi-core.jar"
+    groovy_jar = Path(odi_orchestrator._GROOVY_JAR)
+    java = Path(odi_orchestrator._JAVA_BIN)
+    if not (sdk_jar.is_file() and groovy_jar.is_file() and java.is_file()):
+        pytest.skip("Local ODI SDK/Groovy jars are unavailable")
+
+    script = PROJECT_ROOT / "odi_automation" / DIM_PRODUCT_RUN_SCRIPT
+    command = [
+        str(java),
+        "-cp",
+        OdiOrchestrator()._build_classpath(),
+        "groovy.ui.GroovyMain",
+        "-e",
+        "new GroovyShell().parse(new File(args[0])); println('PARSED')",
+        str(script),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr[-1000:]
+    assert "PARSED" in result.stdout
