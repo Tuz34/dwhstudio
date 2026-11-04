@@ -452,7 +452,13 @@ def test_create_mapping_surfaces_validate_messages_in_structured_error():
     text = _text("create_mapping.groovy")
     catch = text[text.index("} catch (Exception e) {"):]
 
-    assert "mapping.validate(validationIssues, false)" in text
+    # SDK 12.2.1.4: validate(List, boolean) returns TRUE when errors were found (inverted vs. the
+    # no-argument validate(), which keeps returning true for a valid mapping).
+    assert "boolean hasValidationErrors = mapping.validate(validationIssues, false)" in text
+    assert "if (hasValidationErrors || baselineInvalid) {" in text
+    assert "mappingValid" not in text
+    assert "def vr = mapping.validate()" in text
+    assert "(vr instanceof Boolean && !vr)" in text
     assert "collectDesignFailure(design, validationIssues, physicalDiag)" in text
     assert '"validation_messages":' in catch and '"physical_design":' in catch
     assert "JsonOutput.toJson(validationMessages)" in catch
@@ -480,8 +486,13 @@ def messages = summarizeIssues([issue("INFO", "ignored"), issue("ERROR", "bad\nn
     issue("WARNING", "w" * 500)] + (1..30).collect { issue("ERROR", "e" + it) })
 assert messages.size() == 20
 assert messages[0] == "ERROR: bad node password=*** x"
-assert messages[1].length() <= 9 + 300
+assert messages.every { it.length() <= 300 }
+assert messages[1].length() == 300
 assert !messages.any { it.contains("hunter2") || it.contains("ignored") }
+def leaks = summarizeIssues([issue("ERROR", "bad value \"secret words here\" and 'SELECT a FROM t' at jdbc:oracle:thin:@h:1521/x https://h/p"),
+    issue("ERROR", "password = \"two words\" next")])
+assert leaks[0] == "ERROR: bad value '***' and '***' at *** ***"
+assert leaks[1] == "ERROR: password=*** next"
 
 def design = new Expando(validate: { issues, verbose -> issues.add(issue("ERROR", "AP has no LKM")); false },
     getPhysicalNodes: { [new Expando(getName: { "SRC_AP" }), new Expando(getName: { "TGT" })] })

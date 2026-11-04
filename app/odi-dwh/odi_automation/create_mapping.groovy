@@ -82,9 +82,14 @@ def summarizeIssues = { issues ->
         String text = ""
         try { level = String.valueOf(issue.getLevel()) } catch (Throwable ignoredLevel) {}
         try { text = String.valueOf(issue.getMessage()) } catch (Throwable ignoredText) { text = issue.getClass().getSimpleName() }
-        text = text.replaceAll(/[\r\n\t]+/, " ").replaceAll(/(?i)(password|passwd|pwd|secret|token)\s*[=:]\s*\S+/, '$1=***').trim()
-        if (text.length() > 300) text = text.substring(0, 300)
-        if (level in ["ERROR", "FATAL", "WARNING"]) out.add(level + ": " + text)
+        text = text.replaceAll(/[\r\n\t]+/, " ")
+            .replaceAll(/(?i)\b(jdbc|https?|ldaps?|t3s?):\S+/, '***')
+            .replaceAll(/(?i)(password|passwd|pwd|secret|token|key|credential)s?\s*[=:]\s*("[^"]*"|'[^']*'|\S+)/, '$1=***')
+            .replaceAll(/"[^"]*"|'[^']*'/, "'***'")
+            .trim()
+        String entry = level + ": " + text
+        if (entry.length() > 300) entry = entry.substring(0, 300)
+        if (level in ["ERROR", "FATAL", "WARNING"]) out.add(entry)
     }
     return out
 }
@@ -142,7 +147,8 @@ ITransactionStatus txnStatus = txnMgr.getTransaction(new oracle.odi.core.persist
 boolean preserveExistingOnFailure = false
 def existingMapping = null
 List validationMessages = []
-Map physicalDiag = [same_schema: false, access_points: 0, access_points_with_lkm: 0, source_moved: false]
+Map physicalDiag = [same_schema: false, access_points: 0, access_points_with_lkm: 0, access_point_names: [],
+    physical_nodes: [], source_moved: false]
 
 try {
     def em = odi.getTransactionalEntityManager()
@@ -862,14 +868,19 @@ try {
             physicalDiag.access_points_with_lkm = physicalDiag.access_points_with_lkm + 1
         }
         physicalDiag.access_point_names = finalAps.collect { it.getName() }
+        physicalDiag.physical_nodes = design.getPhysicalNodes().collect { it.getName() }
     } else {
         println "WARNING: Physical node not found, KM assignment skipped"
     }
     
+    // Baseline gate, semantics unchanged: the no-argument validate() returns true when valid.
+    def vr = mapping.validate()
+    boolean baselineInvalid = (vr instanceof Boolean && !vr) ||
+        (vr != null && !(vr instanceof Boolean) && vr.metaClass.respondsTo(vr, 'isValid') && !vr.isValid())
+    // SDK 12.2.1.4: validate(List issues, boolean onlyErrors) returns TRUE when errors were found.
     List validationIssues = new ArrayList()
-    boolean mappingValid = mapping.validate(validationIssues, false)
-    if (mappingValid && validationIssues.any { it.isError() || it.isFatal() }) mappingValid = false
-    if (!mappingValid) {
+    boolean hasValidationErrors = mapping.validate(validationIssues, false)
+    if (hasValidationErrors || baselineInvalid) {
         validationMessages = collectDesignFailure(design, validationIssues, physicalDiag)
         throw new IllegalStateException("Mapping validation failed")
     }

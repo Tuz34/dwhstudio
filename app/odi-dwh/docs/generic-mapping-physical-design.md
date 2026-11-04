@@ -11,10 +11,22 @@ mapping, sets the target staging location, assigns the approved IKM and then han
 - Same logical schema (source and target datastores share the logical schema, so the same data
   server and physical schema): the source belongs in the target execution unit and needs no AP. The
   script tries `design.moveNodes` for the source node; any AP that still remains gets the load KM.
-- `mapping.validate()` failures report the SDK messages. The error line stays one JSON object and
-  gains additive keys `validation_messages` (at most 20 entries, ERROR/FATAL/WARNING only, redacted,
-  300 characters each) and `physical_design` (`same_schema`, `access_points`,
-  `access_points_with_lkm`, `access_point_names`, `source_moved`, `physical_nodes`). The success line
-  gains `physical_design` as well.
+- Validation: the baseline no-argument `mapping.validate()` gate is unchanged (true means valid). A
+  second call, `mapping.validate(issues, false)`, only collects messages; in SDK 12.2.1.4 it returns
+  TRUE when errors were found (`hasValidationErrors`), the inverse of the no-argument call, and
+  either signal fails the mapping. On failure the physical design's own messages are added.
+- The Groovy error line stays one JSON object and gains additive keys `validation_messages` (at most
+  20 entries, ERROR/FATAL/WARNING only; each complete entry, severity prefix included, is capped at
+  300 characters; quoted text, URLs and key=value secrets are masked on a best-effort basis) and
+  `physical_design` (`same_schema`, `access_points`, `access_points_with_lkm`, `access_point_names`,
+  `physical_nodes`, `source_moved`). The success line carries `physical_design` too.
+- These are raw Groovy diagnostics for the process log only. On failure the script exits non-zero,
+  the orchestrator replaces the output with a generic `GroovyProcessError`, and
+  `mapping_generator` reads only the status flags and `error_type`, so `validation_messages` do not
+  reach `POST /api/mapping/generate` responses. Redaction is best effort and the free-form SDK text
+  must not be forwarded to any API or UI without a separately reviewed safe projection.
+- Limits: same-schema detection compares logical schema identity, not the physical schemas resolved
+  in the effective context. A rejected `design.moveNodes` is not fatal; it is logged and reported as
+  `source_moved=false`, and any remaining access point still gets the load KM.
 - The default graph engine runs the same read-only repository preflight as the classic engine
   before the first DDL step, so internal ODS/DWH sources carry their verified source identity.
