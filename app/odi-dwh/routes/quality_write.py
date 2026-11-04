@@ -57,6 +57,88 @@ def _result_response(action: str, result):
     return jsonify(result)
 
 
+_AUTOFIX_BATCH_STATUSES = {"success", "partial", "failed"}
+_SAFE_COLUMN_ERRORS = {"Column DDL failed.", "Column DDL was not applied."}
+
+
+def _safe_error_type(value: object) -> str | None:
+    if isinstance(value, str) and value.isidentifier() and len(value) <= 80:
+        return value
+    return None
+
+
+def _sanitized_autofix_column(item: dict) -> dict:
+    status = item.get("status")
+    public = {"column": item.get("column"), "status": status}
+    if item.get("already_present") is True:
+        public["already_present"] = True
+    if status != "failed":
+        return public
+    error = item.get("error")
+    public["error"] = error if error in _SAFE_COLUMN_ERRORS else "Column DDL failed."
+    error_type = _safe_error_type(item.get("error_type"))
+    if error_type:
+        public["error_type"] = error_type
+    return public
+
+
+def _autofix_failure_message(columns: list[dict], *, sync_failed: bool) -> str:
+    applied = [
+        item["column"]
+        for item in columns
+        if item.get("status") == "applied" and isinstance(item.get("column"), str)
+    ]
+    failed = [
+        item["column"]
+        for item in columns
+        if item.get("status") == "failed" and isinstance(item.get("column"), str)
+    ]
+    parts: list[str] = []
+    if applied:
+        parts.append("Applied " + ", ".join(applied) + ".")
+    if failed:
+        parts.append("Failed " + ", ".join(failed) + ".")
+    if sync_failed:
+        parts.append("ODI mapping synchronization failed.")
+    return " ".join(parts) or "Column DDL failed."
+
+
+def _sanitized_autofix_batch(result: dict) -> dict:
+    columns = [
+        _sanitized_autofix_column(item)
+        for item in result.get("columns") or []
+        if isinstance(item, dict)
+    ]
+    payload: dict = {"status": result.get("status"), "columns": columns}
+    added = result.get("added_columns")
+    if isinstance(added, list):
+        payload["added_columns"] = [column for column in added if isinstance(column, str)]
+    if result.get("status") == "success":
+        if result.get("ok") is True:
+            payload["ok"] = True
+        if isinstance(result.get("message"), str):
+            payload["message"] = result["message"]
+        if "odi_status" in result:
+            payload["odi_status"] = result.get("odi_status")
+        return payload
+    payload["error"] = _autofix_failure_message(
+        columns,
+        sync_failed=result.get("sync_failed") is True,
+    )
+    error_type = _safe_error_type(result.get("error_type"))
+    if error_type:
+        payload["error_type"] = error_type
+    if result.get("sync_failed") is True:
+        payload["sync_failed"] = True
+    return payload
+
+
+def _autofix_batch_response(result: dict) -> object:
+    if result.get("status") in _AUTOFIX_BATCH_STATUSES:
+        return jsonify(_sanitized_autofix_batch(result))
+    return _result_response("quality all-column autofix", result)
+
+
 @bp.route("/api/quality/validate", methods=["POST"])
 @limiter.limit("30 per minute")
 def api_quality_validate():
@@ -88,7 +170,11 @@ def api_quality_validate():
                         severity=rule.get("severity", "ERROR"),
                     ))
             result = dqm.validate_table(owner, table, custom_rules=auto_rules)
-            return jsonify(result.summary())
+            summary = result.summary()
+            if summary.get("unsupported_rules"):
+                summary["passed"] = False
+                summary["status"] = "failed"
+            return jsonify(summary)
     except Exception as exc:
         return redacted_write_error("quality validation", exc)
 
@@ -136,6 +222,12 @@ def api_quality_autofix_column():
 @bp.route("/api/quality/autofix-all-columns", methods=["POST"])
 @limiter.limit("5 per minute")
 def api_quality_autofix_all_columns():
+    """Return HTTP 200 with status success, partial, or failed.
+
+    Partial and failed batches used to be HTTP 500. Clients that key off HTTP
+    status must read the JSON status field. DqDashboard.jsx checks res.error
+    and still surfaces the failure text.
+    """
     app_module = get_app_module()
     body = request.get_json() or {}
     approval_error = app_module._approval_error(body, "quality all-column autofix")
@@ -154,7 +246,9 @@ def api_quality_autofix_all_columns():
         from reconciliator import autofix_all_missing_columns
 
         result = autofix_all_missing_columns(owner, table, normalized_columns)
-        return _result_response("quality all-column autofix", result)
+        if not isinstance(result, dict):
+            return _result_response("quality all-column autofix", result)
+        return _autofix_batch_response(result)
     except Exception as exc:
         return redacted_write_error("quality all-column autofix", exc)
 
