@@ -80,7 +80,7 @@ npm run dev
 
 ## Configuration
 
-Two templates define all settings. Copy them and replace each `CHANGE_ME`:
+Two templates cover the Flask, Oracle, ODI and AI settings and the Groovy connection file. Copy them and replace each `CHANGE_ME`:
 
 - `app/odi-dwh/.env.example` copied to `.env`: Flask session key, deployment profile, Oracle
   connection, ODI repository and agent, AI providers, paths and logging.
@@ -129,8 +129,8 @@ limitations.
 
 ## Knowledge sources
 
-The local retrieval index can use ODI best-practice material. Oracle's whitepapers are not
-redistributed here. Read Oracle's documentation at <https://docs.oracle.com/> and regenerate the
+The local retrieval index can use ODI best-practice material. Oracle whitepapers are not
+redistributed here. Read the Oracle documentation at <https://docs.oracle.com/> and regenerate the
 `knowledge_sources/odi` folder locally from material you are licensed to use.
 
 ## License and trademarks
