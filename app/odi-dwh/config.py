@@ -141,6 +141,9 @@ GROOVY_JAR_NAME     = os.getenv("GROOVY_JAR_NAME", "groovy-all-2.4.17.jar")
 # Oracle user that executes ODI loads and needs DML grants on SCD2 targets.
 # Override when the database has no ODI_EXEC user (documented in dwh-scd2-generic-builder.md).
 ODI_EXEC_USER       = (os.getenv("ODI_EXEC_USER", "ODI_EXEC") or "ODI_EXEC").strip().upper()
+# Set to false when ODI executes as the target owners themselves (no separate execution user):
+# the SCD2 executor then skips the grantee check and all grants on new targets.
+ODI_EXEC_GRANTS_ENABLED = os.getenv("ODI_EXEC_GRANTS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 ODI_IKM_PRIORITY    = os.getenv("ODI_IKM_PRIORITY", "oracle merge,oracle update,oracle insert")
 # Exact KM names an API caller may request (comma separated, case-insensitive exact match).
 ODI_APPROVED_IKMS   = os.getenv(

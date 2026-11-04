@@ -179,12 +179,15 @@ def _recover_existing(cursor: Any, plan: Mapping[str, Any], result: dict[str, An
             return result
         result["sequence_created"] = True
         repaired.append("sequence")
-    cursor.execute(
-        _GRANTS_SQL,
-        {"owner": owner, "table_name": plan["target"]["table"], "sequence_name": sequence},
-    )
-    present = {(str(table), str(grantee), str(privilege)) for grantee, privilege, table in cursor.fetchall()}
-    missing = [g for g in scd2_builder.required_grants(plan) if g not in present]
+    required = scd2_builder.required_grants(plan)
+    missing: list[tuple[str, str, str]] = []
+    if required:
+        cursor.execute(
+            _GRANTS_SQL,
+            {"owner": owner, "table_name": plan["target"]["table"], "sequence_name": sequence},
+        )
+        present = {(str(table), str(grantee), str(privilege)) for grantee, privilege, table in cursor.fetchall()}
+        missing = [g for g in required if g not in present]
     if missing:
         result["write_operations_attempted"].append("grants")
         _apply_grants(cursor, plan, missing, result)
@@ -232,6 +235,7 @@ def execute_target_ddl(
         result["connection_attempted"] = True
         cursor = connection.cursor()
         stage = "preflight_grantees"
+        result.update(scd2_builder.grant_skip_flags(plan))
         missing_users = [u for u in scd2_builder.required_grantees(plan) if not _user_exists(cursor, u)]
         if missing_users:
             result["status"] = "blocked_grantee_missing"
@@ -276,8 +280,10 @@ def execute_target_ddl(
         result["column_count"] = len(actual)
 
         stage = "grants"
-        result["write_operations_attempted"].append("grants")
-        _apply_grants(cursor, plan, scd2_builder.required_grants(plan), result)
+        grants = scd2_builder.required_grants(plan)
+        if grants:
+            result["write_operations_attempted"].append("grants")
+            _apply_grants(cursor, plan, grants, result)
         result["status"] = "created" if result["grants_failed"] == 0 else "created_grants_incomplete"
         return result
     except oracledb.Error as exc:

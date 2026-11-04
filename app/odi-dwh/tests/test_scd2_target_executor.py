@@ -317,3 +317,65 @@ def test_default_exec_user_comes_from_config(monkeypatch):
 
     monkeypatch.setattr(config, "ODI_EXEC_USER", "CFG_EXEC")
     assert scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)["options"]["exec_user"] == "CFG_EXEC"
+
+
+def test_grants_disabled_by_config_issue_no_grant_sql_and_no_user_check(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", False)
+    plan = scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)
+    log = []
+    result = executor.execute_target_ddl(
+        plan, approved=True, connection_factory=connection_factory(log, handler_for(plan, users={"ODI_EXEC": 0}))
+    )
+    assert result["status"] == "created"
+    assert result["grants_skipped_by_config"] is True
+    assert result["grants_applied"] == 0 and result["grants_failed"] == 0
+    assert result["write_operations_attempted"] == ["create_sequence", "create_target"]
+    assert not any(sql.startswith("GRANT") or "ALL_USERS" in sql for sql in log)
+    assert any(sql.startswith("CREATE TABLE") for sql in log)
+
+
+def test_grants_disabled_by_config_also_skips_repair_grants(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", False)
+    plan = scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)
+    log = []
+    result = executor.execute_target_ddl(
+        plan,
+        approved=True,
+        connection_factory=connection_factory(log, handler_for(plan, table_exists=1, sequence_exists=1, grants=[])),
+    )
+    assert result["status"] == "already_exists_matching" and result["grants_skipped_by_config"] is True
+    assert not any(sql.startswith("GRANT") or "ALL_USERS" in sql or "ALL_TAB_PRIVS" in sql for sql in log)
+
+
+def test_plan_preview_reports_grants_skipped_by_config(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", False)
+    plan = scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)
+    assert scd2_builder.render_grant_statements(plan) == []
+    assert scd2_builder.grant_skip_flags(plan) == {"grants_skipped_by_config": True}
+
+
+def test_grantee_equal_to_owner_is_skipped_not_granted():
+    plan = scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS, exec_user="dm")
+    log = []
+    result = executor.execute_target_ddl(
+        plan, approved=True, connection_factory=connection_factory(log, handler_for(plan))
+    )
+    assert result["status"] == "created"
+    assert result["grants_skipped_owner_is_grantee"] is True
+    assert "grants_skipped_by_config" not in result
+    assert not any(sql.startswith("GRANT") for sql in log)
+    assert not any("ALL_USERS" in sql for sql in log)
+
+
+def test_default_enabled_has_no_skip_flags(plan):
+    assert scd2_builder.grant_skip_flags(plan) == {}
+    result = executor.execute_target_ddl(
+        plan, approved=True, connection_factory=connection_factory([], handler_for(plan))
+    )
+    assert "grants_skipped_by_config" not in result and "grants_skipped_owner_is_grantee" not in result

@@ -204,6 +204,13 @@ def default_exec_user() -> str:
     return ODI_EXEC_USER
 
 
+def grants_enabled() -> bool:
+    """Whether the executor grants DML to the ODI execution user (ODI_EXEC_GRANTS_ENABLED, default true)."""
+    from config import ODI_EXEC_GRANTS_ENABLED
+
+    return bool(ODI_EXEC_GRANTS_ENABLED)
+
+
 def build_scd2_plan(
     request: Mapping[str, object],
     source_columns: Iterable[Mapping[str, object]],
@@ -361,12 +368,7 @@ def render_create_sequence(plan: Mapping[str, Any]) -> str:
     return f'CREATE SEQUENCE "{owner}"."{sequence}" START WITH 1 INCREMENT BY 1 NOCYCLE'
 
 
-def required_grants(plan: Mapping[str, Any]) -> list[tuple[str, str, str]]:
-    """Required (object name, grantee, privilege) triples.
-
-    The execution user (``ODI_EXEC_USER``, default ODI_EXEC) only by default. A SELECT for APP_USER (needed by the app's own
-    count-only postflight read) is opt-in via ``grant_select_to_app_user``.
-    """
+def _all_grants(plan: Mapping[str, Any]) -> list[tuple[str, str, str]]:
     table = plan["target"]["table"]
     sequence = plan["surrogate_key"]["sequence"]
     exec_user = plan["options"]["exec_user"]
@@ -375,6 +377,30 @@ def required_grants(plan: Mapping[str, Any]) -> list[tuple[str, str, str]]:
     if plan.get("options", {}).get("grant_select_to_app_user") is True:
         grants.append((table, "APP_USER", "SELECT"))
     return grants
+
+
+def grant_skip_flags(plan: Mapping[str, Any]) -> dict[str, bool]:
+    """Boolean flags explaining why grants are skipped (only true flags are returned)."""
+    if not grants_enabled():
+        return {"grants_skipped_by_config": True}
+    owner = str(plan["target"]["owner"]).upper()
+    if any(grantee.upper() == owner for _name, grantee, _privilege in _all_grants(plan)):
+        return {"grants_skipped_owner_is_grantee": True}
+    return {}
+
+
+def required_grants(plan: Mapping[str, Any]) -> list[tuple[str, str, str]]:
+    """Required (object name, grantee, privilege) triples.
+
+    The execution user (``ODI_EXEC_USER``, default ODI_EXEC) only by default. A SELECT for APP_USER (needed by the app's own
+    count-only postflight read) is opt-in via ``grant_select_to_app_user``. Returns an empty list when grants are
+    disabled by config (``ODI_EXEC_GRANTS_ENABLED=false``); grants whose grantee is the target owner are dropped
+    because an owner cannot grant to itself (ORA-01749).
+    """
+    if not grants_enabled():
+        return []
+    owner = str(plan["target"]["owner"]).upper()
+    return [g for g in _all_grants(plan) if g[1].upper() != owner]
 
 
 def render_grant_statement(plan: Mapping[str, Any], grant: tuple[str, str, str]) -> str:
