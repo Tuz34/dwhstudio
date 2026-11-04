@@ -71,19 +71,19 @@ TABLE SELECTION RULES (CRITICAL):
     Example: DWH_FLAT_FILE_V1 does NOT have PRODUCTID. Do not use it for product joins.
 15. "ODS" tables contain the true source data; prefer them over FLAT_FILE tables.
 16. REFER TO PREVIOUS ACTIONS: If the conversation history shows you just suggested or created a mapping, "the table" or "that table" refers to the TARGET table of that mapping.
-17. Use the "GEÇMİŞ MAPPING ÇALIŞTIRMA KAYITLARI" in RAG context to identify which tables were recently modeled.
+17. Use the past mapping run records section of the RAG context (its header is emitted verbatim by the RAG module and currently reads "GEÇMİŞ MAPPING ÇALIŞTIRMA KAYITLARI", i.e. "PAST MAPPING RUN RECORDS") to identify which tables were recently modeled.
 18. If a user asks to "select from the table" after a mapping creation, use the target table (e.g., ODS_PRODUCTION_PRODUCT) in the SELECT query.
 19. Always prefer ODS tables found in the RAG context over generic guesses.
 20. If you are unsure about the context, check the conversation history for the most recent table name mentioned.
 21. DATA QUERY PREFERENCE: When a user asks to "see data" or "select", ALWAYS prefer ODS_ tables over SNP_ (ODI repository) tables. SNP_ tables are for metadata only.
 22. NEVER suggest SELECT queries on SNP_COL, SNP_TABLE, etc. unless explicitly asked about ODI metadata.
 23. ODI FLOW INVENTORY RULE: If the user asks which source tables do not have an ODI flow/mapping to DWH/ODS, DO NOT hard-code source tables with DUAL UNION ALL. The answer must come from real metadata: source table metadata, target DWH table metadata, and ODI repository tables such as SNP_MAPPING, SNP_MAP_COMP, SNP_MAP_REF, SNP_TABLE, and SNP_MODEL. DWH.ODS_* table existence alone is not proof that an ODI mapping exists.
-24. For ODI flow gap analysis, distinguish these states: target table exists, source datastore exists, target datastore exists, and ODI mapping exists. Report the missing state instead of collapsing everything into "MEVCUT" or "AKTARILMADI".
+24. For ODI flow gap analysis, distinguish these states: target table exists, source datastore exists, target datastore exists, and ODI mapping exists. Report the missing state instead of collapsing everything into a single "EXISTS" or "NOT LOADED" status (Turkish equivalents: "MEVCUT" / "AKTARILMADI").
 
-KNOWN TABLE CATALOG (Oracle->Oracle: kaynak HR/SH semalari, hedef DWH.ODS_*):
-- KAYNAK HR: HR.EMPLOYEES (PK: EMPLOYEE_ID), HR.DEPARTMENTS (PK: DEPARTMENT_ID), HR.JOBS, HR.JOB_HISTORY (composite PK: EMPLOYEE_ID, START_DATE).
-- KAYNAK SH: SH.SALES (fact, PK yok; FK: PROD_ID/CUST_ID/TIME_ID/CHANNEL_ID/PROMO_ID), SH.CUSTOMERS (PK: CUST_ID), SH.PRODUCTS (PK: PROD_ID), SH.TIMES (PK: TIME_ID), SH.CHANNELS, SH.PROMOTIONS, SH.COSTS.
-- HEDEF (mapping ile olusur): DWH.ODS_HR_EMPLOYEES, DWH.ODS_SH_SALES, DWH.ODS_SH_CUSTOMERS vb.
+KNOWN TABLE CATALOG (Oracle->Oracle: source schemas HR/SH, target DWH.ODS_*):
+- SOURCE HR: HR.EMPLOYEES (PK: EMPLOYEE_ID), HR.DEPARTMENTS (PK: DEPARTMENT_ID), HR.JOBS, HR.JOB_HISTORY (composite PK: EMPLOYEE_ID, START_DATE).
+- SOURCE SH: SH.SALES (fact, no PK; FKs: PROD_ID/CUST_ID/TIME_ID/CHANNEL_ID/PROMO_ID), SH.CUSTOMERS (PK: CUST_ID), SH.PRODUCTS (PK: PROD_ID), SH.TIMES (PK: TIME_ID), SH.CHANNELS, SH.PROMOTIONS, SH.COSTS.
+- TARGET (created by mappings): DWH.ODS_HR_EMPLOYEES, DWH.ODS_SH_SALES, DWH.ODS_SH_CUSTOMERS, etc.
 - TEST/TEMP: DWH_FLAT_FILE_*, *_TEST, *_TMP, *_STG → Never use in production.
 
 SPECIAL ORACLE RULE:
@@ -96,28 +96,28 @@ SPECIFIC SCHEMA RULES:
 - In DWH_FLAT_FILE_V1, the column name is FIRST_MAME (with an 'M', yes, it is a known typo in the system). Always use the physical name.
 
 SURROGATE KEY (SKEY) RULES:
-- DWH boyut tablolarinda Surrogate Key olarak SKEY kullanilir.
-- SKEY esleme tablosu: {OWNER}.SKEY_MAP_{TABLE} (SKEY NUMBER PK, NATURAL_KEY VARCHAR2 UNIQUE).
+- DWH dimension tables use SKEY as the surrogate key.
+- SKEY mapping table: {OWNER}.SKEY_MAP_{TABLE} (SKEY NUMBER PK, NATURAL_KEY VARCHAR2 UNIQUE).
 - SKEY sequence: {OWNER}.SEQ_{TABLE}.
-- Yeni kayitlarda SKEY atamak icin: CASE WHEN EXISTS (SKEY_MAP'te NK var mi) THEN mevcut SKEY ELSE SEQ.NEXTVAL END.
-- Kullanici "surrogate key" veya "SKEY olustur" dediginde /api/skey/create endpoint'ini kullanmasini oner.
+- To assign an SKEY to new records: CASE WHEN EXISTS (the natural key is present in SKEY_MAP) THEN the existing SKEY ELSE SEQ.NEXTVAL END.
+- The user may write in Turkish or English. When the user says "surrogate key" or asks to create an SKEY (Turkish: "SKEY olustur"; English: "create SKEY", "create a surrogate key"), recommend using the /api/skey/create endpoint.
 
 AUTONOMOUS MAPPING RULES:
-- Kullanici "mapping olustur", "mapping yap", "create mapping", "ETL mapping", "aktarim olustur" gibi ifadeler kullandiginda bu bir MAPPING_CREATE istegi'dir.
-- KAYNAK SISTEM ARTIK ORACLE'dir (Oracle->Oracle ETL). Kaynak semalar: HR, SH (ornek). MS SQL Server / AdventureWorks VARSAYIMI KULLANMA.
-- Kaynak model adi kaynak semaya gore: src_model: "ORACLE_HR" veya "ORACLE_SH"; tgt_model: "DWH".
-- Hedef tablo isminin onune kaynak semasini ekle (orn: HR.EMPLOYEES -> ODS_HR_EMPLOYEES, SH.SALES -> ODS_SH_SALES).
-- Kaynak ve hedef tablolari prompt'tan cikar. Ornek: "Employees" -> "HR.EMPLOYEES" (Oracle kaynak) ve "ODS_HR_EMPLOYEES" (Oracle hedef DWH).
-- Mapping isimlendirme kurali: MAP_<SOURCE_SCHEMA>_<TABLE>_TO_ODS. Ornekler: MAP_HR_EMPLOYEES_TO_ODS, MAP_SH_SALES_TO_ODS.
-- Mapping isteklerinde SQL uretme -- bunun yerine asagidaki JSON formatinda mapping parametreleri cikar.
-- Mapping istegi tespit edildiginde description'a "MAPPING_REQUEST" on eki ekle.
-- queries dizisi bos olmali, bunun yerine "mapping_request" nesnesi ekle.
-- mapping_request icinde "operation" alani zorunludur: "CREATE", "UPDATE" veya "DELETE".
-- Kullanici "test et", "data doğruluğu yap", "PK üzerinden" gibi test isteklerinde bulunursa "validation_request" dondur, "mapping_request" bos olsun.
+- The user may write in Turkish or English. Each of the following phrases is a MAPPING_CREATE request. Turkish: "mapping olustur", "mapping yap", "aktarim olustur"; English: "create mapping", "create a mapping", "make a mapping", "ETL mapping", "create a transfer". ("ETL mapping" is used in both languages.)
+- THE SOURCE SYSTEM IS NOW ORACLE (Oracle->Oracle ETL). Source schemas: HR, SH (examples). DO NOT ASSUME MS SQL Server / AdventureWorks.
+- Source model name depends on the source schema: src_model: "ORACLE_HR" or "ORACLE_SH"; tgt_model: "DWH".
+- Prefix the target table name with the source schema (e.g. HR.EMPLOYEES -> ODS_HR_EMPLOYEES, SH.SALES -> ODS_SH_SALES).
+- Extract the source and target tables from the prompt. Example: "Employees" -> "HR.EMPLOYEES" (Oracle source) and "ODS_HR_EMPLOYEES" (Oracle target DWH).
+- Mapping naming rule: MAP_<SOURCE_SCHEMA>_<TABLE>_TO_ODS. Examples: MAP_HR_EMPLOYEES_TO_ODS, MAP_SH_SALES_TO_ODS.
+- For mapping requests, do not generate SQL -- instead extract the mapping parameters in the JSON format below.
+- When a mapping request is detected, prefix the description with "MAPPING_REQUEST".
+- The queries array must be empty; add a "mapping_request" object instead.
+- The "operation" field is mandatory inside mapping_request: "CREATE", "UPDATE" or "DELETE".
+- When the user asks for a test, return "validation_request" and leave "mapping_request" empty. Turkish examples: "test et", "data doğruluğu yap", "PK üzerinden"; English examples: "run a test", "verify data accuracy", "check by primary key".
 
 MAPPING CREATE OUTPUT FORMAT:
 {
-  "description": "MAPPING_REQUEST: EMPLOYEES tablosunu HR (Oracle) semasindan ODS'ye aktaran mapping olusturulacak",
+  "description": "MAPPING_REQUEST: A mapping will be created that loads the EMPLOYEES table from the HR (Oracle) schema into ODS",
   "queries": [],
   "mapping_request": {
     "operation": "CREATE",
@@ -129,27 +129,27 @@ MAPPING CREATE OUTPUT FORMAT:
     "tgt_owner": "DWH",
     "needs_skey": false,
     "skey_natural_key": null,
-    "description": "HR.EMPLOYEES tablosunu Oracle kaynaktan ODS katmanina aktarir (MAP_HR_EMPLOYEES_TO_ODS)"
+    "description": "Loads the HR.EMPLOYEES table from the Oracle source into the ODS layer (MAP_HR_EMPLOYEES_TO_ODS)"
   }
 }
 
 MAPPING UPDATE OUTPUT FORMAT:
 {
-  "description": "MAPPING_REQUEST: PRODUCT mapping'inin hedef tablosu degistiriliyor",
+  "description": "MAPPING_REQUEST: The target table of the PRODUCT mapping is being changed",
   "queries": [],
   "mapping_request": {
     "operation": "UPDATE",
     "mapping_name": "MAP_PRODUCTION_PRODUCT_TO_ODS",
     "changes": {
       "tgt_table": "ODS_PRODUCT_V2",
-      "description": "Hedef tablo ODS_PRODUCT_V2 olarak guncellendi"
+      "description": "Target table updated to ODS_PRODUCT_V2"
     }
   }
 }
 
 MAPPING DELETE OUTPUT FORMAT:
 {
-  "description": "MAPPING_REQUEST: Orders mapping'i siliniyor",
+  "description": "MAPPING_REQUEST: The Orders mapping is being deleted",
   "queries": [],
   "mapping_request": {
     "operation": "DELETE",
@@ -160,7 +160,7 @@ MAPPING DELETE OUTPUT FORMAT:
 
 VALIDATION REQUEST OUTPUT FORMAT:
 {
-  "description": "VALIDATION_REQUEST: PK tabanlı veri doğruluğu testi",
+  "description": "VALIDATION_REQUEST: PK-based data accuracy test",
   "queries": [],
   "validation_request": {
     "tool": "validate_column_accuracy_by_pk",
@@ -205,11 +205,11 @@ OUTPUT MUST BE ONLY THE FOLLOWING JSON (no extra text):
 
 def extract_json(raw_text: str) -> dict:
     text = raw_text.strip()
-    # Markdown kod bloklarını sil
+    # Strip Markdown code fences
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"\s*```$", "", text, flags=re.MULTILINE)
     
-    # Bazen model araya metin koyar; JSON varsa ilk { ve son } arasini aday al
+    # The model sometimes adds surrounding text; if JSON is present, take the span between the first { and the last } as the candidate
     cleaned = text
     start = text.find('{')
     end = text.rfind('}')
@@ -217,7 +217,7 @@ def extract_json(raw_text: str) -> dict:
 
     try:
         data = json.loads(candidate)
-        # aciklama -> description migration
+        # aciklama -> description migration (legacy Turkish key kept for backward compatibility)
         if 'aciklama' in data and 'description' not in data:
             data['description'] = data['aciklama']
         if not isinstance(data.get("queries", []), list):
@@ -226,8 +226,8 @@ def extract_json(raw_text: str) -> dict:
             data["queries"] = [q for q in data.get("queries", []) if isinstance(q, dict)]
         return data
     except Exception:
-        # Model JSON yerine duz metin/markdown dondurduyse (selamlama, meta/yardim cevabi)
-        # ham "JSON parse error" gostermek yerine metni dogrudan konusma cevabi olarak goster.
+        # If the model returned plain text/markdown instead of JSON (greeting, meta/help answer),
+        # show the text directly as the conversational reply instead of a raw "JSON parse error".
         return {"description": cleaned.strip(), "queries": []}
 
 def call_ollama(messages: list) -> str:
@@ -235,7 +235,7 @@ def call_ollama(messages: list) -> str:
         "model": os.getenv("OLLAMA_MODEL") or OLLAMA_MODEL,
         "messages": messages,
         "stream": False,
-        "format": "json"  # Modelin JSON dönmesini zorla
+        "format": "json"  # Force the model to return JSON
     }
     
     try:
@@ -243,8 +243,8 @@ def call_ollama(messages: list) -> str:
         response.raise_for_status()
         return response.json()["message"]["content"]
     except Exception as e:
-        logger.error("Ollama baglanamadi: %s", e)
-        return '{"description": "AI servisi gecici olarak kullanilabilir degil. Lutfen tekrar deneyin.", "queries": []}'
+        logger.error("Could not connect to Ollama: %s", e)
+        return '{"description": "The AI service is temporarily unavailable. Please try again.", "queries": []}'
 
 def is_ollama_available() -> bool:
     try:
@@ -306,13 +306,13 @@ def call_local_openai(messages: list) -> str:
         data = response.json()
         return data["choices"][0]["message"]["content"]
     except Exception as e:
-        logger.error("Local OpenAI-compatible LLM baglanamadi: %s", e)
+        logger.error("Could not connect to the local OpenAI-compatible LLM: %s", e)
         raise
 
 def call_claude(messages: list) -> str:
     client = _get_claude_client()
 
-    # Claude için System promptunu ayrı vermeliyiz
+    # Claude takes the system prompt as a separate parameter
     sys_msg = [m for m in messages if m.get("role") == "system"]
     user_msgs = [m for m in messages if m.get("role") != "system"]
     
@@ -325,22 +325,22 @@ def call_claude(messages: list) -> str:
         )
         return resp.content[0].text
     except Exception as e:
-        logger.error("Claude API hatasi: %s", e)
+        logger.error("Claude API error: %s", e)
         raise
 
 def call_llm(messages: list) -> str:
     provider = normalize_provider()
     if provider == "ollama":
         if not is_ollama_available():
-            return '{"description": "Ollama local LLM servisi calismiyor. Lutfen Ollama/LM Studio ayarlarini kontrol edin.", "queries": []}'
+            return '{"description": "The Ollama local LLM service is not running. Please check the Ollama/LM Studio settings.", "queries": []}'
         return call_ollama(messages)
     if provider == "local_openai":
         if not is_local_openai_available():
-            return '{"description": "Local OpenAI-compatible LLM servisi calismiyor. LM Studio server acik mi ve /v1 endpoint aktif mi kontrol edin.", "queries": []}'
+            return '{"description": "The local OpenAI-compatible LLM service is not running. Check that the LM Studio server is on and the /v1 endpoint is active.", "queries": []}'
         try:
             return call_local_openai(messages)
         except Exception as e:
-            return '{"description": "Local OpenAI-compatible LLM servisine ulasildi ama chat tamamlama istegi basarisiz oldu. LM Studio model id ayarini ve yuklu chat modelini kontrol edin.", "queries": []}'
+            return '{"description": "The local OpenAI-compatible LLM service was reached but the chat completion request failed. Check the LM Studio model id setting and the loaded chat model.", "queries": []}'
     if provider == "hybrid":
         for name, fn in (
             ("local_openai", call_local_openai),
@@ -348,28 +348,28 @@ def call_llm(messages: list) -> str:
             ("claude", call_claude),
         ):
             if name == "local_openai" and not is_local_openai_available():
-                logger.info("LLM hybrid local_openai atlandi: servis kapali")
+                logger.info("LLM hybrid local_openai skipped: service is down")
                 continue
             if name == "ollama" and not is_ollama_available():
-                logger.info("LLM hybrid ollama atlandi: servis kapali")
+                logger.info("LLM hybrid ollama skipped: service is down")
                 continue
             if name == "claude" and not is_claude_configured():
-                logger.info("LLM hybrid claude atlandi: API key yok")
+                logger.info("LLM hybrid claude skipped: no API key")
                 continue
             try:
-                logger.info("LLM hybrid deneme: %s", name)
+                logger.info("LLM hybrid attempt: %s", name)
                 result = fn(messages)
-                if name != "claude" and "kullanilabilir degil" in result:
+                if name != "claude" and "unavailable" in result:
                     raise RuntimeError(result)
                 return result
             except Exception as e:
-                logger.warning("LLM hybrid %s basarisiz: %s", name, e)
-        return '{"description": "Local ve cloud LLM servisleri kullanilabilir degil. Local endpoint, Ollama veya Claude ayarlarini kontrol edin.", "queries": []}'
+                logger.warning("LLM hybrid %s failed: %s", name, e)
+        return '{"description": "Local and cloud LLM services are unavailable. Check the local endpoint, Ollama or Claude settings.", "queries": []}'
 
     try:
         return call_claude(messages)
     except Exception as e:
-        logger.warning("Claude kullanilamadi, local fallback devrede: %s", e)
+        logger.warning("Claude unavailable, local fallback active: %s", e)
         try:
             return call_ollama(messages)
         except Exception:
@@ -382,8 +382,9 @@ def ask_ai(user_message: str, schema_info: str = "", history: list | None = None
         for h in history:
             messages.append({"role": h["role"], "content": h["content"]})
 
-    # Doğal dile göre en uygun geçmiş kuralları/örnekleri RAG ile çekiyoruz.
-    # Basit selamlamalarda RAG/schema gerekmez -> gereksiz gecikmeyi atla.
+    # Retrieve the most relevant past rules/examples for the natural-language request via RAG.
+    # Simple greetings need neither RAG nor schema -> skip the unnecessary latency.
+    # Greetings are matched in both Turkish (selam, merhaba, ...) and English (hi, hello, hey).
     _m = (user_message or "").strip().lower()
     _greetings = ("selam", "merhaba", "mrb", "naber", "gunaydin", "günaydın",
                   "iyi gunler", "iyi günler", "iyi aksamlar", "iyi akşamlar",
@@ -397,14 +398,14 @@ def ask_ai(user_message: str, schema_info: str = "", history: list | None = None
 
     user_content = user_message
     if schema_info:
-        user_content = f"Şema:\n{schema_info}\n\nİstek: {user_message}"
+        user_content = f"Schema:\n{schema_info}\n\nRequest: {user_message}"
 
     if rag_context:
-        user_content = f"İLAVE KURUMSAL KURALLAR:\n{rag_context}\n\n{user_content}"
+        user_content = f"ADDITIONAL CORPORATE RULES:\n{rag_context}\n\n{user_content}"
 
     messages.append({"role": "user", "content": user_content})
 
-    # === MULTI-AGENT DÖNGÜSÜ (Developer -> QA -> Developer) ===
+    # === MULTI-AGENT LOOP (Developer -> QA -> Developer) ===
     dialog_history = []
     max_turns = 2
     turn = 0
@@ -418,33 +419,33 @@ def ask_ai(user_message: str, schema_info: str = "", history: list | None = None
 
         result_dev = extract_json(raw_dev)
 
-        # Mapping veya Validation istegi tespit edildi — QA atla, direkt don
+        # Mapping or Validation request detected -- skip QA and return directly
         if "mapping_request" in result_dev or "validation_request" in result_dev:
-            dialog_history.append("🗺️ <b>Developer:</b> Ozel istek (Mapping/Validation) tespit edildi, yonlendiriliyor.")
+            dialog_history.append("🗺️ <b>Developer:</b> Special request (Mapping/Validation) detected, routing it.")
             break
 
         if "sql" in result_dev and "queries" not in result_dev:
             result_dev["queries"] = [{
                 "action": result_dev.get("action", "select"),
-                "label": "Sorgu",
+                "label": "Query",
                 "sql": result_dev["sql"],
                 "params": result_dev.get("params", {}),
             }]
 
-        # Developer'ın ürettiği SQL'leri toplayalım
+        # Collect the SQL produced by the Developer
         sql_to_check = ""
         if "queries" in result_dev and len(result_dev["queries"]) > 0:
             sql_to_check = "\n".join([q.get("sql", "") for q in result_dev["queries"]])
 
-        # Eğer SQL yoksa (kullanıcı sadece geyik veya genel bilgi soruyorsa) QA yapmaya gerek yok
+        # If there is no SQL (the user is only chatting or asking for general information), QA is not needed
         if not sql_to_check.strip():
             break
 
-        # Sadece Developer logunu ekle
-        dialog_history.append("👨‍💻 <b>Developer:</b> Kodu yazdım ve Reviewer'a incelenmesi için gönderdim.")
+        # Add only the Developer log entry
+        dialog_history.append("👨‍💻 <b>Developer:</b> I wrote the code and sent it to the Reviewer for review.")
 
-        # --- REVIEWER (QA) AJANI DEVREYE GİRER ---
-        qa_content = f"DEVELOPER'IN ÜRETTİĞİ SQL:\n{sql_to_check}\n\nREFERANS ŞEMA VE RAG KURALLARI:\n{rag_context}\n{schema_info}\n\nSQL'in kurallara uyup uymadığını kontrol et."
+        # --- REVIEWER (QA) AGENT TAKES OVER ---
+        qa_content = f"SQL PRODUCED BY THE DEVELOPER:\n{sql_to_check}\n\nREFERENCE SCHEMA AND RAG RULES:\n{rag_context}\n{schema_info}\n\nCheck whether the SQL complies with the rules."
         qa_messages = [
             {"role": "system", "content": QA_SYSTEM_PROMPT},
             {"role": "user", "content": qa_content}
@@ -454,17 +455,17 @@ def ask_ai(user_message: str, schema_info: str = "", history: list | None = None
 
         result_qa = extract_json(raw_qa)
         status = result_qa.get("status", "PASS").upper()
-        feedback = result_qa.get("feedback", "İnceleme tamamlandı.")
+        feedback = result_qa.get("feedback", "Review completed.")
 
         if status == "FAIL":
-            dialog_history.append(f"🕵️‍♂️ <b>Reviewer:</b> Reddedildi! ❌ Kural İhlali: <i>{feedback}</i>")
-            # Developer'a geri besleme yap
+            dialog_history.append(f"🕵️‍♂️ <b>Reviewer:</b> Rejected! ❌ Rule violation: <i>{feedback}</i>")
+            # Feed the rejection back to the Developer
             current_messages.append({"role": "assistant", "content": raw_dev})
-            current_messages.append({"role": "user", "content": f"[QA REVIEWER REDDETTİ]: Sistem senin kodunu reddetti. Sebep: {feedback}\nLütfen bu hatayı düzelterek yeni ve doğru bir JSON çıkar."})
+            current_messages.append({"role": "user", "content": f"[QA REVIEWER REJECTED]: The system rejected your code. Reason: {feedback}\nPlease fix this error and output a new, correct JSON."})
             turn += 1
         else:
-            dialog_history.append(f"🕵️‍♂️ <b>Reviewer:</b> Onaylandı! ✅ <i>{feedback}</i>")
+            dialog_history.append(f"🕵️‍♂️ <b>Reviewer:</b> Approved! ✅ <i>{feedback}</i>")
             break
 
-    # Döngü bittiğinde mesajları arayüze ekle
+    # When the loop ends, return the results for the UI
     return result_dev, raw_dev
