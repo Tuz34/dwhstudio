@@ -44,6 +44,7 @@ GROOVY_ACTION_REGISTRY = {
     "dim_product_scd2_ikm_import.groovy": _action("repository_write"),
     "dim_product_scd2_mapping_create.groovy": _action("repository_write"),
     "dim_product_scd2_mapping_probe.groovy": _action("read_only"),
+    "dim_product_scd2_scenario_run.groovy": _action("scenario_run"),
     "fix_join_type.groovy": _action("repository_write"),
     "fix_skey_ikm.groovy": _action("repository_write"),
     "generate_scenario_metadata.groovy": _action("repository_write"),
@@ -84,6 +85,13 @@ _PRODUCTS_ODS_SCENARIO = "MAP_SH_PRODUCTS_TO_ODS_SCN"
 _PRODUCTS_ODS_SCENARIO_VERSION = "001"
 _PRODUCTS_ODS_SCENARIO_CONTEXT = "GLOBAL"
 _PRODUCTS_ODS_RUN_SCOPE = "odi68_products_ods_scenario_run_and_rerun_proof"
+_DIM_PRODUCT_SCD2_SCENARIO = "MAP_ODS_PRODUCTS_TO_DIM_PRODUCT_SCN"
+_DIM_PRODUCT_SCD2_SCENARIO_VERSION = "001"
+_DIM_PRODUCT_SCD2_SCENARIO_CONTEXT = "GLOBAL"
+_DIM_PRODUCT_SCD2_RUN_SCOPE = "odi68_dim_product_odi_scd2_scenario_run_and_rerun_proof"
+_DIM_PRODUCT_SCD2_RUN_ERROR_TYPES = frozenset(
+    {"AgentConfigurationUnavailable", "AgentUnavailable", "ScenarioRunFailed"}
+)
 _ODI25_DEFAULT_LOAD_PLAN_STEPS = [
     {"name": "Run HR Employees", "scenario_name": "MAP_HR_EMPLOYEES_TO_ODS_SCN", "version": "V44A"},
     {"name": "Run SH Sales", "scenario_name": "MAP_SH_SALES_TO_ODS_SCN", "version": "V46B"},
@@ -97,6 +105,24 @@ _PARAM_VAL_RE   = re.compile(r'^[a-zA-Z0-9._\-/\\ :,()#]+$')
 _EXPR_VAL_RE    = re.compile(r"^[a-zA-Z0-9._\-/\\ :,()#=;'|*+<>%!&\[\]{}\"]+$")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
 _STRICT_STRUCTURED_ERROR_CONTRACTS = {
+    "dim_product_scd2_scenario_run.groovy": {
+        "tool": "odi.dim_product_scd2_scenario_run",
+        "mode": "fixed_scd2_scenario_run",
+        "keys": frozenset(
+            {
+                "tool",
+                "status",
+                "mode",
+                "side_effects",
+                "repository_connection_attempted",
+                "raw_rows_included",
+                "pk_values_included",
+                "secret_printed",
+                "scenario",
+                "error_type",
+            }
+        ),
+    },
     "dim_product_scd2_ikm_import.groovy": {
         "tool": "odi.dim_product_scd2_ikm_import",
         "mode": "fixed_sdk_reference_absent_only_ikm_import",
@@ -214,7 +240,10 @@ def _strict_structured_error_output(script_name: str, text: str) -> bool:
         or payload.get("tool") != contract["tool"]
         or payload.get("status") != "error"
         or payload.get("mode") != contract["mode"]
-        or payload.get("repository_connection_attempted") is not True
+        or (
+            payload.get("repository_connection_attempted") is not True
+            and script_name != "dim_product_scd2_scenario_run.groovy"
+        )
         or payload.get("raw_rows_included") is not False
         or payload.get("pk_values_included") is not False
         or payload.get("secret_printed") is not False
@@ -223,6 +252,25 @@ def _strict_structured_error_output(script_name: str, text: str) -> bool:
         or type(payload.get("side_effects")) is not bool
     ):
         return False
+    if script_name == "dim_product_scd2_scenario_run.groovy":
+        scenario = {
+            "name": _DIM_PRODUCT_SCD2_SCENARIO,
+            "version": _DIM_PRODUCT_SCD2_SCENARIO_VERSION,
+            "context": _DIM_PRODUCT_SCD2_SCENARIO_CONTEXT,
+        }
+        attempted = payload["side_effects"]
+        connected = payload.get("repository_connection_attempted")
+        return (
+            type(connected) is bool
+            and payload.get("scenario") == scenario
+            and type(payload.get("scenario")) is dict
+            and payload["error_type"] in _DIM_PRODUCT_SCD2_RUN_ERROR_TYPES
+            and (not attempted or connected)
+            and (
+                payload["error_type"] != "AgentConfigurationUnavailable"
+                or (not attempted and not connected)
+            )
+        )
     if script_name == "dim_product_scd2_ikm_import.groovy":
         attempted = payload.get("import_attempted")
         state_changed = payload.get("repository_state_may_have_changed")
@@ -1036,6 +1084,82 @@ class OdiOrchestrator:
             "session_id_included": False,
             "side_effects": True,
         }
+
+    def run_dim_product_scd2_scenario_safe(
+        self,
+        *,
+        approved: object = False,
+        approval_scope: object,
+        scenario_name: object,
+        version: object,
+        context: object = "GLOBAL",
+    ) -> dict:
+        """Run only the reviewed fixed DIM_PRODUCT scenario via the ODI agent."""
+        fixed_scenario = {
+            "name": _DIM_PRODUCT_SCD2_SCENARIO,
+            "version": _DIM_PRODUCT_SCD2_SCENARIO_VERSION,
+            "context": _DIM_PRODUCT_SCD2_SCENARIO_CONTEXT,
+        }
+        base = {
+            "scenario": fixed_scenario,
+            "side_effects": False,
+            "raw_rows_included": False,
+            "pk_values_included": False,
+            "secret_printed": False,
+            "raw_output_included": False,
+            "session_id_included": False,
+        }
+        if approved is not True:
+            return {**base, "status": "blocked_until_exact_operator_approval"}
+        if approval_scope != _DIM_PRODUCT_SCD2_RUN_SCOPE:
+            return {**base, "status": "blocked_approval_scope"}
+        if (scenario_name, version, context) != (
+            _DIM_PRODUCT_SCD2_SCENARIO,
+            _DIM_PRODUCT_SCD2_SCENARIO_VERSION,
+            _DIM_PRODUCT_SCD2_SCENARIO_CONTEXT,
+        ):
+            return {**base, "status": "blocked_scenario_identity"}
+
+        with groovy_approval_context(True):
+            output = self.run_groovy("dim_product_scd2_scenario_run.groovy", {})
+        try:
+            payload = json.loads(output)
+        except (TypeError, ValueError):
+            payload = None
+        envelope = {
+            "tool": "odi.dim_product_scd2_scenario_run",
+            "mode": "fixed_scd2_scenario_run",
+            "repository_connection_attempted": True,
+            "raw_rows_included": False,
+            "pk_values_included": False,
+            "secret_printed": False,
+            "scenario": fixed_scenario,
+        }
+        success = (
+            isinstance(payload, dict)
+            and set(payload) == set(envelope) | {"status", "side_effects", "session_status"}
+            and all(payload.get(key) == value for key, value in envelope.items())
+            and payload.get("status") == "passed"
+            and payload.get("side_effects") is True
+            and payload.get("session_status") == "DONE"
+        )
+        if success:
+            return {**base, "status": "passed", "side_effects": True,
+                    "session_status": "DONE"}
+        failure = {**base, "status": "failed", "side_effects": True,
+                   "error_type": "InvalidScenarioRunOutput"}
+        if (
+            isinstance(payload, dict)
+            and set(payload) == set(envelope) | {"status", "side_effects", "error_type"}
+            and all(payload.get(key) == value for key, value in envelope.items())
+            and payload.get("status") == "error"
+            and type(payload.get("side_effects")) is bool
+            and isinstance(payload.get("error_type"), str)
+            and payload.get("error_type") in _DIM_PRODUCT_SCD2_RUN_ERROR_TYPES
+        ):
+            failure["side_effects"] = payload["side_effects"]
+            failure["error_type"] = payload["error_type"]
+        return failure
 
     def create_load_plan_metadata(self, *,
                                   approved: bool = False,

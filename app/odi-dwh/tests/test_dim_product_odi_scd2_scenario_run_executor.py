@@ -1,0 +1,298 @@
+"""Mocked execution contract for the fixed DIM_PRODUCT scenario run."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+
+SCOPE = "odi68_dim_product_odi_scd2_scenario_run_and_rerun_proof"
+SCENARIO = {
+    "name": "MAP_ODS_PRODUCTS_TO_DIM_PRODUCT_SCN",
+    "version": "001",
+    "context": "GLOBAL",
+}
+
+
+def _mapping_probe():
+    return {
+        "tool": "odi.dim_product_scd2_mapping_probe",
+        "status": "passed",
+        "mode": "normalized_fixed_scd2_mapping_metadata",
+        "side_effects": False,
+        "repository_connection_attempted": True,
+        "raw_rows_included": False,
+        "pk_values_included": False,
+        "secret_printed": False,
+        "mapping": {
+            "name": "MAP_ODS_PRODUCTS_TO_DIM_PRODUCT",
+            "source_component_count": 1,
+            "target_component_count": 1,
+            "target_attribute_count": 26,
+            "mapped_attribute_count": 26,
+            "integration_type": "SCD",
+            "target_ikm": "IKM Oracle Slowly Changing Dimension",
+            "access_point_count": 0,
+            "lkm_assigned_count": 0,
+        },
+    }
+
+
+def _scenario_probe():
+    return {
+        "status": "passed",
+        "side_effects": False,
+        "raw_rows_included": False,
+        "pk_values_included": False,
+        "scenario": {
+            "name": SCENARIO["name"],
+            "version": "001",
+            "exists": True,
+        },
+    }
+
+
+def _preflight():
+    return {
+        "status": "rerun_noop",
+        "connection_attempted": True,
+        "write_attempted": False,
+        "observed_at": "NOW",
+        "source_count": 72,
+        "target_count": 72,
+        "current_target_count": 72,
+        "source_duplicate_key_group_count": 0,
+        "target_duplicate_surrogate_key_group_count": 0,
+        "target_multiple_current_key_group_count": 0,
+        "target_invalid_current_flag_count": 0,
+        "target_invalid_effective_range_count": 0,
+        "source_missing_current_count": 0,
+        "insert_candidate_count": 0,
+        "changed_candidate_count": 0,
+        "unchanged_count": 72,
+        "candidate_count": 0,
+        "backup_exists": 1,
+        "backup_column_count": 24,
+        "backup_row_count": 0,
+        "raw_rows_included": False,
+        "pk_values_included": False,
+        "secret_printed": False,
+    }
+
+
+def _backup_result():
+    return {
+        "status": "passed",
+        "side_effects": True,
+        "backup": {
+            "owner": "DWH",
+            "table": "ODI68_DIM_PRODUCT_BKP",
+            "source_table": "DIM_PRODUCT",
+            "exists": True,
+            "created_absent_only": True,
+            "column_count": 26,
+            "row_count": 72,
+        },
+        "ods_backup": {
+            "owner": "DWH",
+            "table": "ODI68_ODS_PRODUCTS_BKP",
+            "exists": True,
+            "column_count": 24,
+            "row_count": 0,
+            "untouched": True,
+        },
+        "raw_rows_included": False,
+        "pk_values_included": False,
+        "secret_printed": False,
+    }
+
+
+def _run_result():
+    return {
+        "status": "passed",
+        "scenario": dict(SCENARIO),
+        "session_status": "DONE",
+        "side_effects": True,
+        "raw_rows_included": False,
+        "pk_values_included": False,
+        "raw_output_included": False,
+        "session_id_included": False,
+        "secret_printed": False,
+    }
+
+
+def _execute(*, mapping=None, scenario=None, review="approved", approved=True,
+             scope=SCOPE, preflights=None, backup=None, runs=None):
+    from dim_product_odi_scd2_scenario_run_executor import (
+        execute_dim_product_scd2_scenario_run_and_rerun_proof,
+    )
+
+    events = []
+    probe_calls = 0
+    evidence = list(preflights) if preflights is not None else [
+        _preflight(), _preflight(), _preflight()
+    ]
+    run_evidence = list(runs) if runs is not None else [_run_result(), _run_result()]
+
+    def candidate_probe():
+        nonlocal probe_calls
+        events.append("preflight" if probe_calls == 0 else "postflight")
+        probe_calls += 1
+        value = evidence.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        value = deepcopy(value)
+        if value.get("observed_at") == "NOW":
+            value["observed_at"] = datetime.now(timezone.utc).isoformat()
+        return value
+
+    def backup_creator(**kwargs):
+        events.append(("backup", kwargs))
+        if isinstance(backup, Exception):
+            raise backup
+        return deepcopy(backup if backup is not None else _backup_result())
+
+    def scenario_runner(**kwargs):
+        events.append(("run", kwargs))
+        value = run_evidence.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return deepcopy(value)
+
+    result = execute_dim_product_scd2_scenario_run_and_rerun_proof(
+        mapping or _mapping_probe(),
+        scenario or _scenario_probe(),
+        scenario_generation_review_status="approved",
+        executor_review_status=review,
+        approved=approved,
+        approval_scope=scope,
+        candidate_probe=candidate_probe,
+        backup_creator=backup_creator,
+        scenario_runner=scenario_runner,
+    )
+    return result, events
+
+
+def test_sequence_requires_fresh_preflight_then_backup_then_two_runs_and_postflights():
+    result, events = _execute(preflights=[
+        {**_preflight(), "observed_at": "NOW"},
+        _preflight(), _preflight(),
+    ])
+    assert result["status"] == "passed"
+    assert result["scenario_run_attempt_count"] == 2
+    assert result["successful_scenario_run_count"] == 2
+    assert result["named_backup_retained"] is True
+    assert result["automatic_rollback_performed"] is False
+    assert result["source_count"] == result["target_count"] == 72
+    assert [e if isinstance(e, str) else e[0] for e in events] == [
+        "preflight", "backup", "run", "postflight", "run", "postflight"
+    ]
+    assert events[1][1] == {
+        "owner": "DWH", "source_table": "DIM_PRODUCT",
+        "backup_table": "ODI68_DIM_PRODUCT_BKP",
+        "expected_column_count": 26, "expected_row_count": 72,
+        "require_absent": True,
+    }
+    assert [e[1] for e in events if isinstance(e, tuple) and e[0] == "run"] == [
+        {"approved": True, "approval_scope": SCOPE,
+         "scenario_name": SCENARIO["name"], "version": "001", "context": "GLOBAL"},
+    ] * 2
+
+
+@pytest.mark.parametrize("approved,scope,review", [
+    (False, SCOPE, "approved"), ("yes", SCOPE, "approved"),
+    (True, "other", "approved"), (True, SCOPE, "pending"),
+])
+def test_bad_approval_or_review_blocks_before_callbacks(approved, scope, review):
+    result, events = _execute(approved=approved, scope=scope, review=review)
+    assert result["status"].startswith("blocked")
+    assert events == []
+
+
+def test_stale_preflight_blocks_before_backup():
+    stale = _preflight()
+    stale["observed_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    result, events = _execute(preflights=[stale])
+    assert result["status"] == "blocked_run_readiness"
+    assert events == ["preflight"]
+
+
+def test_invalid_mapping_or_scenario_blocks_before_backup():
+    mapping = _mapping_probe()
+    mapping["mapping"]["mapped_attribute_count"] = 25
+    result, events = _execute(mapping=mapping)
+    assert result["status"] == "blocked_run_readiness"
+    assert events == ["preflight"]
+    scenario = _scenario_probe()
+    scenario["scenario"]["version"] = "002"
+    result, events = _execute(scenario=scenario)
+    assert result["status"] == "blocked_run_readiness"
+    assert events == ["preflight"]
+
+
+@pytest.mark.parametrize("bad", [
+    {**_backup_result(), "status": "failed"},
+    {**_backup_result(), "backup": {**_backup_result()["backup"], "column_count": 25}},
+    RuntimeError("sensitive-value"),
+])
+def test_backup_failure_stops_before_run_and_reports_possible_partial_state(bad):
+    result, events = _execute(backup=bad)
+    assert result["status"] == "failed"
+    assert result["stage"] == "named_backup_gate"
+    assert result["scenario_run_attempt_count"] == 0
+    assert result["backup_may_exist"] is True
+    assert result["manual_recovery_review_required"] is True
+    assert "sensitive-value" not in str(result)
+    assert [e if isinstance(e, str) else e[0] for e in events] == ["preflight", "backup"]
+
+
+@pytest.mark.parametrize("stage,runs,preflights,attempts,successes", [
+    ("first_scenario_run", [{**_run_result(), "status": "failed"}], None, 1, 0),
+    ("first_count_only_postflight", None,
+     [_preflight(), {**_preflight(), "candidate_count": 1}], 1, 1),
+    ("second_scenario_run", [_run_result(), RuntimeError("sensitive-value")],
+     None, 2, 1),
+    ("second_count_only_postflight", None,
+     [_preflight(), _preflight(), {**_preflight(), "target_count": 73}], 2, 2),
+])
+def test_partial_failure_states(stage, runs, preflights, attempts, successes):
+    result, _events = _execute(runs=runs, preflights=preflights)
+    assert result["status"] == "failed"
+    assert result["stage"] == stage
+    assert result["scenario_run_attempt_count"] == attempts
+    assert result["successful_scenario_run_count"] == successes
+    assert result["named_backup_retained"] is True
+    assert result["automatic_rollback_performed"] is False
+    assert result["manual_recovery_review_required"] is True
+    assert "sensitive-value" not in str(result)
+
+
+def test_read_only_preflight_exception_has_no_backup_or_scenario_attempt():
+    result, events = _execute(preflights=[RuntimeError("sensitive-value")])
+    assert result["status"] == "failed"
+    assert result["stage"] == "fresh_read_only_preflight"
+    assert result["scenario_run_attempt_count"] == 0
+    assert result["backup_may_exist"] is False
+    assert "sensitive-value" not in str(result)
+    assert events == ["preflight"]
+
+
+def test_rerun_rejects_count_drift_even_with_no_candidates():
+    second = _preflight()
+    second["source_count"] = second["target_count"] = 73
+    second["current_target_count"] = second["unchanged_count"] = 73
+    result, _ = _execute(preflights=[_preflight(), _preflight(), second])
+    assert result["status"] == "failed"
+    assert result["stage"] == "second_count_only_postflight"
+
+
+def test_unsafe_run_result_is_never_propagated():
+    bad = _run_result()
+    bad["session_id_included"] = True
+    bad["internal_id"] = "sensitive-value"
+    result, events = _execute(runs=[bad])
+    assert result["stage"] == "first_scenario_run"
+    assert "sensitive-value" not in str(result)
+    assert len([e for e in events if isinstance(e, tuple) and e[0] == "run"]) == 1
