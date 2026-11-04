@@ -257,7 +257,7 @@ def node_preview(state: MappingState) -> dict:
 
 def node_create_table(state: MappingState) -> dict:
     """Create the target Oracle table."""
-    from mapping_generator import MappingGenerator
+    from mapping_generator import MappingGenerator, RepositoryPreflightBlockedError
 
     if state.get("overall_status") == "failed":
         return {"overall_status": "failed"}
@@ -266,6 +266,19 @@ def node_create_table(state: MappingState) -> dict:
     try:
         mg = MappingGenerator()
         mg._batch_id = state.get("batch_id", "unknown")
+        # Read-only repository preflight, as in the classic engine: it pins the approved IKM id
+        # and, for internal ODS/DWH sources, the verified source identity that the datastore
+        # registration and mapping creation steps require. It runs before any DDL.
+        try:
+            mg._preflight_odi_repository(params)
+        except RepositoryPreflightBlockedError as blocked:
+            code = blocked.detail.get("code") if isinstance(blocked.detail, dict) else None
+            return {
+                "current_step": "create_table",
+                "overall_status": "failed",
+                "error": f"Repository preflight blocked: {code or 'repository_preflight_failed'}",
+                "log": _add_log(state, "repository_preflight", "FAILED", str(code or "blocked")),
+            }
         result = mg._create_target_table(params)
         return {
             "current_step": "create_table",

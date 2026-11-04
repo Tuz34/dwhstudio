@@ -41,22 +41,19 @@ def _ready_params() -> dict:
 def test_create_mapping_checks_validation_result_before_remove():
     """validate() is a real gate, and a thrown result still reaches the outer catch."""
     text = GROOVY_PATH.read_text(encoding="utf-8")
-    validate_at = text.index("def vr = mapping.validate()")
+    validate_at = text.index("boolean hasValidationErrors = mappingHasErrors(")
     remove_at = text.index("em.remove(existingMapping)")
     between = text[validate_at:remove_at]
 
-    assert 'if (vr instanceof Boolean && !vr) throw new IllegalStateException("Mapping validation failed")' in between
-    assert (
-        "if (vr != null && !(vr instanceof Boolean) && vr.metaClass.respondsTo(vr, 'isValid') "
-        "&& !vr.isValid()) throw new IllegalStateException(\"Mapping validation failed\")"
-    ) in between
+    assert "if (hasValidationErrors) {" in between
+    assert 'throw new IllegalStateException("Mapping validation failed")' in between
     assert "try {" not in between
     assert "System.exit(1)" in text[text.index("} catch (Exception e) {"):]
 
 
 def test_create_mapping_validates_before_delete_in_one_transaction():
     text = GROOVY_PATH.read_text(encoding="utf-8")
-    validate_at = text.index("mapping.validate()")
+    validate_at = text.index("mappingHasErrors(mapping, validationIssues)")
     remove_at = text.index("em.remove(existingMapping)")
     commit_at = text.index("txnMgr.commit(txnStatus)")
 

@@ -15,6 +15,8 @@ import oracle.odi.core.OdiInstance
 import oracle.odi.core.security.Authentication
 import oracle.odi.core.persistence.transaction.*
 import oracle.odi.domain.topology.OdiContext
+import oracle.odi.domain.root.RootIssue
+import groovy.json.JsonOutput
 
 def selectExactIkm = { allIkms, String requested, String approvedNames, String requiredId = null ->
     Set<String> approved = (approvedNames ?: "").split(",").collect { it.trim().toLowerCase(Locale.ROOT) } as Set
@@ -59,6 +61,54 @@ def verifySourceBinding = { source, String owner, String resource, context, Stri
     }
 }
 
+// Same logical schema (hence the same data server and physical schema in every context) means the
+// source needs no access point and no load KM. Different logical schemas stay on the LKM path.
+def sameLogicalSchema = { a, b ->
+    def la = a?.getModel()?.getLogicalSchema()
+    def lb = b?.getModel()?.getLogicalSchema()
+    if (la == null || lb == null) return false
+    if (la.is(lb)) return true
+    def ia = la.getInternalId()
+    def ib = lb.getInternalId()
+    return ia != null && ib != null && ia.toString() == ib.toString() && la.getName() == lb.getName()
+}
+
+// Bounded, redacted projection of SDK validation issues for the structured error line.
+def summarizeIssues = { issues ->
+    List out = []
+    (issues ?: []).each { issue ->
+        if (out.size() >= 20) return
+        String level = "ISSUE"
+        String text = ""
+        try { level = String.valueOf(issue.getLevel()) } catch (Throwable ignoredLevel) {}
+        try { text = String.valueOf(issue.getMessage()) } catch (Throwable ignoredText) { text = issue.getClass().getSimpleName() }
+        text = text.replaceAll(/[\r\n\t]+/, " ")
+            .replaceAll(/(?i)\b(jdbc|https?|ldaps?|t3s?):\S+/, '***')
+            .replaceAll(/(?i)(password|passwd|pwd|secret|token|key|credential)s?\s*[=:]\s*("[^"]*"|'[^']*'|\S+)/, '$1=***')
+            .replaceAll(/"[^"]*"|'[^']*'/, "'***'")
+            .trim()
+        String entry = level + ": " + text
+        if (entry.length() > 300) entry = entry.substring(0, 300)
+        if (level in ["ERROR", "FATAL", "WARNING"]) out.add(entry)
+    }
+    return out
+}
+
+// True when the SDK reports validation errors; collects the issues for the structured error line.
+def mappingHasErrors = { mp, List issues ->
+    return mp.validate(issues, false) == true
+}
+
+// On failure also ask the physical design for its own messages (the logical result is often a bare
+// false) and record the node names; never throws, so the original failure stays the reported one.
+def collectDesignFailure = { dsg, List issues, Map diag ->
+    try { dsg.validate(issues, false) } catch (Exception designValidateError) {
+        println "DESIGN VALIDATE UNAVAILABLE: ${designValidateError.getClass().getSimpleName()}"
+    }
+    try { diag.physical_nodes = dsg.getPhysicalNodes().collect { it.getName() } } catch (Exception diagError) {}
+    return summarizeIssues(issues)
+}
+
 def odi = null
 boolean standaloneMode = false
 try {
@@ -101,6 +151,9 @@ ITransactionManager txnMgr = odi.getTransactionManager()
 ITransactionStatus txnStatus = txnMgr.getTransaction(new oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition())
 boolean preserveExistingOnFailure = false
 def existingMapping = null
+List validationMessages = []
+Map physicalDiag = [same_schema: false, access_points: 0, access_points_with_lkm: 0, access_point_names: [],
+    physical_nodes: [], source_moved: false]
 
 try {
     def em = odi.getTransactionalEntityManager()
@@ -716,15 +769,9 @@ try {
         // LKM assignment cannot be skipped silently, or runtime ORA-02019 is possible.
         // IKM/staging fallbacks can recompute the physical design, so
         // the AP node reference is resolved again before the LKM assignment.
-        physicalNodes = refreshPhysicalNodes()
-        if (physicalNodes.target != null) tgtNode = physicalNodes.target
-        apNode = physicalNodes.ap
-        println "PHYSICAL NODES REFRESHED BEFORE LKM: target=${tgtNode?.getName()}, ap=${apNode?.getName()}"
-        MapPhysicalNode lkmTarget = apNode
-        boolean allowDbLinkLkm = "true".equalsIgnoreCase(System.getProperty("odi.allow_dblink_lkm", "false"))
-        if (lkmTarget == null) {
-            println "LKM NOT REQUIRED: no access point in the target-staged physical design"
-        } else {
+        // Assigns and verifies the configured load KM on one access-point node.
+        def assignLoadKm = { MapPhysicalNode lkmTarget ->
+            boolean allowDbLinkLkm = "true".equalsIgnoreCase(System.getProperty("odi.allow_dblink_lkm", "false"))
             if (lkm == null) {
                 throw new Exception("LKM selection failed. Configure odi.lkm_name or ODI_LKM_PRIORITY before creating the mapping.")
             }
@@ -770,6 +817,17 @@ try {
             println "LKM VERIFY: ${assignedLkmName} -> ${lkmTarget.getName()}"
         }
 
+        physicalNodes = refreshPhysicalNodes()
+        if (physicalNodes.target != null) tgtNode = physicalNodes.target
+        apNode = physicalNodes.ap
+        println "PHYSICAL NODES REFRESHED BEFORE LKM: target=${tgtNode?.getName()}, ap=${apNode?.getName()}"
+        MapPhysicalNode lkmTarget = apNode
+        if (lkmTarget == null) {
+            println "LKM NOT REQUIRED: no access point in the target-staged physical design (re-checked after final staging)"
+        } else {
+            assignLoadKm(lkmTarget)
+        }
+
         try {
             // ODI 14c+ compatible: use setStagingLocationName(String)
             // setStagingLocation(Location) can have a signature mismatch on ODI 12c
@@ -784,13 +842,50 @@ try {
                 println "WARNING: Staging location failed: " + stg.getClass().getSimpleName()
             }
         }
+
+        // FINAL PASS: access points can appear (or be recomputed) after the staging location is
+        // resolved. Re-read every AP node from the final physical design and give each the load KM.
+        physicalDiag.same_schema = sameLogicalSchema(srcDS, tgtDS)
+        List finalAps = design.getAllAPNodes() ?: []
+        if (!finalAps.isEmpty() && physicalDiag.same_schema) {
+            // Same logical schema: the source belongs in the target execution unit, no staging hop.
+            try {
+                MapPhysicalNode srcNode = design.findNode(srcComp)
+                List moveIssues = new ArrayList()
+                if (srcNode != null && srcNode.getExecutionUnit() != null && tgtNode.getExecutionUnit() != null &&
+                        !srcNode.isAPNode() && design.moveNodes([srcNode], tgtNode.getExecutionUnit(), moveIssues)) {
+                    physicalDiag.source_moved = true
+                    println "SAME SCHEMA: source node moved into the target execution unit"
+                } else {
+                    println "SAME SCHEMA: source node move not applied (${summarizeIssues(moveIssues)})"
+                }
+            } catch (Exception moveError) {
+                println "SAME SCHEMA: source node move failed (${moveError.getClass().getSimpleName()})"
+            }
+            finalAps = design.getAllAPNodes() ?: []
+        }
+        physicalDiag.access_points = finalAps.size()
+        if (finalAps.isEmpty()) {
+            println "FINAL PASS: no access point in the final physical design, LKM not required"
+        }
+        finalAps.each { MapPhysicalNode finalAp ->
+            assignLoadKm(finalAp)
+            physicalDiag.access_points_with_lkm = physicalDiag.access_points_with_lkm + 1
+        }
+        physicalDiag.access_point_names = finalAps.collect { it.getName() }
+        physicalDiag.physical_nodes = design.getPhysicalNodes().collect { it.getName() }
     } else {
         println "WARNING: Physical node not found, KM assignment skipped"
     }
     
-    def vr = mapping.validate()
-    if (vr instanceof Boolean && !vr) throw new IllegalStateException("Mapping validation failed")
-    if (vr != null && !(vr instanceof Boolean) && vr.metaClass.respondsTo(vr, 'isValid') && !vr.isValid()) throw new IllegalStateException("Mapping validation failed")
+    // SDK 12.2.1.4: BOTH validate() overloads return TRUE when errors were found (the no-argument
+    // form delegates to the issue-list form). The issue-list overload is the only gate.
+    List validationIssues = new ArrayList()
+    boolean hasValidationErrors = mappingHasErrors(mapping, validationIssues)
+    if (hasValidationErrors) {
+        validationMessages = collectDesignFailure(design, validationIssues, physicalDiag)
+        throw new IllegalStateException("Mapping validation failed")
+    }
     boolean replacedExisting = false
     if (preserveExistingOnFailure) {
         em.remove(existingMapping)
@@ -806,7 +901,7 @@ try {
     txnStatus = null
     preserveExistingOnFailure = false
     println "SUCCESS: Mapping '${mName}' created successfully."
-    println '{"status":"passed","action":"create_mapping","replaced":' + replacedExisting + ',"kept_existing_on_failure":false}'
+    println '{"status":"passed","action":"create_mapping","replaced":' + replacedExisting + ',"kept_existing_on_failure":false,"physical_design":' + JsonOutput.toJson(physicalDiag) + '}'
 
 } catch (Exception e) {
     if (txnStatus != null && !txnStatus.isCompleted()) try { txnMgr.rollback(txnStatus) } catch (ig) {}
@@ -814,7 +909,7 @@ try {
     if (!(errorType ==~ '[A-Za-z][A-Za-z0-9_$]{0,127}')) {
         errorType = "Exception"
     }
-    println '{"status":"error","action":"create_mapping","replaced":false,"kept_existing_on_failure":' + preserveExistingOnFailure + ',"error_type":"' + errorType + '"}'
+    println '{"status":"error","action":"create_mapping","replaced":false,"kept_existing_on_failure":' + preserveExistingOnFailure + ',"error_type":"' + errorType + '","validation_messages":' + JsonOutput.toJson(validationMessages) + ',"physical_design":' + JsonOutput.toJson(physicalDiag) + '}'
     System.exit(1)
 } finally {
     if (standaloneMode && odi != null) odi.close()
