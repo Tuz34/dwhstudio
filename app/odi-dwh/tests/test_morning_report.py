@@ -101,7 +101,7 @@ def test_clean_local_llm_call_requests_unload_after():
             "status": "ready",
             "loaded_by_helper": True,
             "unload_after": True,
-            "analysis": "Kisa sabah ozeti\n- Sonraki adim Codex",
+            "analysis": "Short morning summary\n- Next step: Codex",
         }
 
     result = morning_report.generate_morning_report(

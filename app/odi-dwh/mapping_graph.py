@@ -451,7 +451,7 @@ def node_finalize(state: MappingState) -> dict:
     else:
         final_status = "success"
 
-    # MAPPING_LOG'a kaydet
+    # Save to MAPPING_LOG
     try:
         mg = MappingGenerator()
         mg._batch_id = state.get("batch_id", "unknown")

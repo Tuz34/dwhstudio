@@ -120,8 +120,8 @@ export function AiStudio() {
   }, [addMessage]);
 
   const handleExport = useCallback(async () => {
-    // Excel'e aktar = sohbette donen SON veri tablosunu disa aktarir
-    // (konusma metnini degil). En son query.result.columns/rows'u bulur.
+    // Export to Excel = export the LAST data table returned in the chat
+    // (not the conversation text). Finds the latest query.result.columns/rows.
     let headers = [];
     let rows = [];
     for (let i = chatHistory.length - 1; i >= 0 && headers.length === 0; i--) {

@@ -41,7 +41,7 @@ def _get_conn():
 
 
 def _json_serial(obj):
-    """datetime vb. JSON'a cevirilemeyen tipleri string yapar."""
+    """Convert types that JSON cannot serialize, such as datetime, to strings."""
     if hasattr(obj, "isoformat"):
         return obj.isoformat()
     if isinstance(obj, (bytes, bytearray)):
@@ -172,7 +172,7 @@ def mon_dq_score(owner: str = "DWH", table_name: str = "") -> str:
     """
     Calculate a table-level DQ score.
     If table_name is empty, return an aggregate score for all tables.
-    Skor = (1 - ihlal_sayisi / toplam_satir) * 100
+    Score = (1 - violation_count / total_rows) * 100
     """
     from data_quality import DataQualityManager
 

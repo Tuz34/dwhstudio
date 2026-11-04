@@ -1,7 +1,7 @@
 /**
  * DWH Studio — Centralized API Service
  * All /api/* calls are routed from here.
- * CSRF token otomatik eklenir (Flask-WTF ile uyumlu).
+ * The CSRF token is added automatically (compatible with Flask-WTF).
  */
 
 function getCsrfToken() {

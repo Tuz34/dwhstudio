@@ -245,7 +245,7 @@ class OracleSourceConnector(SourceConnector):
             cur.close(); conn.close()
 
     def type_to_oracle(self, src_type, length=None, precision=None, scale=None) -> str:
-        # Oracle source: FULL tip (VARCHAR2(20), NUMBER(10,2)) gelirse aynen koru.
+        # Oracle source: if the type arrives in full form (VARCHAR2(20), NUMBER(10,2)), keep it unchanged.
         if src_type and "(" in src_type:
             return src_type
         base = (src_type or "").upper().split("(")[0].strip()

@@ -1,5 +1,5 @@
 ﻿"""
-API Endpoint Testleri
+API Endpoint Tests
 ━━━━━━━━━━━━━━━━━━━━━
 
 Verifies the HTTP status and JSON structure of the core API endpoints.
@@ -1191,7 +1191,7 @@ class TestAskTruncateIntent:
         resp = app_client.post(
             "/api/ask",
             json={
-                "message": "MAP_HR_EMPLOYEES_TO_ODS icin truncate ekle",
+                "message": "MAP_HR_EMPLOYEES_TO_ODS target truncate",
                 "history": [],
             },
         )
@@ -3019,7 +3019,7 @@ class TestOdiMappingApi:
 
 
 class TestStatusEndpoint:
-    """GET /api/status testleri."""
+    """GET /api/status tests."""
 
     def test_status_returns_200(self, app_client):
         resp = app_client.get("/api/status")
@@ -3031,7 +3031,7 @@ class TestStatusEndpoint:
         assert "ok" in data
         assert "checks" in data
         assert "count" in data
-        # count formati: "X/8"
+        # count format: "X/8"
         assert "/" in data["count"]
 
     def test_status_uses_health_checkers_without_shape_change(self, app_client, monkeypatch):
@@ -3080,7 +3080,7 @@ class TestStatusEndpoint:
 
 
 class TestAlertEndpoints:
-    """Alert API testleri."""
+    """Alert API tests."""
 
     def test_alerts_returns_200(self, app_client):
         resp = app_client.get("/api/alerts")
@@ -3463,7 +3463,7 @@ class TestLegacyAirflowWriteEndpoints:
 
 
 class TestTablesEndpoint:
-    """GET /api/tables testleri."""
+    """GET /api/tables tests."""
 
     def test_tables_returns_200(self, app_client):
         resp = app_client.get("/api/tables")
@@ -3476,7 +3476,7 @@ class TestTablesEndpoint:
 
 
 class TestMonitoringEndpoints:
-    """Monitoring API testleri."""
+    """Monitoring API tests."""
 
     def test_freshness_returns_200(self, app_client):
         resp = app_client.get("/api/monitoring/freshness")
@@ -3635,7 +3635,7 @@ class TestMappingSnapshotReadEndpoints:
 
 
 class TestQualityEndpoints:
-    """DQ API testleri."""
+    """DQ API tests."""
 
     def test_validate_runs_generated_and_extra_rules(self, app_client, monkeypatch):
         import app as app_module
@@ -3927,7 +3927,7 @@ class TestQualityEndpoints:
 
 
 class TestSkeyEndpoints:
-    """SKEY API testleri."""
+    """SKEY API tests."""
 
     def test_skey_create_uses_manager(self, app_client, monkeypatch):
         import app as app_module

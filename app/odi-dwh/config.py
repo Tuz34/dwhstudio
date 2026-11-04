@@ -115,7 +115,7 @@ ODI_REPO_PASSWORD = get_secret("ODI_REPO_PASSWORD", "")
 LOG_LEVEL          = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FILE           = os.getenv("LOG_FILE", "logs/app.log")
 
-# ── 10. Productization — Cevre Bagimsiz Ayarlar ──────────────────────────────
+# ── 10. Productization — Environment-Independent Settings ──────────────────────────────
 JAVA_HOME           = os.getenv("JAVA_HOME", "C:\\Program Files\\Java\\jdk1.8.0_211")
 JAVA_FALLBACK_PATHS = [
     item.strip()
@@ -139,7 +139,7 @@ GROOVY_JAR_NAME     = os.getenv("GROOVY_JAR_NAME", "groovy-all-2.4.17.jar")
 ODI_IKM_PRIORITY    = os.getenv("ODI_IKM_PRIORITY", "oracle merge,oracle update,oracle insert")
 ODI_LKM_PRIORITY    = os.getenv("ODI_LKM_PRIORITY", "sql to oracle,mssql to oracle,sql to sql")
 
-# ── 9. Alert & Monitoring Ayarlari ──────────────────────────────────────────
+# ── 9. Alert & Monitoring Settings ──────────────────────────────────────────
 ALERT_FRESHNESS_DAYS = int(os.getenv("ALERT_FRESHNESS_DAYS", "2"))
 ALERT_POLL_INTERVAL  = int(os.getenv("ALERT_POLL_INTERVAL", "60"))
 
