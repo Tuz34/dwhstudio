@@ -364,7 +364,9 @@ def call_llm(messages: list) -> str:
             try:
                 logger.info("LLM hybrid attempt: %s", name)
                 result = fn(messages)
-                if name != "claude" and result == OLLAMA_UNAVAILABLE_RESPONSE:
+                if name != "claude" and not isinstance(result, str):
+                    raise RuntimeError("provider returned non-text content")
+                if name == "ollama" and result == OLLAMA_UNAVAILABLE_RESPONSE:
                     raise RuntimeError(result)
                 return result
             except Exception as e:

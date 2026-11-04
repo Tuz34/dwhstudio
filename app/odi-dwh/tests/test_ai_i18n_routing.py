@@ -58,3 +58,34 @@ def test_turkish_and_list_phrases_route_as_before():
     assert ai_helpers._is_modeled_tables_question("which tables are modeled?") is True
     assert ai_helpers._is_modeled_tables_question("modellenmis tablolari listele") is True
     assert ai_helpers._is_unmapped_odi_flow_question("HR semasinda DWH ODI akisi yapilmamis tablo listesi") is True
+
+
+def test_hybrid_non_text_provider_content_falls_through_to_next_provider(monkeypatch):
+    monkeypatch.setattr(ai_agent, "normalize_provider", lambda provider=None: "hybrid")
+    monkeypatch.setattr(ai_agent, "is_local_openai_available", lambda: True)
+    monkeypatch.setattr(ai_agent, "is_ollama_available", lambda: True)
+    monkeypatch.setattr(ai_agent, "is_claude_configured", lambda: True)
+    monkeypatch.setattr(ai_agent, "call_local_openai", lambda messages: None)
+    monkeypatch.setattr(ai_agent, "call_ollama", lambda messages: None)
+    monkeypatch.setattr(ai_agent, "call_claude", lambda messages: '{"description": "ok", "queries": []}')
+    result = ai_agent.call_llm([{"role": "user", "content": "hi"}])
+    assert isinstance(result, str)
+    assert ai_agent.extract_json(result)["description"] == "ok"
+
+
+def test_hybrid_none_from_every_local_provider_without_claude_returns_text(monkeypatch):
+    monkeypatch.setattr(ai_agent, "normalize_provider", lambda provider=None: "hybrid")
+    monkeypatch.setattr(ai_agent, "is_local_openai_available", lambda: True)
+    monkeypatch.setattr(ai_agent, "is_ollama_available", lambda: True)
+    monkeypatch.setattr(ai_agent, "is_claude_configured", lambda: False)
+    monkeypatch.setattr(ai_agent, "call_local_openai", lambda messages: None)
+    monkeypatch.setattr(ai_agent, "call_ollama", lambda messages: None)
+    assert isinstance(ai_agent.call_llm([{"role": "user", "content": "hi"}]), str)
+
+
+def test_call_ollama_exception_branch_returns_sentinel(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(ai_agent.requests, "post", boom)
+    assert ai_agent.call_ollama([{"role": "user", "content": "hi"}]) == ai_agent.OLLAMA_UNAVAILABLE_RESPONSE
