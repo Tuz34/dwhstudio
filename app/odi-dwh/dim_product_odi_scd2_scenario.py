@@ -335,3 +335,58 @@ def build_dim_product_scd2_scenario_run_readiness(
             "request_fresh_exact_run_approval",
         ],
     }
+
+
+_PREFLIGHT_TO_GATE_RENAMES = {
+    "source_duplicate_groups": "source_duplicate_key_group_count",
+    "duplicate_product_sk_groups": "target_duplicate_surrogate_key_group_count",
+    "duplicate_current_natural_key_groups": "target_multiple_current_key_group_count",
+    "invalid_current_flags": "target_invalid_current_flag_count",
+    "invalid_effective_dates": "target_invalid_effective_range_count",
+    "insert_without_current_count": "insert_candidate_count",
+    "changed_current_count": "changed_candidate_count",
+    "unchanged_current_count": "unchanged_count",
+}
+_PREFLIGHT_PASSTHROUGH = (
+    "mode",
+    "status",
+    "requires_user_approval_for_persistent_action",
+    "connection_attempted",
+    "will_execute",
+    "write_attempted",
+    "raw_rows_included",
+    "pk_values_included",
+    "secret_printed",
+    "source_count",
+    "target_count",
+    "current_target_count",
+    "source_missing_current_count",
+    "candidate_count",
+    "backup_exists",
+    "backup_column_count",
+    "backup_row_count",
+)
+
+
+def candidate_preflight_to_gate_report(
+    report: Mapping[str, Any], observed_at: datetime
+) -> dict[str, Any]:
+    """Map real candidate-preflight output to the run-readiness/backup gate contract.
+
+    Renames the preflight's evidence keys to the gate's names, drops every other
+    key, and stamps ``observed_at`` (UTC ISO string). Keys absent from the
+    preflight stay absent so the gates reject the report instead of guessing.
+    A non-mapping input or a naive/non-UTC timestamp yields an empty report.
+    """
+    if not isinstance(report, Mapping) or not isinstance(observed_at, datetime):
+        return {}
+    if observed_at.utcoffset() != timedelta(0):
+        return {}
+    out: dict[str, Any] = {
+        name: report[name] for name in _PREFLIGHT_PASSTHROUGH if name in report
+    }
+    for source, target in _PREFLIGHT_TO_GATE_RENAMES.items():
+        if source in report:
+            out[target] = report[source]
+    out["observed_at"] = observed_at.astimezone(timezone.utc).isoformat()
+    return out

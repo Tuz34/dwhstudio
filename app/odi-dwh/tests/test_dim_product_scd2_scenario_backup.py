@@ -234,3 +234,21 @@ def test_backup_gate_sanitizes_callback_exception_and_marks_partial_state():
     assert result["error_type"] == "BackupGateError"
     assert result["backup_may_exist"] is True
     assert "secret or raw row" not in str(result)
+
+
+def test_backup_gate_sanitizes_unexpected_exception_type():
+    class DriverError(Exception):
+        pass
+
+    class BrokenCreator:
+        def __call__(self, **_kwargs):
+            raise DriverError("sensitive-value")
+
+    result, _ = _gate(creator=BrokenCreator())
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "BackupGateError"
+    assert result["backup_may_exist"] is True
+    assert result["manual_recovery_review_required"] is True
+    assert "sensitive-value" not in str(result)
+    assert "DriverError" not in str(result)

@@ -21,6 +21,8 @@ does not authorize live work and does not contain runnable SQL.
 - no Git or Gitea workflow.
 - every persistent action requires explicit operator approval in a later slice.
 
+A later live proof must use the [fixed DIM_PRODUCT scenario-run executor](../dim_product_odi_scd2_scenario_run_executor.py) with exact scope `odi68_dim_product_odi_scd2_scenario_run_and_rerun_proof`; this Phase 1 contract grants no live-run approval.
+
 ## Target Metadata Contract
 
 Candidate target: `DWH.DIM_PRODUCT`.

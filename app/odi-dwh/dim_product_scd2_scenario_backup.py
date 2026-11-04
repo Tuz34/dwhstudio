@@ -47,6 +47,20 @@ _PREFLIGHT_KEYS = frozenset(
 )
 
 
+def call_sanitized(callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Call a live callback; return None on any exception, never echoing it.
+
+    This is the single broad ``except Exception`` for the ODI-68 callback
+    boundary (shared with the run executor). Driver or subprocess errors
+    (``oracledb.Error``, ``subprocess.TimeoutExpired``) must become a structured
+    partial-state report rather than escape; the exception text is discarded.
+    """
+    try:
+        return callback(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - class-only report, text intentionally dropped
+        return None
+
+
 def _count(report: Mapping[str, Any], name: str) -> int | None:
     value = report.get(name)
     return (
@@ -174,21 +188,15 @@ def run_dim_product_scd2_named_backup_gate(
     if not callable(backup_creator):
         return _base("blocked_backup_creator")
 
-    try:
-        proof = backup_creator(
-            owner=BACKUP_OWNER,
-            source_table=SOURCE_TABLE,
-            backup_table=BACKUP_TABLE,
-            expected_column_count=EXPECTED_COLUMN_COUNT,
-            expected_row_count=EXPECTED_ROW_COUNT,
-            require_absent=True,
-        )
-    except (RuntimeError, TypeError, ValueError, OSError, AttributeError, KeyError):
-        return {
-            **_base("failed", attempted=True),
-            "stage": "named_backup_gate",
-            "error_type": "BackupGateError",
-        }
+    proof = call_sanitized(
+        backup_creator,
+        owner=BACKUP_OWNER,
+        source_table=SOURCE_TABLE,
+        backup_table=BACKUP_TABLE,
+        expected_column_count=EXPECTED_COLUMN_COUNT,
+        expected_row_count=EXPECTED_ROW_COUNT,
+        require_absent=True,
+    )
 
     if not _proof_matches(proof):
         return {

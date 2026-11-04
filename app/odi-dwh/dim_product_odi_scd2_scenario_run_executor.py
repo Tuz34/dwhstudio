@@ -12,7 +12,10 @@ from dim_product_odi_scd2_scenario import (
     SCENARIO_CONTEXT,
     build_dim_product_scd2_scenario_run_readiness,
 )
-from dim_product_scd2_scenario_backup import run_dim_product_scd2_named_backup_gate
+from dim_product_scd2_scenario_backup import (
+    call_sanitized,
+    run_dim_product_scd2_named_backup_gate,
+)
 
 
 def _scenario() -> dict[str, str]:
@@ -67,11 +70,33 @@ def _failure(
 
 def _call(callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Mapping[str, Any] | None:
     """Drop callback exceptions and untrusted output without echoing them."""
-    try:
-        result = callback(*args, **kwargs)
-    except (RuntimeError, TypeError, ValueError, OSError, AttributeError, KeyError):
-        return None
+    result = call_sanitized(callback, *args, **kwargs)
     return result if isinstance(result, Mapping) else None
+
+
+def scenario_runner(**kwargs: Any) -> Mapping[str, Any]:
+    """Live-run callback: delegate to the reviewed fixed-scenario wrapper.
+
+    Takes the same keyword arguments the executor passes (approved,
+    approval_scope, scenario_name, version, context) and returns the wrapper's
+    sanitized result, which ``_run_matches`` validates. Not wired to config;
+    the caller must pass it explicitly after fresh run approval.
+    """
+    from odi_orchestrator import OdiOrchestrator  # local import: no ODI at module load
+
+    return OdiOrchestrator().run_dim_product_scd2_scenario_safe(**kwargs)
+
+
+# Contract for the live ``backup_creator`` callback (supplied by the caller):
+#   backup_creator(owner="DWH", source_table="DIM_PRODUCT",
+#                  backup_table="ODI68_DIM_PRODUCT_BKP",
+#                  expected_column_count=26, expected_row_count=72,
+#                  require_absent=True) -> Mapping
+# It must create the table only when absent (never overwrite), read-verify the
+# 26-column / 72-row copy, check the ODS backup is untouched (24 columns,
+# 0 rows) and return exactly the proof shape accepted by
+# ``dim_product_scd2_scenario_backup._proof_matches`` with no raw rows, keys or
+# secrets. No reusable connection-free helper exists, so none is provided here.
 
 
 def _run_matches(report: Mapping[str, Any] | None) -> bool:

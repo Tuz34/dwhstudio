@@ -296,3 +296,133 @@ def test_unsafe_run_result_is_never_propagated():
     assert result["stage"] == "first_scenario_run"
     assert "sensitive-value" not in str(result)
     assert len([e for e in events if isinstance(e, tuple) and e[0] == "run"]) == 1
+
+
+class _CustomDriverError(Exception):
+    pass
+
+
+def test_unexpected_exception_type_from_backup_creator_is_structured():
+    result, events = _execute(backup=_CustomDriverError("sensitive-value"))
+    assert result["status"] == "failed"
+    assert result["stage"] == "named_backup_gate"
+    assert result["backup_may_exist"] is True
+    assert result["manual_recovery_review_required"] is True
+    assert result["scenario_run_attempt_count"] == 0
+    assert "sensitive-value" not in str(result)
+    assert "_CustomDriverError" not in str(result)
+
+
+def test_unexpected_exception_type_from_scenario_runner_is_structured():
+    result, _ = _execute(runs=[_CustomDriverError("sensitive-value")])
+    assert result["status"] == "failed"
+    assert result["stage"] == "first_scenario_run"
+    assert result["scenario_run_attempt_count"] == 1
+    assert result["named_backup_retained"] is True
+    assert result["manual_recovery_review_required"] is True
+    assert "sensitive-value" not in str(result)
+    assert "_CustomDriverError" not in str(result)
+
+
+def _real_preflight_output():
+    """Mirror the keys run_dim_product_scd2_candidate_preflight really emits."""
+    return {
+        "mode": "dim_product_scd2_candidate_preflight",
+        "status": "rerun_noop",
+        "requires_user_approval_for_persistent_action": True,
+        "connection_attempted": True,
+        "will_execute": False,
+        "write_attempted": False,
+        "raw_rows_included": False,
+        "pk_values_included": False,
+        "secret_printed": False,
+        "source_count": 72,
+        "target_count": 72,
+        "source_duplicate_groups": 0,
+        "duplicate_product_sk_groups": 0,
+        "duplicate_current_natural_key_groups": 0,
+        "invalid_current_flags": 0,
+        "invalid_effective_dates": 0,
+        "current_target_count": 72,
+        "insert_without_current_count": 0,
+        "changed_current_count": 0,
+        "unchanged_current_count": 72,
+        "source_missing_current_count": 0,
+        "backup_exists": 1,
+        "backup_column_count": 24,
+        "backup_row_count": 0,
+        "candidate_count": 0,
+    }
+
+
+def test_real_preflight_output_adapts_to_gates_and_reaches_ready():
+    from dim_product_odi_scd2_scenario import (
+        build_dim_product_scd2_scenario_run_readiness,
+        candidate_preflight_to_gate_report,
+    )
+    from dim_product_scd2_scenario_backup import _preflight_matches
+
+    started = datetime.now(timezone.utc)
+    raw = _real_preflight_output()
+    raw["unexpected_extra"] = "sensitive-value"
+    adapted = candidate_preflight_to_gate_report(raw, datetime.now(timezone.utc))
+    assert "unexpected_extra" not in adapted
+    assert "source_duplicate_groups" not in adapted
+    assert adapted["observed_at"].endswith("+00:00")
+    assert _preflight_matches(adapted)
+    readiness = build_dim_product_scd2_scenario_run_readiness(
+        _mapping_probe(), _scenario_probe(), adapted,
+        scenario_generation_review_status="approved", approved=True,
+        approval_scope=SCOPE, executor_started_at=started,
+    )
+    assert readiness["status"] == "ready_for_separate_scenario_run_executor"
+
+
+def test_adapter_rejects_naive_timestamp_and_nonmapping():
+    from dim_product_odi_scd2_scenario import candidate_preflight_to_gate_report
+
+    assert candidate_preflight_to_gate_report(_real_preflight_output(), datetime.now()) == {}
+    assert candidate_preflight_to_gate_report(None, datetime.now(timezone.utc)) == {}
+
+
+def test_adapter_does_not_invent_missing_keys():
+    from dim_product_odi_scd2_scenario import candidate_preflight_to_gate_report
+    from dim_product_scd2_scenario_backup import _preflight_matches
+
+    raw = _real_preflight_output()
+    del raw["unchanged_current_count"]
+    assert not _preflight_matches(
+        candidate_preflight_to_gate_report(raw, datetime.now(timezone.utc))
+    )
+
+
+def test_real_wrapper_output_satisfies_executor_run_matches(monkeypatch):
+    import json
+    import odi_orchestrator
+    from dim_product_odi_scd2_scenario_run_executor import (
+        _run_matches,
+        scenario_runner,
+    )
+
+    def fake_run(self, script, params):
+        return json.dumps({
+            "tool": "odi.dim_product_scd2_scenario_run",
+            "mode": "fixed_scd2_scenario_run",
+            "repository_connection_attempted": True,
+            "raw_rows_included": False,
+            "pk_values_included": False,
+            "secret_printed": False,
+            "scenario": dict(SCENARIO),
+            "status": "passed",
+            "side_effects": True,
+            "session_status": "DONE",
+        })
+
+    monkeypatch.setattr(odi_orchestrator.OdiOrchestrator, "run_groovy", fake_run)
+    result = scenario_runner(
+        approved=True, approval_scope=SCOPE,
+        scenario_name=SCENARIO["name"], version=SCENARIO["version"],
+        context=SCENARIO["context"],
+    )
+    assert result["status"] == "passed"
+    assert _run_matches(result)
