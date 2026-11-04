@@ -1,12 +1,12 @@
 /*
   ODI Join Type Fix v2: Set LEFT_OUTER on JoinComponent InputConnectorPoints
   ===========================================================================
-  ODI 12c'de join type, JoinComponent'in InputConnectorPoint'leri uzerinden
-  kontrol edilir. LEFT OUTER icin "right" taraftaki input'a outerJoin flag'i set edilir.
+  In ODI 12c the join type is controlled through the JoinComponent
+  InputConnectorPoints. For LEFT OUTER the outerJoin flag is set on the "right" input.
 
-  Ayrica:
-  - setJoinType() denenir (SDK seviyesi)
-  - getAllMethods/properties loglama (debug)
+  Also:
+  - setJoinType() is attempted (SDK level)
+  - getAllMethods/properties logging (debug)
 */
 
 import oracle.odi.domain.project.*
@@ -68,8 +68,8 @@ try {
                 JoinComponent joinComp = (JoinComponent) comp
                 println "\n=== MAPPING: ${mName} | JOIN: ${joinComp.getName()} ==="
 
-                // STEP 1: Debug — JoinComponent'in tum public method'larini listele (join/outer iceren)
-                println "  --- JoinComponent Methods (join/outer/type iceren) ---"
+                // STEP 1: Debug — list every public JoinComponent method (those containing join/outer)
+                println "  --- JoinComponent Methods (containing join/outer/type) ---"
                 Method[] methods = joinComp.getClass().getMethods()
                 methods.each { m ->
                     String mn = m.getName().toLowerCase()
@@ -78,20 +78,20 @@ try {
                     }
                 }
 
-                // STEP 2: Mevcut join type
+                // STEP 2: Current join type
                 try {
                     println "  getJoinType(): ${joinComp.getJoinType()}"
                 } catch (Exception e) {
                     println "  getJoinType error type: ${e.getClass().getSimpleName()}"
                 }
 
-                // STEP 3: InputConnectorPoints uzerinden outer join ayarla
+                // STEP 3: Set the outer join through the InputConnectorPoints
                 println "  --- InputConnectorPoints ---"
                 def inputCPs = joinComp.getInputConnectorPoints()
                 inputCPs?.eachWithIndex { icp, idx ->
                     println "    INPUT[${idx}]: ${icp.getName()} class=${icp.getClass().simpleName}"
 
-                    // InputConnectorPoint'in outer-join ile ilgili method'larini ara
+                    // Look for InputConnectorPoint methods related to outer join
                     Method[] icpMethods = icp.getClass().getMethods()
                     icpMethods.each { m ->
                         String mn = m.getName().toLowerCase()
@@ -101,7 +101,7 @@ try {
                     }
                 }
 
-                // STEP 4: ConnectorPoints (getConnectorPoints) uzerinden dene
+                // STEP 4: Try through ConnectorPoints (getConnectorPoints)
                 println "  --- All ConnectorPoints ---"
                 try {
                     def allCPs = joinComp.getConnectorPoints()
@@ -119,7 +119,7 @@ try {
                     println "  getConnectorPoints error type: ${cpe.getClass().getSimpleName()}"
                 }
 
-                // STEP 5: Physical Design uzerinden dene
+                // STEP 5: Try through the physical design
                 println "  --- Physical Design ---"
                 try {
                     MapPhysicalDesign design = mapping.getPhysicalDesign(0)
@@ -139,7 +139,7 @@ try {
                     println "  Physical design error type: ${pde.getClass().getSimpleName()}"
                 }
 
-                // STEP 6: setJoinType dene (tum varyantlar)
+                // STEP 6: Try setJoinType (every variant)
                 boolean fixed = false
 
                 // 6a: Enum.valueOf reflection
@@ -153,7 +153,7 @@ try {
                     println "  6a enum reflection error type: ${e1.getClass().getSimpleName()}"
                 }
 
-                // 6b: getDeclaredClasses ile inner enum bulma
+                // 6b: find the inner enum with getDeclaredClasses
                 if (!fixed) {
                     try {
                         joinComp.getClass().getDeclaredClasses().each { inner ->
@@ -188,7 +188,7 @@ try {
 
     txnMgr.commit(txnStatus)
     println "\n=========================================="
-    println "DONE: ${fixCount} join(s) guncellendi."
+    println "DONE: ${fixCount} join(s) updated."
 
 } catch (Exception e) {
     if (txnStatus != null && !txnStatus.isCompleted()) try { txnMgr.rollback(txnStatus) } catch (ig) {}

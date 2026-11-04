@@ -1,10 +1,10 @@
 /*
   ODI Scenario Runner (Standalone Groovy SDK)
   ============================================
-  Mevcut bir ODI senaryosunu calistirir.
-  Standalone modda internal agent kullanir.
+  Runs an existing ODI scenario.
+  Uses the internal agent in standalone mode.
 
-  Parametreler:
+  Parameters:
     -Dodi.scenario.name=MAP_CUSTOMER_PHYSICAL
     -Dodi.scenario.version=001
     -Dodi.context=GLOBAL
@@ -23,7 +23,7 @@ import oracle.odi.core.persistence.transaction.ITransactionDefinition
 import oracle.odi.core.persistence.transaction.ITransactionStatus
 import oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition
 
-// ── OdiInstance Baglantisi ──────────────────────────────────────────────
+// ── OdiInstance connection ──────────────────────────────────────────────
 def odi = null
 boolean standaloneMode = false
 String runtimeUser = null
@@ -31,10 +31,10 @@ char[] runtimePassword = null
 
 try {
     odi = odiInstance
-    println "INFO: ODI Studio baglantisi kullaniliyor."
+    println "INFO: Using the ODI Studio connection."
 } catch (MissingPropertyException e) {
     standaloneMode = true
-    println "INFO: Standalone mod — repository baglantisi kuruluyor..."
+    println "INFO: Standalone mode — opening repository connection..."
 
     String propsPath = args.length > 0 ? args[0] : "odi_connection.properties"
     Properties props = new Properties()
@@ -62,17 +62,17 @@ try {
     runtimeUser = props.getProperty("odi_username")
     runtimePassword = props.getProperty("odi_password").toCharArray()
     odi.getSecurityManager().setCurrentThreadAuthentication(auth)
-    println "INFO: Repository baglantisi basarili."
+    println "INFO: Repository connection succeeded."
 }
 
-// ── Parametreleri Al ────────────────────────────────────────────────────
+// ── Read parameters ─────────────────────────────────────────────────────
 String scenarioName = System.getProperty("odi.scenario.name")
 String version      = System.getProperty("odi.scenario.version", "001")
 String contextCode  = System.getProperty("odi.context", "GLOBAL")
 
 println "PARAMS: scenario=${scenarioName}, version=${version}, context=${contextCode}"
 
-// ── Senaryoyu Bul ve Calistir ─────────────────────────────────────────
+// ── Find and run the scenario ──────────────────────────────────────────
 ITransactionManager txnMgr = odi.getTransactionManager()
 ITransactionDefinition txnDef = new DefaultTransactionDefinition()
 ITransactionStatus txnStatus = txnMgr.getTransaction(txnDef)
@@ -85,15 +85,15 @@ try {
     if (scenario == null) {
         throw new Exception("Scenario not found: " + scenarioName)
     }
-    println "STEP 1: Senaryo bulundu: ${scenario.getName()} v${scenario.getVersion()} (ID=${scenario.getInternalId()})"
-    txnMgr.rollback(txnStatus) // read-only, sadece senaryo varligini dogruladik
+    println "STEP 1: Scenario found: ${scenario.getName()} v${scenario.getVersion()} (ID=${scenario.getInternalId()})"
+    txnMgr.rollback(txnStatus) // read-only; we only verified that the scenario exists
 
-    // ── Standalone modda OdiStartScenario ile calistir ──────────────
-    // ODI SDK'da dogrudan senaryo calistirma:
-    // oracle.odi.runtime.agent.invocation paketi internal agent icin kullanilir
-    // Standalone modda en guvenilir yol: OdiStartScenario (StartScen) sinifi
+    // ── Run with OdiStartScenario in standalone mode ────────────────
+    // Direct scenario execution in the ODI SDK:
+    // the oracle.odi.runtime.agent.invocation package is used for the internal agent
+    // Most reliable path in standalone mode: the OdiStartScenario (StartScen) class
 
-    println "STEP 2: Senaryo calistiriliyor..."
+    println "STEP 2: Running scenario..."
 
     if (standaloneMode && (!runtimeUser || runtimePassword == null)) {
         throw new Exception("RuntimeAgent credentials are missing in the local ODI properties file")
@@ -118,7 +118,7 @@ try {
             scenarioName, version, sp, null, contextCode, 5, null, true
         )
 
-        println "STEP 3: Senaryo tamamlandi (RuntimeAgent)."
+        println "STEP 3: Scenario finished (RuntimeAgent)."
         if (rtExecInfo != null) {
             println "  Session ID: ${rtExecInfo.getSessionId()}"
             println "  Status: ${rtExecInfo.getSessionStatus()}"
@@ -127,7 +127,7 @@ try {
                 throw new Exception("Scenario finished with non-DONE status: ${status}")
             }
         }
-        println "SUCCESS: Senaryo basariyla calistirildi."
+        println "SUCCESS: Scenario ran successfully."
     } catch (Exception rtEx) {
         throw new Exception("RuntimeAgent scenario execution failed: " + rtEx.getMessage(), rtEx)
     }
@@ -139,6 +139,6 @@ try {
 } finally {
     if (standaloneMode && odi != null) {
         odi.close()
-        println "INFO: Repository baglantisi kapatildi."
+        println "INFO: Repository connection closed."
     }
 }

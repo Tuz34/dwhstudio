@@ -44,7 +44,7 @@ try {
     OdiFolder folder = project.getFolders().find { it.getName().equalsIgnoreCase(fName) }
     def mapFinder = (IMappingFinder) em.getFinder(Mapping.class)
     Mapping mapping = mapFinder.findByName(folder, mName)
-    if (mapping == null) { println "HATA: Mapping bulunamadi: ${mName}"; System.exit(1) }
+    if (mapping == null) { println "HATA: Mapping not found: ${mName}"; System.exit(1) }
     println "✔ Mapping: ${mapping.getName()}"
 
     println "=== LOGICAL COMPONENTS ==="
@@ -70,8 +70,8 @@ try {
             println "    isTargetNode : " + node.isTargetNode()
             println "    Technology   : " + node.getExecutionTechnology()?.getName()
             println "    Location     : " + node.getLocation()?.getName()
-            println "    IKM          : " + (node.getIKM()?.getName() ?: "YOK")
-            println "    LKM          : " + (node.getLKM()?.getName() ?: "YOK")
+            println "    IKM          : " + (node.getIKM()?.getName() ?: "NONE")
+            println "    LKM          : " + (node.getLKM()?.getName() ?: "NONE")
             
             node.getNodeAttributes().each { attr ->
                 println "      - Attr: ${attr.getName()} | Ins=${attr.isInsertIndicator()} Upd=${attr.isUpdateIndicator()} | Expr: ${attr.getExpression()?.getText()?.take(40)}"

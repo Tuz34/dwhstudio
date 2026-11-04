@@ -77,11 +77,11 @@ def api_local_analyst_summarize():
             "role": "system",
             "content": (
                 "You are a concise local code analyst. Summarize the provided text "
-                "as Turkish bullet points focused on actions. Use only these headings: "
-                "Ozet, Riskler, Sonraki Adimlar."
+                "as English bullet points focused on actions. Use only these headings: "
+                "Summary, Risks, Next Steps."
             ),
         },
-        {"role": "user", "content": f"Baslik: {title}\n\nMetin:\n{content}"},
+        {"role": "user", "content": f"Title: {title}\n\nText:\n{content}"},
     ]
 
     import ai_agent

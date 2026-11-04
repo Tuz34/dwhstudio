@@ -13,7 +13,7 @@ def _create_mapping_lkm_block() -> str:
 
 def _update_mapping_lkm_block() -> str:
     text = (PROJECT_ROOT / "odi_automation" / "update_mapping.groovy").read_text(encoding="utf-8")
-    start = text.index("// LKM degistir")
+    start = text.index("// Change the LKM")
     end = text.index("break", start)
     return text[start:end]
 

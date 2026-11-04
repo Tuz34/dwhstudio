@@ -3259,7 +3259,7 @@ class TestGeneralUtilityWriteEndpoints:
                 return False
 
         def fake_send_file(buf, *, mimetype, as_attachment, download_name):
-            calls.append(("send_file", mimetype, as_attachment, download_name.startswith("rapor_")))
+            calls.append(("send_file", mimetype, as_attachment, download_name.startswith("report_")))
             return app_module.app.response_class(
                 response=b"exported",
                 status=200,
@@ -3282,7 +3282,7 @@ class TestGeneralUtilityWriteEndpoints:
         assert calls == [
             ("dataframe", [[1]], ["COL_A"]),
             ("enter_writer", "openpyxl"),
-            ("to_excel", "openpyxl", False, "Rapor"),
+            ("to_excel", "openpyxl", False, "Report"),
             ("exit_writer", "openpyxl"),
             (
                 "send_file",
@@ -4496,8 +4496,8 @@ class TestDisabledIntegrationEndpoints:
 
             assert resp.status_code == 410
             body = resp.get_json()
-            assert body["error"] == "Git/Gitea devre disi."
-            assert "yedekleme kullanilmiyor" in body["reason"]
+            assert body["error"] == "Git/Gitea is disabled."
+            assert "backup is not used" in body["reason"]
 
 
 class TestAiToolsEndpoint:

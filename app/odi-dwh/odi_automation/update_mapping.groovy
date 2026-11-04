@@ -1,31 +1,31 @@
 /*
   NL-DWH Studio: Surgeon Mapping Update (ODI SDK)
   ================================================
-  Mevcut bir mapping'i YIKIP YENIDEN YARATMADAN cerrah gibi gunceller.
-  Mapping OID, versiyon gecmisi, senaryo baglantisi KORUNUR.
+  Updates an existing mapping surgically, without dropping and recreating it.
+  The mapping OID, version history, and scenario link are preserved.
 
-  Dispatcher: odi.operation parametresine gore ilgili cerrah blogu calisir.
+  Dispatcher: runs the surgical block selected by the odi.operation parameter.
 
-  Desteklenen operasyonlar:
-    update_expression — Belirli target attribute expression'larini degistirir
-    update_filter     — Filter component ekler/gunceller/siler
-    update_km         — IKM/LKM degistirir (physical design)
-    rename            — Mapping adini degistirir
+  Supported operations:
+    update_expression — changes selected target attribute expressions
+    update_filter     — adds, updates, or removes a filter component
+    update_km         — changes the IKM/LKM (physical design)
+    rename            — changes the mapping name
 
-  Ortak parametreler:
+  Shared parameters:
     -Dodi.project=TUTORIOL
     -Dodi.folder=First Folder
     -Dodi.mapping=MAP_PRODUCTION_PRODUCT_TO_ODS
     -Dodi.operation=update_expression
 
-  Operasyona ozel parametreler:
+  Operation-specific parameters:
     update_expression:
       -Dodi.expressions=NAMEE=Product.Name;UPDATE_DATE=SYSDATE
 
     update_filter:
       -Dodi.filter_action=add|modify|remove
       -Dodi.filter_condition=SRC.STATUS = 'ACTIVE'
-      -Dodi.filter_name=FLT_Product  (modify/remove icin)
+      -Dodi.filter_name=FLT_Product  (for modify/remove)
 
     update_km:
       -Dodi.ikm_name=IKM Oracle Merge
@@ -52,7 +52,7 @@ import oracle.odi.core.OdiInstance
 import oracle.odi.core.security.Authentication
 import oracle.odi.core.persistence.transaction.*
 
-// ── BAGLANTI ────────────────────────────────────────────────────────────────
+// ── CONNECTION ──────────────────────────────────────────────────────────────
 def odi = null
 boolean standaloneMode = false
 try {
@@ -82,7 +82,7 @@ ITransactionStatus txnStatus = txnMgr.getTransaction(new oracle.odi.core.persist
 try {
     def em = odi.getTransactionalEntityManager()
 
-    // ── PARAMETRELER ────────────────────────────────────────────────────────
+    // ── PARAMETERS ──────────────────────────────────────────────────────────
     String pCode     = System.getProperty("odi.project") ?: "TUTORIOL"
     String fName     = System.getProperty("odi.folder")  ?: "First Folder"
     String mName     = System.getProperty("odi.mapping")
@@ -90,7 +90,7 @@ try {
 
     if (!mName) throw new Exception("MISSING PARAM: odi.mapping")
 
-    // ── PROJE / FOLDER / MAPPING BUL ────────────────────────────────────────
+    // ── FIND PROJECT / FOLDER / MAPPING ─────────────────────────────────────
     IOdiProjectFinder projFinder = (IOdiProjectFinder) em.getFinder(OdiProject.class)
     OdiProject project = projFinder.findAll().find { it.getCode().equalsIgnoreCase(pCode) }
     if (project == null) throw new Exception("Project not found: " + pCode)
@@ -104,25 +104,25 @@ try {
 
     println "SURGEON: Found mapping '${mName}', operation=${operation}"
 
-    // ── YARDIMCI: Tum DatastoreComponent'leri bul ───────────────────────────
-    // Target: output connector'u olmayan (veri akisinin son noktasi)
-    // Source: output connector'u olan (veri akisinin baslangici)
+    // ── HELPER: find every DatastoreComponent ───────────────────────────────
+    // Target: has no output connector (end of the data flow)
+    // Source: has an output connector (start of the data flow)
     DatastoreComponent tgtComp = null
     DatastoreComponent srcComp = null
     DatastoreComponent joinSrcComp = null
     List<DatastoreComponent> allDsComps = []
 
-    // Ilk gecis: tum DatastoreComponent'leri topla
+    // First pass: collect every DatastoreComponent
     mapping.getAllComponents().each { comp ->
         if (comp instanceof DatastoreComponent) {
             allDsComps.add(comp)
         }
     }
 
-    // Ikinci gecis: target'i tespit et
-    // Target, upstream'den veri alan (expression'lari SET edilmis) component'tir.
-    // Yontem: getUpstreamConnectedLeafComponents() bos olmayan = bir yerden veri alıyor = TARGET
-    // Veya: attribute'larda expression SET edilmis olan = TARGET
+    // Second pass: identify the target
+    // The target is the component that receives data from upstream (expressions are SET).
+    // Method: getUpstreamConnectedLeafComponents() non-empty = receives data from somewhere = TARGET
+    // Or: an attribute with an expression SET = TARGET
     allDsComps.each { comp ->
         boolean hasUpstream = false
         try {
@@ -132,10 +132,10 @@ try {
                 }
             }
         } catch (Exception e) {
-            // Fallback: attribute expression kontrolu
+            // Fallback: check the attribute expression
         }
 
-        // Fallback: expression iceren attribute var mi?
+        // Fallback: is there an attribute that contains an expression?
         if (!hasUpstream) {
             comp.getAttributes().each { attr ->
                 String expr = attr.getExpression()?.getText()
@@ -158,7 +158,7 @@ try {
     boolean changed = false
 
     // ════════════════════════════════════════════════════════════════════════
-    // OPERASYON DISPATCHER
+    // OPERATION DISPATCHER
     // ════════════════════════════════════════════════════════════════════════
 
     switch (operation) {
@@ -171,14 +171,14 @@ try {
         }
         if (tgtComp == null) throw new Exception("Target component not found in mapping")
 
-        // Expression'lari parse et
+        // Parse the expressions
         Map<String, String> updates = [:]
         expressionsStr.split(";").each { pair ->
             int eq = pair.indexOf("=")
             if (eq > 0) {
                 String key = pair.substring(0, eq).trim().toUpperCase()
                 String val = pair.substring(eq + 1).trim()
-                // SRC. ve JOIN. prefix'lerini gercek component adlariyla degistir
+                // Replace SRC. and JOIN. prefixes with the real component names
                 if (srcComp != null) {
                     val = val.replaceAll("(?i)SRC\\.", srcComp.getName() + ".")
                 }
@@ -191,12 +191,12 @@ try {
 
         if (updates.isEmpty()) throw new Exception("No valid expressions parsed from: ${expressionsStr}")
 
-        // Her expression icin target attribute'u bul ve guncelle
+        // Find the target attribute for each expression and update it
         int updateCount = 0
         updates.each { colName, newExpr ->
             def tAttr = tgtComp.getAttributes().find { it.getName().equalsIgnoreCase(colName) }
             if (tAttr == null) {
-                // Mevcut kolonlari listele — hata mesajinda yardimci olsun
+                // List the existing columns — include them in the error message
                 def available = tgtComp.getAttributes().collect { it.getName() }.join(", ")
                 throw new Exception("Target attribute not found: ${colName}. Available: ${available}")
             }
@@ -224,11 +224,11 @@ try {
             }
             if (srcComp == null) throw new Exception("Source component not found in mapping")
 
-            // SRC. prefix'ini cozumle
+            // Resolve the SRC. prefix
             String resolvedCond = filterCondition.replaceAll("(?i)SRC\\.", srcComp.getName() + ".")
 
-            // Kaynagin mevcut downstream baglantisini bul
-            // srcComp'un output connector point'i → connected input
+            // Find the source's current downstream connection
+            // srcComp output connector point → connected input
             def srcOutCPs = srcComp.getOutputConnectorPoints()
             def existingDownstream = null
             srcOutCPs.each { outCP ->
@@ -237,29 +237,29 @@ try {
                 }
             }
 
-            // Yeni filter olustur
+            // Create the new filter
             String fltName = filterName ?: ("FLT_" + srcComp.getName())
             FilterComponent filterComp = new FilterComponent(mapping, fltName)
             filterComp.setFilterCondition(resolvedCond)
 
-            // Mevcut akisi kes ve filtre araya ekle
-            // ODI 12c'de mevcut baglanti varsa once hedefi kopar, filter ekle, yeniden bagla
+            // Cut the current flow and insert the filter
+            // On ODI 12c, when a connection already exists, disconnect the target first, add the filter, then reconnect
             def downstream = existingDownstream ?: tgtComp
             if (downstream != null) {
                 try {
-                    // Yontem 1: Dogrudan baglanti (mevcut baglanti yoksa veya override destekliyorsa)
+                    // Method 1: direct connection (when no connection exists, or when override is supported)
                     srcComp.connectTo(filterComp)
                     filterComp.connectTo(downstream)
                 } catch (Exception connEx) {
-                    // Yontem 2: Mevcut downstream'i kopar, filter araya ekle
+                    // Method 2: disconnect the current downstream and insert the filter
                     try {
                         mapping.removeComponent(downstream)
                         srcComp.connectTo(filterComp)
-                        // Downstream'i yeniden ekle (ayni datastore ile)
+                        // Add the downstream again (with the same datastore)
                         def dsStore = (downstream instanceof DatastoreComponent) ? ((DatastoreComponent)downstream).getBoundDataStore() : tgtComp?.getBoundDataStore()
                         DatastoreComponent newDown = new DatastoreComponent(mapping, dsStore)
                         filterComp.connectTo(newDown)
-                        // Attribute expression'lari yeniden kur (auto-map by name)
+                        // Rebuild attribute expressions (auto-map by name)
                         newDown.getAttributes().each { tAttr ->
                             def sAttr = srcComp.getAttributes().find { it.getName().equalsIgnoreCase(tAttr.getName()) }
                             if (sAttr != null) {
@@ -289,7 +289,7 @@ try {
                 throw new Exception("MISSING PARAM: odi.filter_condition (for filter modify)")
             }
 
-            // Mevcut FilterComponent'i bul
+            // Find the existing FilterComponent
             FilterComponent existingFilter = null
             mapping.getAllComponents().each { comp ->
                 if (comp instanceof FilterComponent) {
@@ -302,7 +302,7 @@ try {
                 throw new Exception("Filter component not found" + (filterName ? ": ${filterName}" : " in mapping"))
             }
 
-            // SRC. prefix cozumle
+            // Resolve the SRC. prefix
             String resolvedModCond = filterCondition
             if (srcComp != null) {
                 resolvedModCond = filterCondition.replaceAll("(?i)SRC\\.", srcComp.getName() + ".")
@@ -315,7 +315,7 @@ try {
             break
 
         case "remove":
-            // Mevcut FilterComponent'i bul
+            // Find the existing FilterComponent
             FilterComponent removeFilter = null
             mapping.getAllComponents().each { comp ->
                 if (comp instanceof FilterComponent) {
@@ -328,14 +328,14 @@ try {
                 throw new Exception("Filter component not found" + (filterName ? ": ${filterName}" : " in mapping"))
             }
 
-            // Filter kaldirilmadan ONCE: tum DatastoreComponent'leri topla ve source/target tespit et
+            // BEFORE removing the filter: collect every DatastoreComponent and identify source/target
             String removedFilterName = removeFilter.getName() ?: "unknown"
             List<DatastoreComponent> dsComps = []
             mapping.getAllComponents().each { comp ->
                 if (comp instanceof DatastoreComponent) dsComps.add(comp)
             }
 
-            // Source/target tespiti: upstream baglantisi OLAN = target, OLMAYAN = source
+            // Source/target detection: HAS an upstream connection = target, DOES NOT = source
             DatastoreComponent removeSrc = null
             DatastoreComponent removeTgt = null
             dsComps.each { comp ->
@@ -346,7 +346,7 @@ try {
                     }
                 } catch (Exception ignore) {}
                 if (!hasUpstream) {
-                    // Fallback: attribute expression kontrolu
+                    // Fallback: check the attribute expression
                     comp.getAttributes().each { attr ->
                         String expr = attr.getExpression()?.getText()
                         if (expr != null && expr.trim().length() > 0 && expr.contains(".")) hasUpstream = true
@@ -356,28 +356,28 @@ try {
                 else if (removeSrc == null) removeSrc = comp
             }
 
-            // Hedef tablo bilgilerini ONCE kaydet (flow rebuild ihtimali icin)
+            // Save the target table information FIRST (in case the flow is rebuilt)
             def tgtDataStore = removeTgt?.getBoundDataStore()
             String tgtName = removeTgt?.getName() ?: "TARGET"
 
-            // Filter'i kaldir
+            // Remove the filter
             mapping.removeComponent(removeFilter)
             println "FILTER COMPONENT REMOVED: ${removedFilterName}"
 
-            // Source ve target'i dogrudan bagla
+            // Connect the source and target directly
             if (removeSrc != null && removeTgt != null) {
                 try {
                     removeSrc.connectTo(removeTgt)
                     println "RECONNECTED: ${removeSrc.getName()} → ${removeTgt.getName()}"
                 } catch (Exception connEx) {
-                    // connectTo basarisiz — target'in connector state'i bozuk olabilir (flow rebuild sonrasi)
-                    // Cozum: target'i kaldir, yeniden olustur, expression'lari auto-map et
+                    // connectTo failed — the target connector state may be corrupt (after a flow rebuild)
+                    // Fix: remove the target, create it again, and auto-map the expressions
                     println "WARNING: Direct reconnect failed (${connEx.getClass().getSimpleName()}), rebuilding target..."
                     try {
                         mapping.removeComponent(removeTgt)
                         DatastoreComponent newTgt = new DatastoreComponent(mapping, tgtDataStore)
                         removeSrc.connectTo(newTgt)
-                        // Attribute expression'lari yeniden kur (auto-map by name)
+                        // Rebuild attribute expressions (auto-map by name)
                         newTgt.getAttributes().each { tAttr ->
                             def sAttr = removeSrc.getAttributes().find { it.getName().equalsIgnoreCase(tAttr.getName()) }
                             if (sAttr != null) {
@@ -446,7 +446,7 @@ try {
         // Physical design
         MapPhysicalDesign design = mapping.getPhysicalDesign(0)
 
-        // Target node ve AP node bul (create_mapping.groovy pattern)
+        // Find the target node and the AP node (create_mapping.groovy pattern)
         MapPhysicalNode tgtNode = null
         MapPhysicalNode apNode = null
         design.getPhysicalNodes().each { node ->
@@ -464,14 +464,14 @@ try {
         }
 
         if (tgtNode == null) {
-            // Fallback: ilk physical node'u dene
+            // Fallback: try the first physical node
             def nodes = design.getPhysicalNodes()
             if (nodes.size() > 0) tgtNode = nodes[0]
         }
 
         if (tgtNode == null) throw new Exception("Physical target node not found in mapping design")
 
-        // IKM degistir — tum node'larda dene (ODI-16171 uyumlulugundan)
+        // Change the IKM — try every node (because of ODI-16171 compatibility)
         if (ikmNameParam != null && ikmNameParam.trim().length() > 0) {
             IOdiIKMFinder ikmFinder = (IOdiIKMFinder) em.getFinder(OdiIKM.class)
             def allIkms = ikmFinder.findAll()
@@ -481,7 +481,7 @@ try {
                 throw new Exception("IKM not found: ${ikmNameParam}. Available Oracle IKMs: ${available}")
             }
             boolean ikmSet = false
-            // Tum physical node'larda dene (farkli node'lar farkli KM uyumluluguna sahip olabilir)
+            // Try every physical node (different nodes may accept different KMs)
             design.getPhysicalNodes().each { node ->
                 if (!ikmSet) {
                     try {
@@ -506,7 +506,7 @@ try {
             }
         }
 
-        // LKM degistir
+        // Change the LKM
         // Earlier guard: !ikmNameParam && !lkmNameParam && !truncateTargetTableParam is invalid.
         if (setIkmOptionIfRequested(tgtNode, "TRUNCATE_TARGET_TABLE", truncateTargetTableParam)) {
             changed = true

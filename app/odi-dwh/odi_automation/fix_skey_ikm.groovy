@@ -1,9 +1,9 @@
 /*
-  SKEY Mapping IKM ve UpdateKey Duzeltici
-  Hedef: MAP_SKEY_* mapping'lerinde
-    1. Target DatastoreComponent'in UpdateKey'ini dogrula/set et
-    2. Physical target node'una IKM Oracle Incremental Update (MERGE) set et
-    3. Source AP node'una IKM yerine LKM ata (AP her zaman LKM alir)
+  SKEY mapping IKM and UpdateKey repair
+  Goal: in MAP_SKEY_* mappings
+    1. Verify or set the target DatastoreComponent UpdateKey
+    2. Set IKM Oracle Incremental Update (MERGE) on the physical target node
+    3. Assign an LKM instead of an IKM on the source AP node (an AP always takes an LKM)
 */
 import oracle.odi.domain.mapping.*
 import oracle.odi.domain.mapping.component.*
@@ -47,16 +47,16 @@ try {
     String mName  = System.getProperty("odi.mapping") ?: "MAP_SKEY_SALES_CUSTOMER"
     String ikmTarget = System.getProperty("odi.ikm_name") ?: "IKM Oracle Incremental Update (MERGE)"
 
-    // Proje / Folder / Mapping bul
+    // Find the project, folder, and mapping
     IOdiProjectFinder projFinder = (IOdiProjectFinder) em.getFinder(OdiProject.class)
     OdiProject project = projFinder.findAll().find { it.getCode().equalsIgnoreCase(pCode) }
     OdiFolder folder = project.getFolders().find { it.getName().equalsIgnoreCase(fName) }
     def mapFinder = (IMappingFinder) em.getFinder(Mapping.class)
     Mapping mapping = mapFinder.findByName(folder, mName)
-    if (mapping == null) { println "HATA: Mapping bulunamadi: ${mName}"; System.exit(1) }
-    println "✔ Mapping bulundu: ${mName}"
+    if (mapping == null) { println "HATA: Mapping not found: ${mName}"; System.exit(1) }
+    println "✔ Mapping found: ${mName}"
 
-    // Target DatastoreComponent bul (UpdateKey atanmis olan)
+    // Find the target DatastoreComponent (the one with an UpdateKey assigned)
     DatastoreComponent tgtDsComp = null
     DatastoreComponent srcDsComp = null
     mapping.getAllComponents().each { comp ->
@@ -70,26 +70,26 @@ try {
     }
 
     if (tgtDsComp == null) {
-        println "UYARI: UpdateKey atanmis target component bulunamadi — kayit yok?"
+        println "WARNING: No target component with an UpdateKey assigned — is there no record?"
     } else {
         println "✔ Target component: ${tgtDsComp.getName()} (UpdateKey: ${tgtDsComp.getUpdateKey().getName()})"
     }
 
-    // IKM bul
+    // Find the IKM
     IOdiIKMFinder ikmFinder = (IOdiIKMFinder) em.getFinder(oracle.odi.domain.project.OdiIKM.class)
     def allIkms = ikmFinder.findAll()
     oracle.odi.domain.project.OdiIKM targetIkm = allIkms.find { it.getName().equalsIgnoreCase(ikmTarget) }
     if (targetIkm == null) {
-        println "HATA: IKM bulunamadi: ${ikmTarget}"
-        println "Mevcut IKM'ler: " + allIkms.collect { it.getName() }.join(", ")
+        println "HATA: IKM not found: ${ikmTarget}"
+        println "Existing IKMs: " + allIkms.collect { it.getName() }.join(", ")
         System.exit(1)
     }
-    println "✔ IKM bulundu: ${targetIkm.getName()}"
+    println "✔ IKM found: ${targetIkm.getName()}"
 
-    // Physical nodes — target ve AP node tespit
+    // Physical nodes — identify the target and AP nodes
     def physDesigns = mapping.getPhysicalDesigns()
     if (!physDesigns || physDesigns.size() == 0) {
-        println "HATA: Physical design yok"
+        println "HATA: Physical design is missing"
         System.exit(1)
     }
     MapPhysicalDesign design = physDesigns.get(0)
@@ -109,30 +109,30 @@ try {
         if (isStg) stagingNode = node
     }
 
-    // Staging'i Target Location'a tasimayı dene
+    // Try to move staging to the target location
     if (stagingNode != null && tgtNode != null) {
-        println "\nStaging location duzeltiliyor..."
+        println "\nCorrecting staging location..."
         try {
-            // Staging node'un location'i al (target ile ayni olmali)
+            // Read the staging node's location (it should match the target)
             def tgtLocation = tgtNode.getLocation()
             if (tgtLocation != null) {
-                // Design seviyesinde staging location'i degistir — birden fazla yontem dene
+                // Change the staging location at design level — try more than one method
                 try {
                     design.setStagingLocation(tgtLocation)
-                    println "  ✔ design.setStagingLocation() basarili: ${tgtLocation.getName()}"
+                    println "  ✔ design.setStagingLocation() succeeded: ${tgtLocation.getName()}"
                 } catch (Exception se1) {
                     try {
                         design.setStagingLocationName(tgtLocation.getName())
-                        println "  ✔ design.setStagingLocationName() basarili: ${tgtLocation.getName()}"
+                        println "  ✔ design.setStagingLocationName() succeeded: ${tgtLocation.getName()}"
                     } catch (Exception se2) {
                         println "  Staging update error type: ${se2.getClass().getSimpleName()}"
                     }
                 }
                 em.persist(mapping)
-                // Simdi target node'a IKM atamayı tekrar dene
+                // Now try assigning the IKM to the target node again
                 try {
                     tgtNode.setIKM(targetIkm)
-                    println "  ✔ IKM staging fix sonrasi atandi: ${targetIkm.getName()}"
+                    println "  ✔ IKM assigned after the staging fix: ${targetIkm.getName()}"
                     ikmSet = true
                 } catch (Exception e2) {
                     println "  IKM assignment error type: ${e2.getClass().getSimpleName()}"
@@ -144,12 +144,12 @@ try {
     }
 
     if (!ikmSet && tgtNode != null) {
-        // Son deneme: CUSTOMER_AP node'u (bazen IKM buraya atanir)
+        // Last attempt: the CUSTOMER_AP node (the IKM is sometimes assigned here)
         design.getPhysicalNodes().each { node ->
             if (!ikmSet && node.getName().toUpperCase().endsWith("_AP")) {
                 try {
                     node.setIKM(targetIkm)
-                    println "✔ IKM AP node'a atandi: ${node.getName()} ← ${targetIkm.getName()}"
+                    println "✔ IKM assigned to AP node: ${node.getName()} ← ${targetIkm.getName()}"
                     ikmSet = true
                 } catch (Exception e3) {
                     println "AP node assignment error type: ${e3.getClass().getSimpleName()}"
@@ -161,11 +161,11 @@ try {
     if (ikmSet) {
         em.persist(mapping)
         txnMgr.commit(txnStatus)
-        println "\n✔ SUCCESS: IKM ${targetIkm.getName()} basariyla target node'a atandi!"
-        println "  ODI Studio'da mapping'i kapatip yeniden acin — Physical sekmesinde gorulmeli."
+        println "\n✔ SUCCESS: IKM ${targetIkm.getName()} was assigned to the target node."
+        println "  Close and reopen the mapping in ODI Studio — it should appear on the Physical tab."
     } else {
         txnMgr.rollback(txnStatus)
-        println "\n✗ BASARISIZ: Target node bulunamadi veya IKM atanamadi!"
+        println "\n✗ FAILED: Target node was not found or the IKM could not be assigned."
     }
 
 } catch (Exception e) {
