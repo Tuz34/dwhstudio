@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from dim_product_odi_scd2_packaging_readiness import (
@@ -17,6 +18,9 @@ SCENARIO_CONTEXT = "GLOBAL"
 GENERATION_APPROVAL_SCOPE = "odi68_dim_product_odi_scd2_scenario_generation"
 RUN_APPROVAL_SCOPE = "odi68_dim_product_odi_scd2_scenario_run_and_rerun_proof"
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
+_UTC_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$"
+)
 
 
 def _base(status: str, *, scope: str) -> dict[str, Any]:
@@ -69,9 +73,13 @@ def _mapping_probe_matches(report: Mapping[str, Any]) -> bool:
             "lkm_assigned_count",
         }
         and mapping.get("name") == MAPPING_NAME
+        and type(mapping.get("source_component_count")) is int
         and mapping.get("source_component_count") == 1
+        and type(mapping.get("target_component_count")) is int
         and mapping.get("target_component_count") == 1
+        and type(mapping.get("target_attribute_count")) is int
         and mapping.get("target_attribute_count") == 26
+        and type(mapping.get("mapped_attribute_count")) is int
         and mapping.get("mapped_attribute_count") == 26
         and mapping.get("integration_type") == "SCD"
         and mapping.get("target_ikm") == TARGET_IKM
@@ -239,6 +247,8 @@ def _noop_candidate_matches(report: Mapping[str, Any]) -> bool:
     counts = {name: _count(report, name) for name in count_names}
     if (
         report.get("status") != "rerun_noop"
+        or report.get("connection_attempted") is not True
+        or report.get("write_attempted") is not False
         or report.get("raw_rows_included") is not False
         or report.get("pk_values_included") is not False
         or report.get("secret_printed") is not False
@@ -259,12 +269,32 @@ def _noop_candidate_matches(report: Mapping[str, Any]) -> bool:
     )
     return (
         all(counts[name] == 0 for name in zero_fields)
-        and counts["source_count"] == counts["target_count"]
-        and counts["source_count"] == counts["current_target_count"]
-        and counts["source_count"] == counts["unchanged_count"]
+        and counts["source_count"] == 72
+        and counts["target_count"] == 72
+        and counts["current_target_count"] == 72
+        and counts["unchanged_count"] == 72
         and counts["backup_exists"] == 1
         and counts["backup_column_count"] == 24
     )
+
+
+def _candidate_observed_within_call(
+    report: Mapping[str, Any], executor_started_at: object
+) -> bool:
+    """Accept only a UTC preflight timestamp captured after this executor began."""
+    if (
+        not isinstance(executor_started_at, datetime)
+        or executor_started_at.utcoffset() != timedelta(0)
+    ):
+        return False
+    observed_text = report.get("observed_at")
+    if not isinstance(observed_text, str) or not _UTC_TIMESTAMP_RE.fullmatch(observed_text):
+        return False
+    try:
+        observed_at = datetime.fromisoformat(observed_text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return executor_started_at <= observed_at <= datetime.now(timezone.utc)
 
 
 def build_dim_product_scd2_scenario_run_readiness(
@@ -275,16 +305,19 @@ def build_dim_product_scd2_scenario_run_readiness(
     scenario_generation_review_status: object,
     approved: object,
     approval_scope: object,
+    executor_started_at: datetime | None = None,
 ) -> dict[str, Any]:
-    """Gate a future two-run no-op proof without providing a runner."""
+    """Gate a two-run no-op proof using only fresh count and metadata evidence."""
     if scenario_generation_review_status != "approved":
         return _base("blocked_scenario_generation_review", scope=RUN_APPROVAL_SCOPE)
-    if not _mapping_probe_matches(mapping_probe):
+    if not isinstance(mapping_probe, Mapping) or not _mapping_probe_matches(mapping_probe):
         return _base("blocked_mapping_probe", scope=RUN_APPROVAL_SCOPE)
-    if not _scenario_probe_matches(scenario_probe, exists=True):
+    if not isinstance(scenario_probe, Mapping) or not _scenario_probe_matches(scenario_probe, exists=True):
         return _base("blocked_scenario_probe", scope=RUN_APPROVAL_SCOPE)
-    if not _noop_candidate_matches(candidate_preflight):
+    if not isinstance(candidate_preflight, Mapping) or not _noop_candidate_matches(candidate_preflight):
         return _base("blocked_candidate_preflight", scope=RUN_APPROVAL_SCOPE)
+    if not _candidate_observed_within_call(candidate_preflight, executor_started_at):
+        return _base("blocked_candidate_preflight_freshness", scope=RUN_APPROVAL_SCOPE)
     if approved is not True:
         return _base("blocked_until_exact_run_approval", scope=RUN_APPROVAL_SCOPE)
     if approval_scope != RUN_APPROVAL_SCOPE:
@@ -302,3 +335,58 @@ def build_dim_product_scd2_scenario_run_readiness(
             "request_fresh_exact_run_approval",
         ],
     }
+
+
+_PREFLIGHT_TO_GATE_RENAMES = {
+    "source_duplicate_groups": "source_duplicate_key_group_count",
+    "duplicate_product_sk_groups": "target_duplicate_surrogate_key_group_count",
+    "duplicate_current_natural_key_groups": "target_multiple_current_key_group_count",
+    "invalid_current_flags": "target_invalid_current_flag_count",
+    "invalid_effective_dates": "target_invalid_effective_range_count",
+    "insert_without_current_count": "insert_candidate_count",
+    "changed_current_count": "changed_candidate_count",
+    "unchanged_current_count": "unchanged_count",
+}
+_PREFLIGHT_PASSTHROUGH = (
+    "mode",
+    "status",
+    "requires_user_approval_for_persistent_action",
+    "connection_attempted",
+    "will_execute",
+    "write_attempted",
+    "raw_rows_included",
+    "pk_values_included",
+    "secret_printed",
+    "source_count",
+    "target_count",
+    "current_target_count",
+    "source_missing_current_count",
+    "candidate_count",
+    "backup_exists",
+    "backup_column_count",
+    "backup_row_count",
+)
+
+
+def candidate_preflight_to_gate_report(
+    report: Mapping[str, Any], observed_at: datetime
+) -> dict[str, Any]:
+    """Map real candidate-preflight output to the run-readiness/backup gate contract.
+
+    Renames the preflight's evidence keys to the gate's names, drops every other
+    key, and stamps ``observed_at`` (UTC ISO string). Keys absent from the
+    preflight stay absent so the gates reject the report instead of guessing.
+    A non-mapping input or a naive/non-UTC timestamp yields an empty report.
+    """
+    if not isinstance(report, Mapping) or not isinstance(observed_at, datetime):
+        return {}
+    if observed_at.utcoffset() != timedelta(0):
+        return {}
+    out: dict[str, Any] = {
+        name: report[name] for name in _PREFLIGHT_PASSTHROUGH if name in report
+    }
+    for source, target in _PREFLIGHT_TO_GATE_RENAMES.items():
+        if source in report:
+            out[target] = report[source]
+    out["observed_at"] = observed_at.astimezone(timezone.utc).isoformat()
+    return out
