@@ -437,6 +437,19 @@ def test_unrelated_scenario_name_collision_stops_before_ddl(plan):
     assert orchestrator.order == ["scd2_probe.groovy"] and ddl_log == []
 
 
+def test_generate_probes_the_planned_scenario_version(plan, monkeypatch):
+    # Use a non-default version to catch a hardcoded 001 in the transport.
+    plan = {**plan, "scenario_version": "007"}
+    monkeypatch.setattr(scd2_service, "_build_plan", lambda *a, **kw: (plan, "test", None))
+    orchestrator = FakeOrchestrator(plan)
+    payload, status = scd2_service.generate(
+        REQUEST, make_services(orchestrator, ddl_handler=ddl_handler(plan)), approved=True
+    )
+    assert status == 200 and payload["status"] == "generated"
+    assert orchestrator.calls[0][3]["odi.scd2.scenario_version"] == "007"
+    assert [c[1]["version"] for c in orchestrator.calls if c[0] == "scenario_generate"] == ["007"]
+
+
 @pytest.mark.parametrize(
     "mutate, code",
     [
@@ -446,6 +459,10 @@ def test_unrelated_scenario_name_collision_stops_before_ddl(plan):
         (lambda r: r["target_columns"][2].update(data_format="NUMBER(8,2)", type_code="NUMBER", length=8, scale=2, length_semantics=None), "datastore_columns"),
         (lambda r: r["target_columns"][2].update(data_format="VARCHAR2(99 BYTE)", length=99), "datastore_columns"),
         (lambda r: r["target_columns"][2].update(data_format="VARCHAR2(50 CHAR)", length_semantics="CHAR"), "datastore_columns"),
+        (lambda r: r["target_columns"][1].update(scale=2), "datastore_columns"),
+        (lambda r: r["target_columns"][1].update(length=None), "datastore_columns"),
+        (lambda r: r["target_columns"][0].update(length=10), "datastore_columns"),
+        (lambda r: r["target_columns"][0].update(scale=0), "datastore_columns"),
         (lambda r: r.update(target_primary_key=["CUST_ID"]), "datastore_keys"),
         (lambda r: r.update(target_alternate_key=[]), "datastore_keys"),
         (lambda r: r["mapping"].update(source_tables=["OTHER_TABLE"]), "mapping_source"),

@@ -29,6 +29,7 @@ import oracle.odi.domain.project.finder.IOdiIKMFinder
 import oracle.odi.domain.project.finder.IOdiLKMFinder
 import oracle.odi.domain.project.finder.IOdiProjectFinder
 import oracle.odi.domain.runtime.scenario.OdiScenario
+import oracle.odi.domain.runtime.scenario.Tag
 import oracle.odi.domain.runtime.scenario.finder.IOdiScenarioFinder
 
 final String TOOL = "odi.scd2_probe"
@@ -104,6 +105,10 @@ try {
     String targetTable = requireProp("odi.scd2.target_table", ID)
     String mappingName = requireProp("odi.scd2.mapping", MAPPING_ID)
     String scenarioName = mappingName + "_SCN"
+    String scenarioVersion = System.getProperty("odi.scd2.scenario_version")
+    if (scenarioVersion != null && !(scenarioVersion ==~ /^[A-Za-z0-9._-]{1,12}$/)) {
+        throw new IllegalStateException("InvalidParameter")
+    }
     String projectCode = System.getProperty("odi.project")
     String folderName = System.getProperty("odi.folder")
     if (projectCode == null || folderName == null) {
@@ -141,11 +146,16 @@ try {
                 .collect { it.getVersion() }.findAll { it != null }.sort()
         }
         OdiScenario latestScenario = scenarioFinder.findLatestByName(scenarioName)
+        // A newer version owned by this mapping does not establish ownership of the requested version.
+        OdiScenario requestedScenario = scenarioVersion == null ? null :
+            scenarioFinder.findByTag(new Tag(scenarioName, scenarioVersion))
         boolean scenarioExists = !scenarioVersions.isEmpty() || latestScenario != null
-        boolean scenarioNameCollision = latestScenario != null && (
-            mapping == null || latestScenario.getSourceMappingId() == null ||
-            latestScenario.getSourceMappingId().toString() != mapping.getInternalId().toString()
-        )
+        boolean scenarioNameCollision = [latestScenario, requestedScenario].any { OdiScenario scenario ->
+            scenario != null && (
+                mapping == null || scenario.getSourceMappingId() == null ||
+                scenario.getSourceMappingId().toString() != mapping.getInternalId().toString()
+            )
+        }
 
         // Contract-relevant metadata of existing objects (identifiers and counts only).
         List<Map> targetColumns = []

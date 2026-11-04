@@ -182,13 +182,16 @@ def generate(
 
     probe_step = scd2_odi.probe(
         orchestrator,
-        scd2_builder.probe_params(
-            plan["source"]["owner"],
-            plan["source"]["table"],
-            plan["target"]["owner"],
-            plan["target"]["table"],
-            plan["mapping_name"],
-        ),
+        {
+            **scd2_builder.probe_params(
+                plan["source"]["owner"],
+                plan["source"]["table"],
+                plan["target"]["owner"],
+                plan["target"]["table"],
+                plan["mapping_name"],
+            ),
+            "odi.scd2.scenario_version": plan["scenario_version"],
+        },
     )
     steps.append(probe_step)
     if probe_step["status"] != "passed":

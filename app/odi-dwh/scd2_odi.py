@@ -298,9 +298,23 @@ def _column_matches(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> b
     parts = _TYPE_PARTS_RE.fullmatch(expected["data_format"])
     if parts is None or actual["type_code"] != parts.group(1):
         return False
-    if parts.group(2) is not None and actual["length"] != int(parts.group(2)):
+    precision = int(parts.group(2)) if parts.group(2) is not None else None
+    scale = int(parts.group(3)) if parts.group(3) is not None else None
+    if parts.group(1) == "NUMBER":
+        # ODI stores data_format independently of precision/scale. Bare NUMBER is
+        # unconstrained; NUMBER(p) defaults to scale zero, including SDK null scale.
+        expected_scale = (scale or 0) if precision is not None else None
+        actual_scale = (actual["scale"] or 0) if precision is not None else actual["scale"]
+        if actual["length"] != precision or actual_scale != expected_scale:
+            return False
+    elif parts.group(1) == "FLOAT":
+        expected_precision = precision if precision is not None else 126
+        actual_precision = actual["length"] if actual["length"] is not None else 126
+        if actual_precision != expected_precision or actual["scale"] is not None:
+            return False
+    elif precision is not None and actual["length"] != precision:
         return False
-    if parts.group(3) is not None and actual["scale"] != int(parts.group(3)):
+    elif scale is not None and actual["scale"] != scale:
         return False
     return actual["length_semantics"] == parts.group(4)
 

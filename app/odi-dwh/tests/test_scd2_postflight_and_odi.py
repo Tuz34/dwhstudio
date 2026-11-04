@@ -179,3 +179,42 @@ def test_probe_payload_helper_is_strictly_validated(plan):
     orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": broken})
     params = scd2_builder.probe_params("DWH", "ODS_CUSTOMERS", "DM", "DIM_CUSTOMER", "MAP_X")
     assert scd2_odi.probe(orchestrator, params)["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "data_format, length, scale, matches",
+    [
+        ("NUMBER", None, None, True),
+        ("NUMBER", 10, None, False),
+        ("NUMBER", None, 0, False),
+        ("NUMBER", None, 2, False),
+        ("NUMBER", 0, None, False),
+        ("NUMBER(10)", 10, None, True),
+        ("NUMBER(10)", 10, 0, True),
+        ("NUMBER(10)", 10, 2, False),
+        ("NUMBER(10)", None, None, False),
+        ("NUMBER(10)", 9, 0, False),
+        ("NUMBER(10,0)", 10, None, True),
+        ("NUMBER(10,0)", 10, 0, True),
+        ("NUMBER(10,2)", 10, 2, True),
+        ("NUMBER(10,2)", 10, None, False),
+        ("NUMBER(10,2)", 10, 0, False),
+        ("NUMBER(10,2)", 9, 2, False),
+        ("FLOAT", None, None, True),
+        ("FLOAT", 126, None, True),
+        ("FLOAT", 10, None, False),
+        ("FLOAT", 126, 0, False),
+        ("FLOAT(10)", 10, None, True),
+        ("FLOAT(10)", None, None, False),
+    ],
+)
+def test_numeric_metadata_defaults_are_checked_independently_of_format(data_format, length, scale, matches):
+    expected = {"name": "N", "role": "NONE", "mandatory": False, "data_format": data_format}
+    actual = {
+        **expected,
+        "type_code": data_format.split("(", 1)[0],
+        "length": length,
+        "scale": scale,
+        "length_semantics": None,
+    }
+    assert scd2_odi._column_matches(actual, expected) is matches
