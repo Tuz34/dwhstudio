@@ -96,11 +96,21 @@ def _preflight_matches(report: object) -> bool:
     )
 
 
-def _proof_matches(payload: object) -> bool:
+def _proof_matches(payload: object, *, retained_backup: bool = False) -> bool:
+    if type(retained_backup) is not bool:
+        return False
     if not isinstance(payload, Mapping):
         return False
     backup = payload.get("backup")
     ods_backup = payload.get("ods_backup")
+    mode_keys = (
+        {
+            "verified_retained", "metadata_matches", "surrogate_key_null_count",
+            "surrogate_key_duplicate_group_count", "source_minus_backup_count",
+            "backup_minus_source_count",
+        }
+        if retained_backup else {"created_absent_only"}
+    )
     return (
         set(payload)
         == {
@@ -113,7 +123,7 @@ def _proof_matches(payload: object) -> bool:
             "secret_printed",
         }
         and payload.get("status") == "passed"
-        and payload.get("side_effects") is True
+        and payload.get("side_effects") is (not retained_backup)
         and payload.get("raw_rows_included") is False
         and payload.get("pk_values_included") is False
         and payload.get("secret_printed") is False
@@ -124,15 +134,23 @@ def _proof_matches(payload: object) -> bool:
             "table",
             "source_table",
             "exists",
-            "created_absent_only",
             "column_count",
             "row_count",
-        }
+        } | mode_keys
         and backup.get("owner") == BACKUP_OWNER
         and backup.get("table") == BACKUP_TABLE
         and backup.get("source_table") == SOURCE_TABLE
         and backup.get("exists") is True
-        and backup.get("created_absent_only") is True
+        and (
+            (
+                backup.get("verified_retained") is True
+                and backup.get("metadata_matches") is True
+                and all(_count(backup, key) == 0 for key in (
+                    "surrogate_key_null_count", "surrogate_key_duplicate_group_count",
+                    "source_minus_backup_count", "backup_minus_source_count",
+                ))
+            ) if retained_backup else backup.get("created_absent_only") is True
+        )
         and _count(backup, "column_count") == EXPECTED_COLUMN_COUNT
         and _count(backup, "row_count") == EXPECTED_ROW_COUNT
         and isinstance(ods_backup, Mapping)
@@ -154,16 +172,22 @@ def _proof_matches(payload: object) -> bool:
     )
 
 
-def _base(status: str, *, attempted: bool = False) -> dict[str, Any]:
+def _base(
+    status: str, *, attempted: bool = False,
+    retained_backup: bool = False, verification_attempted: bool = False,
+) -> dict[str, Any]:
     return {
         "mode": "dim_product_scd2_scenario_named_backup_gate",
         "status": status,
         "backup": {"owner": BACKUP_OWNER, "table": BACKUP_TABLE},
         "backup_creation_attempted": attempted,
-        "backup_may_exist": attempted,
-        "named_backup_retained": None if attempted else False,
+        "backup_verification_attempted": verification_attempted,
+        "backup_mode": "retained_verification" if retained_backup else "absent_only_creation",
+        "backup_reused_verified": False,
+        "backup_may_exist": attempted or retained_backup,
+        "named_backup_retained": None if attempted or retained_backup else False,
         "automatic_restore_performed": False,
-        "manual_recovery_review_required": attempted,
+        "manual_recovery_review_required": attempted or verification_attempted,
         "side_effects_may_have_occurred": attempted,
         "raw_rows_included": False,
         "pk_values_included": False,
@@ -176,17 +200,23 @@ def run_dim_product_scd2_named_backup_gate(
     preflight: Mapping[str, Any],
     *,
     backup_creator: Callable[..., Mapping[str, Any]],
+    retained_backup: bool = False,
 ) -> dict[str, Any]:
-    """Require an absent-only 26-column backup before any scenario run.
+    """Require an absent-only backup, or explicitly opt into retained verification.
 
     The caller supplies a freshly collected read-only preflight and a separately
     approved callback that creates the fixed backup only when absent. The gate
-    has no database connection or configured runtime of its own.
+    has no database connection or configured runtime of its own. With
+    retained_backup=True, backup_creator must instead be the separate read-only
+    verifier callback; it is invoked with require_absent=False. Proofs cannot be
+    interchanged between modes.
     """
+    if type(retained_backup) is not bool:
+        return _base("blocked_retained_backup_type")
     if not _preflight_matches(preflight):
-        return _base("blocked_candidate_preflight")
+        return _base("blocked_candidate_preflight", retained_backup=retained_backup)
     if not callable(backup_creator):
-        return _base("blocked_backup_creator")
+        return _base("blocked_backup_creator", retained_backup=retained_backup)
 
     proof = call_sanitized(
         backup_creator,
@@ -195,19 +225,25 @@ def run_dim_product_scd2_named_backup_gate(
         backup_table=BACKUP_TABLE,
         expected_column_count=EXPECTED_COLUMN_COUNT,
         expected_row_count=EXPECTED_ROW_COUNT,
-        require_absent=True,
+        require_absent=not retained_backup,
     )
 
-    if not _proof_matches(proof):
+    state = _base(
+        "passed", attempted=not retained_backup,
+        retained_backup=retained_backup, verification_attempted=retained_backup,
+    )
+    if not _proof_matches(proof, retained_backup=retained_backup):
         return {
-            **_base("failed", attempted=True),
+            **state,
+            "status": "failed",
             "stage": "named_backup_gate",
             "error_type": "BackupGateError",
         }
 
     return {
-        **_base("passed", attempted=True),
-        "backup_created_absent_only": True,
+        **state,
+        "backup_created_absent_only": not retained_backup,
+        "backup_reused_verified": retained_backup,
         "named_backup_retained": True,
         "backup_column_count": EXPECTED_COLUMN_COUNT,
         "backup_row_count": EXPECTED_ROW_COUNT,
