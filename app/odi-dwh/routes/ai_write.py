@@ -5,9 +5,9 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 
+from ai_egress import CLAUDE_ORIGIN, CONFIG_LOCK, endpoint_origin, validate_endpoint
 from routes.deps import get_app_module
 from routes.error_responses import redacted_write_error
-
 
 bp = Blueprint("ai_write", __name__)
 limiter = get_app_module().limiter
@@ -18,42 +18,52 @@ limiter = get_app_module().limiter
 def api_config_llm():
     app_module = get_app_module()
     body = request.get_json() or {}
-    requested_provider = body.get("provider", "hybrid").lower()
-    provider = "claude" if requested_provider in ["claude", "anthropic", "auto"] else requested_provider
-    if provider in ["lmstudio", "lm_studio", "openai_compatible", "llamacpp", "vllm"]:
-        provider = "local_openai"
-    if provider not in ["ollama", "claude", "local_openai", "hybrid"]:
-        return jsonify({"error": "Invalid provider"}), 400
-
-    app_module.os.environ["LLM_PROVIDER"] = provider
-    anthropic_key = (
-        body.get("anthropic_api_key")
-        or body.get("claude_api_key")
-        or body.get("anthropicKey")
-        or ""
-    ).strip()
-    if body.get("base_url"):
-        app_module.os.environ["LOCAL_OPENAI_BASE_URL"] = body.get("base_url").strip()
-    if body.get("model"):
-        app_module.os.environ["LOCAL_OPENAI_MODEL"] = body.get("model").strip()
-    local_api_key = (body.get("local_api_key") or body.get("api_key") or "").strip()
-    if local_api_key:
-        app_module.os.environ["LOCAL_OPENAI_API_KEY"] = local_api_key
-    if anthropic_key:
-        app_module.os.environ["ANTHROPIC_API_KEY"] = anthropic_key
-        app_module.config.ANTHROPIC_API_KEY = anthropic_key
-
     import ai_agent
-    import mapping_generator
-
-    mapping_generator.LLM_PROVIDER = provider
-    ai_agent.LLM_PROVIDER = provider
-    if anthropic_key:
-        ai_agent.ANTHROPIC_API_KEY = anthropic_key
-        if hasattr(ai_agent, "_claude_client"):
-            ai_agent._claude_client = None
-        if hasattr(ai_agent, "_claude_client_key"):
-            ai_agent._claude_client_key = None
+    try:
+        if not isinstance(body, dict) or any(not isinstance(v, str) for v in body.values()):
+            raise ValueError()
+        if any(len(v) > 8192 or any(ord(c) < 32 or ord(c) == 127 for c in v) for v in body.values()):
+            raise ValueError()
+        for value in body.values():
+            value.encode("utf-8")
+        if set(body) - {"provider", "base_url", "model", "local_api_key", "api_key",
+                        "anthropic_api_key", "claude_api_key", "anthropicKey"}:
+            raise ValueError()
+        provider = ai_agent.normalize_provider(body.get("provider", "hybrid"))
+        updates = {"LLM_PROVIDER": provider}
+        if body.get("base_url"):
+            updates["LOCAL_OPENAI_BASE_URL"] = validate_endpoint(body["base_url"])
+        if body.get("model"):
+            updates["LOCAL_OPENAI_MODEL"] = body["model"].strip()
+        local_key_supplied = "local_api_key" in body or "api_key" in body
+        local_api_key = body.get("local_api_key", body.get("api_key", "")).strip()
+        anthropic_key = (body.get("anthropic_api_key") or body.get("claude_api_key")
+                         or body.get("anthropicKey") or "").strip()
+        with CONFIG_LOCK:
+            # Validate the effective endpoint even when only a key is submitted.
+            old_url = app_module.os.getenv("LOCAL_OPENAI_BASE_URL") or ai_agent.LOCAL_OPENAI_BASE_URL
+            new_url = validate_endpoint(updates.get("LOCAL_OPENAI_BASE_URL") or old_url)
+            old_key = app_module.os.getenv("LOCAL_OPENAI_API_KEY")
+            if old_key is None:
+                old_key = ai_agent.LOCAL_OPENAI_API_KEY
+            if old_key and endpoint_origin(new_url) != endpoint_origin(old_url) and not local_key_supplied:
+                raise ValueError()
+            if provider in {"claude", "hybrid"}:
+                validate_endpoint(app_module.os.getenv("ANTHROPIC_BASE_URL") or CLAUDE_ORIGIN, cloud=True)
+            if local_key_supplied:
+                updates["LOCAL_OPENAI_API_KEY"] = local_api_key
+                updates["LOCAL_OPENAI_API_KEY_ORIGIN"] = endpoint_origin(new_url)
+            if anthropic_key:
+                updates["ANTHROPIC_API_KEY"] = anthropic_key
+            app_module.os.environ.update(updates)
+            ai_agent.LLM_PROVIDER = provider
+            if anthropic_key:
+                ai_agent.ANTHROPIC_API_KEY = anthropic_key
+                app_module.config.ANTHROPIC_API_KEY = anthropic_key
+                ai_agent._claude_client = None
+                ai_agent._claude_client_key = None
+    except ValueError:
+        return jsonify({"error": "Invalid LLM configuration"}), 400
 
     claude_key = app_module.os.getenv("ANTHROPIC_API_KEY") or getattr(app_module.config, "ANTHROPIC_API_KEY", "")
     return jsonify({"ok": True, "provider": provider, "claude_configured": bool(claude_key and len(claude_key) > 10)})
@@ -86,15 +96,16 @@ def api_local_analyst_summarize():
 
     import ai_agent
 
-    old_provider = app_module.os.environ.get("LLM_PROVIDER")
     try:
-        app_module.os.environ["LLM_PROVIDER"] = provider
-        summary = ai_agent.call_llm(messages)
-    finally:
-        if old_provider is None:
-            app_module.os.environ.pop("LLM_PROVIDER", None)
-        else:
-            app_module.os.environ["LLM_PROVIDER"] = old_provider
+        if not isinstance(provider, str):
+            raise ValueError("Invalid provider")
+        provider = ai_agent.normalize_provider(provider)
+    except ValueError:
+        return jsonify({"error": "Invalid provider"}), 400
+    try:
+        summary = ai_agent.call_llm(messages, provider=provider)
+    except Exception as exc:
+        return redacted_write_error("Local analyst", exc)
 
     note_path = Path(app_module.__file__).resolve().parent / "LOCAL_NOTES.md"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -120,6 +131,9 @@ def api_ai_orchestrate():
             allow_cloud_review=body.get("allow_cloud_review") is True,
             job_id=body.get("job_id"),
         )
+        if result.get("status") == "failed":
+            return jsonify({"ok": False, "error": "AI orchestration failed.",
+                            "error_type": "OrchestrationError"}), 500
         return jsonify({"ok": True, "result": result})
     except Exception as exc:
         return redacted_write_error("AI orchestration", exc)
@@ -238,8 +252,9 @@ def api_ask():
             })
 
         if "validation_request" in result and result["validation_request"]:
-            from data_validation_mcp import validate_column_accuracy_by_pk
             import json as _json
+
+            from data_validation_mcp import validate_column_accuracy_by_pk
 
             vr = result["validation_request"]
             try:

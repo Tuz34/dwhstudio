@@ -7,21 +7,23 @@ objects, or send anything to cloud providers without an explicit caller flag.
 
 from __future__ import annotations
 
+import ctypes
+import hashlib
 import json
+import math
 import os
 import re
 import subprocess
 import time
 import uuid
-import ctypes
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from ai_egress import local_openai_settings
 from config import LOCAL_OPENAI_API_KEY, LOCAL_OPENAI_BASE_URL, OLLAMA_TAGS_URL
 
 
@@ -647,7 +649,7 @@ def _summarize_columns(table: str) -> tuple[list[dict[str, Any]], list[str], lis
             warnings.append(f"Source table metadata returned empty: {table}")
         return columns, pk_columns, warnings
     except Exception as exc:
-        warnings.append(f"Source metadata could not be read ({table}): {exc}")
+        warnings.append("Source metadata could not be read.")
         return [], [], warnings
 
 
@@ -669,7 +671,7 @@ def _hardware_profile() -> dict[str, Any]:
                 "driver_version": driver,
             }
     except Exception as exc:
-        profile["notes"].append(f"nvidia-smi okunamadi: {exc}")
+        profile["notes"].append("GPU observation unavailable.")
 
     try:
         class MEMORYSTATUSEX(ctypes.Structure):
@@ -710,7 +712,7 @@ def _gpu_snapshot() -> dict[str, Any]:
             timeout=5,
         )
         if proc.returncode != 0 or not proc.stdout.strip():
-            return {"available": False, "error": proc.stderr.strip()}
+            return {"available": False, "error": "GPU observation unavailable."}
         name, total, used, util, temp = [p.strip() for p in proc.stdout.strip().split(",", 4)]
         return {
             "available": True,
@@ -721,7 +723,7 @@ def _gpu_snapshot() -> dict[str, Any]:
             "temperature_c": int(float(temp)),
         }
     except Exception as exc:
-        return {"available": False, "error": str(exc)}
+        return {"available": False, "error": "GPU observation unavailable."}
 
 
 def _latest_benchmark_summary(limit: int = 5) -> list[dict[str, Any]]:
@@ -831,11 +833,11 @@ def _observable_node(node_name: str, fn):
         try:
             update = dict(fn(state))
             status = "FAILED" if update.get("overall_status") == "failed" or update.get("status") == "failed" else "SUCCESS"
-            detail = str(update.get("error") or update.get("current_step") or "")
+            detail = "Node failed." if status == "FAILED" else ""
         except Exception as exc:
             finished_at = _now()
             duration_ms = int((time.perf_counter() - start) * 1000)
-            obs = _append_node_observation(state, node_name, started_at, finished_at, duration_ms, "FAILED", str(exc))
+            obs = _append_node_observation(state, node_name, started_at, finished_at, duration_ms, "FAILED", "Node failed.")
             raise
         finished_at = _now()
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -874,7 +876,7 @@ def _runtime_status() -> dict[str, Any]:
         "local_openai_models": [],
     }
     try:
-        import requests
+        import ai_egress as requests
 
         res = requests.get(os.getenv("OLLAMA_TAGS_URL") or OLLAMA_TAGS_URL, timeout=2)
         if res.status_code == 200:
@@ -883,13 +885,9 @@ def _runtime_status() -> dict[str, Any]:
     except Exception:
         pass
     try:
-        import requests
+        import ai_egress as requests
 
-        base_url = (os.getenv("LOCAL_OPENAI_BASE_URL") or LOCAL_OPENAI_BASE_URL).rstrip("/")
-        headers = {}
-        api_key = os.getenv("LOCAL_OPENAI_API_KEY") or LOCAL_OPENAI_API_KEY
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        base_url, headers = local_openai_settings(LOCAL_OPENAI_BASE_URL, LOCAL_OPENAI_API_KEY)
         res = requests.get(f"{base_url}/models", headers=headers, timeout=2)
         if res.status_code == 200:
             status["local_openai_api"] = True
@@ -1354,7 +1352,8 @@ def build_orchestrator_graph():
     graph.add_edge("planner", "test_checker")
     graph.add_edge("test_checker", "final_composer")
     graph.add_edge("final_composer", END)
-    return graph.compile(checkpointer=MemorySaver())
+    # This single-shot API never resumes jobs; do not checkpoint raw prompts/state.
+    return graph.compile()
 
 
 _GRAPH = None
@@ -1371,19 +1370,82 @@ def _persist_job(state: dict[str, Any]) -> None:
     try:
         out_dir = Path(__file__).resolve().parent / "logs"
         out_dir.mkdir(exist_ok=True)
-        payload = {
-            "timestamp": _now(),
-            "job_id": state.get("job_id"),
-            "prompt": state.get("prompt"),
-            "final_response": state.get("final_response"),
-            "log": state.get("log", []),
-            "observability": state.get("observability", {}),
-        }
+        payload = _job_metadata(state)
         with (out_dir / "ai_orchestrator_jobs.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except Exception:
         # Audit write should never break the user-facing dry-run response.
         pass
+
+
+_NODE_NAMES = {"init", "intent_classifier", "privacy_classifier", "tool_selector",
+               "planner", "test_checker", "final_composer"}
+_OBS_STATUSES = {"PENDING", "RUNNING", "SUCCESS", "SUCCEEDED", "FAILED"}
+
+
+def _metric(value: Any) -> int | float | None:
+    return value if type(value) in {int, float} and math.isfinite(value) and 0 <= value <= 1e15 else None
+
+
+def _safe_observability(value: Any) -> dict[str, Any]:
+    obs = value if isinstance(value, dict) else {}
+    result = {"status": obs.get("status") if obs.get("status") in _OBS_STATUSES else "FAILED",
+              "duration_ms": _metric(obs.get("duration_ms")), "node_metrics": []}
+    for key in ("started_at", "finished_at"):
+        text = obs.get(key)
+        result[key] = text if isinstance(text, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?", text) else None
+    for node in obs.get("node_metrics", []) if isinstance(obs.get("node_metrics"), list) else []:
+        if isinstance(node, dict) and node.get("node") in _NODE_NAMES and node.get("status") in _OBS_STATUSES:
+            result["node_metrics"].append({"node": node["node"], "status": node["status"],
+                                           "duration_ms": _metric(node.get("duration_ms"))})
+    for key in ("gpu_before", "gpu_after"):
+        gpu = obs.get(key) if isinstance(obs.get(key), dict) else {}
+        result[key] = {"available": gpu.get("available") is True}
+        for field in ("memory_total_mib", "memory_used_mib", "gpu_util_percent", "temperature_c"):
+            result[key][field] = _metric(gpu.get(field))
+    runtime = obs.get("model_runtime") if isinstance(obs.get("model_runtime"), dict) else {}
+    result["model_runtime"] = {"ollama_api": runtime.get("ollama_api") is True,
+                               "local_openai_api": runtime.get("local_openai_api") is True}
+    for key in ("ollama_models", "local_openai_models"):
+        result["model_runtime"][key] = []
+        result["model_runtime"][key + "_count"] = len(runtime[key]) if isinstance(runtime.get(key), list) else 0
+    route = obs.get("route") if isinstance(obs.get("route"), dict) else {}
+    result["route"] = {
+        "primary_worker": route.get("primary_worker") if route.get("primary_worker") in
+        {"local_llm", "tool_only_until_model_ready"} else None,
+        "cloud_policy": route.get("cloud_policy") if route.get("cloud_policy") in
+        {"pending", "evidence_pack_only", "disabled"} else None,
+        "runtime_status": result["model_runtime"],
+    }
+    return result
+
+
+def _job_metadata(state: dict[str, Any]) -> dict[str, Any]:
+    response = state.get("final_response") if isinstance(state.get("final_response"), dict) else {}
+    job_id = state.get("job_id")
+    return {
+        "timestamp": _now(),
+        "job_id_sha256": hashlib.sha256(job_id.encode()).hexdigest() if isinstance(job_id, str) else None,
+        "status": response.get("status") if response.get("status") in {"planned", "failed"} else "failed",
+        "mode": response.get("mode") if response.get("mode") in {"dry_run", "requires_approval"} else None,
+        "task_type": response.get("task_type") if response.get("task_type") in
+        {"ods_modeling", "dwh_modeling", "unsupported"} else None,
+        "tools": [item["name"] for item in response.get("tool_plan", [])
+                  if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"] in TOOL_REGISTRY]
+        if isinstance(response.get("tool_plan"), list) else [],
+        "tool_count": len(response["tool_plan"]) if isinstance(response.get("tool_plan"), list) else 0,
+        "test_count": len(response["test_plan"]) if isinstance(response.get("test_plan"), list) else 0,
+        "observability": _safe_observability(state.get("observability")),
+    }
+
+
+def _public_response(response: dict[str, Any]) -> dict[str, Any]:
+    from routes.error_responses import redacted_operation_result
+
+    safe = redacted_operation_result(response, "AI orchestration")
+    safe["observability"] = _safe_observability(response.get("observability"))
+    safe["observability"]["job_id"] = response.get("job_id")
+    return safe
 
 
 def orchestrate(
@@ -1435,21 +1497,21 @@ def orchestrate(
                 result.get("routing_decision", {}),
             )
         _persist_job({**result, "final_response": response})
-        return response
+        return _public_response(response)
     except Exception as exc:
         observability = _finalize_observability(state.get("observability", {}), "FAILED")
         response = {
             "job_id": state["job_id"],
             "status": "failed",
-            "error": str(exc),
+            "error": "AI orchestration failed.",
             "mode": "dry_run" if dry_run else "requires_approval",
             "approval_required_for": _legacy_approval_required_for(),
             "approval_plan": _build_approval_plan(state),
             "warnings": ["The orchestrator error was converted to a controlled response; internal state was not returned through the API."],
             "observability": observability,
         }
-        _persist_job({**state, "final_response": response, "observability": observability, "error": str(exc)})
-        return response
+        _persist_job({**state, "final_response": response, "observability": observability})
+        return _public_response(response)
 
 
 def get_tool_registry() -> dict[str, dict[str, Any]]:

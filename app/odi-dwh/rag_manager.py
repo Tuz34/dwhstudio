@@ -1,9 +1,9 @@
 import json
 import logging
+import os
 import threading
 import time
 import uuid
-import os
 from typing import Any
 
 from config import OLLAMA_EMBEDDINGS_URL
@@ -83,7 +83,7 @@ def init_collections():
 
 def get_embedding(text: str) -> list[float]:
     """N-1: Timeout 5s, 3 attempts — tolerate embedding requests lost after Ollama idle/restart."""
-    import requests
+    import ai_egress as requests
     payload = {"model": "nomic-embed-text:latest", "prompt": text}
     try:
         r = requests.post(os.getenv("OLLAMA_EMBEDDINGS_URL") or OLLAMA_EMBEDDINGS_URL, json=payload, timeout=(0.5, 1.0))
@@ -91,7 +91,7 @@ def get_embedding(text: str) -> list[float]:
         if emb:
             return emb
     except Exception as e:
-        logger.debug("Embedding request failed; using lexical RAG fallback: %s", e)
+        logger.debug("Embedding request failed; using lexical RAG fallback")
     return []
 
 def cosine_similarity(v1: list[float], v2: list[float]) -> float:

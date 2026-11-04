@@ -5,8 +5,8 @@ import os
 
 from flask import Blueprint, current_app, jsonify
 
+from ai_egress import get as ai_get
 from routes.deps import get_app_module
-
 
 bp = Blueprint("environment", __name__)
 DOWN_UNREACHABLE_STATUS = "Down (Unavailable)"
@@ -44,7 +44,7 @@ def api_project_hub():
 
         is_ollama_up = False
         try:
-            ollama_res = app_module.requests.get(app_module.config.OLLAMA_TAGS_URL, timeout=1.5)
+            ollama_res = ai_get(app_module.config.OLLAMA_TAGS_URL, timeout=1.5)
             is_ollama_up = ollama_res.status_code == 200
         except Exception:
             is_ollama_up = False
