@@ -10,67 +10,54 @@ strings, or real data in any report.
 
 ## Supported deployment model
 
-DWH Studio is local-only by default. Network profiles (`lan-pilot`, `on-prem-hardened`) require TLS
-termination (directly or through a reverse proxy) and a configured session key. See
-`app/odi-dwh/docs/deployment-security-profiles.md`.
+DWH Studio is local-only by default. Do not expose a deployment to a network until its
+authentication, session key, TLS termination and accepted authorities are verified. A configured
+flag alone is not evidence of an encrypted connection. See
+`app/odi-dwh/docs/deployment-security-profiles.md` for the source-version-specific controls.
 
-## Known limitations
+## Remediation status (2026-11-05)
 
-These items come from a static security review dated 2026-11-04. They are listed by title with the
-current mitigation stance. Numbers refer to the review.
+Numbers below identify the findings from the 2026-11-04 static review. These are source-code
+remediation states, not a claim that every running installation is updated, that a live Oracle/ODI
+rollback has been exercised, or that the original scan's UI records have been closed.
 
-**(2) Public status endpoint fans out expensive probes without a limit.** The public status route
-runs several backend probes per request and does not rate-limit or cache them, so a client that can
-reach the port can cause repeated load on the database and ODI checks. Mitigation: keep the
-`local-only` profile or restrict access with the IP allowlist and a reverse proxy rate limit until
-caching and throttling are added.
+| Findings | Boundary | Source status / evidence |
+|---|---|---|
+| 1 | Placeholder signing keys | Merged in PRs [2](https://github.com/Tuz34/dwhstudio/pull/2) and [4](https://github.com/Tuz34/dwhstudio/pull/4); independently reverified. |
+| 2 | Public status probe resource limits | [PR30](https://github.com/Tuz34/dwhstudio/pull/30) merged after independent review and CI. |
+| 3, 7 | Preview schema restriction; mapping replacement order | [PR12](https://github.com/Tuz34/dwhstudio/pull/12) merged; independently reverified. |
+| 4, 8 | Server-owned post-load gates; atomic append/watermark | [PR10](https://github.com/Tuz34/dwhstudio/pull/10) merged; independently reverified. |
+| 5, 9, 12 | Request-local AI provider; credentialed egress; prompt/error handling | Implementation candidate undergoing independent review; not yet a merged remedy. |
+| 6, 10 | TLS transport and exact Host boundary | [PR32](https://github.com/Tuz34/dwhstudio/pull/32) merged after independent review and CI. |
+| 11, 13 | Partial Oracle DDL reporting; unsupported DQ rules | [PR3](https://github.com/Tuz34/dwhstudio/pull/3) merged; independently reverified. |
+| 14 | Metadata-sync success evidence | Earlier failure handling merged in PRs2/4; independent recheck found missing positive commit evidence. [PR33](https://github.com/Tuz34/dwhstudio/pull/33) closes that residual after independent review and CI. |
 
-**(5) Temporary provider override can route another user's prompt to a cloud model.** A request can
-temporarily switch the AI provider, and the switch is not scoped to the requesting user. Another
-user's prompt could therefore be sent to a cloud model even when the operator intended local-only
-inference. Mitigation: run single-user, leave `ANTHROPIC_API_KEY` empty if cloud inference is not
-wanted, and do not share one instance between users with different data-handling expectations.
+The frontend dependency follow-up, ODI-82, is merged in
+[PR31](https://github.com/Tuz34/dwhstudio/pull/31). The verification-time npm audit reported zero
+vulnerabilities including development dependencies. Dependency audit, lint, tests and build now
+gate CI, and third-party Actions are pinned to reviewed upstream commit SHAs. An audit is a dated
+advisory check, not proof that dependencies contain no vulnerabilities.
 
-**(6) LAN profile allows password and session traffic without TLS.** The `lan-pilot` profile is
-marked review-required and does not force a TLS boundary, so login passwords and session cookies can
-cross the network in clear text. Mitigation: do not use `lan-pilot` on untrusted networks; put a TLS
-reverse proxy in front of it or use `on-prem-hardened`, which requires a TLS boundary.
+## Deployment limits and open work
 
-**(9) Operator-controlled model URL can redirect credentialed server requests.** The configured model
-endpoint URLs are used for server-side requests that can carry credentials. An operator, or anyone
-able to change those settings, can point them at another host and receive those credentials.
-Mitigation: treat model URL settings as administrator-only, keep them on `localhost` unless you
-control the target, and do not expose configuration to untrusted users.
-
-**(10) Local unauthenticated API has no Host boundary.** In the default local-only mode the API has
-no authentication and does not validate the `Host` header, so a malicious web page could attempt
-DNS-rebinding style requests against a locally running instance. Mitigation: enable authentication,
-set `APP_ALLOWED_ORIGINS`, and avoid browsing untrusted sites while the app is running.
-
-**(12) Orchestration stores raw prompts and returns raw exception text.** The AI orchestration layer
-persists the prompts it receives and some error responses include the underlying exception message,
-which can contain table names, SQL fragments, or other internal detail. Mitigation: do not put
-secrets in prompts, protect the log and state files with filesystem permissions, and do not expose
-the API to untrusted clients.
-
-## Fixed before publication
-
-Addressed in the `fix/sec-01-14` and `fix/sec-11-13` branches (not yet merged at the time of writing):
-
-- (1) Placeholder session key
-- (11) Partial DDL reporting
-- (13) Unsupported quality rules
-- (14) Groovy failure reporting
-
-## Planned
-
-- (3) Source preview schema restriction
-- (4) Caller-asserted post-load gates
-- (7) Mapping replacement ordering
-- (8) Non-atomic incremental append and watermark update
-
-Items (7) and (8) are part of a broader transaction and atomicity hardening of the ODI and Oracle
-execution paths, which is the main post-publication roadmap item.
+- Until the AI remedies above are merged and all relevant fixes are deployed, keep the instance local and
+  single-user; do not expose AI configuration or credentials to untrusted callers. Do not put
+  secrets or production rows in model prompts. Existing log/state contents are not retroactively
+  sanitized by a future logging change.
+- `APP_ALLOWED_ORIGINS` and `APP_IP_ALLOWLIST` must not be treated as enforced access controls merely
+  because they appear in configuration or a validation report. Enforce network restrictions at a
+  verified firewall/reverse proxy boundary where required.
+- Network profiles require direct TLS or a trusted loopback TLS-terminating proxy, plus explicit
+  accepted authorities. Proxy mode trusts the configured local-process boundary, not arbitrary
+  forwarded headers from network peers. Operators must verify termination and header stripping;
+  source tests do not attest the deployed proxy. Local-only HTTP requires a loopback bind and peer.
+- Status-probe caching and rate limits are process-local. Multiple workers require an aggregate
+  reverse-proxy limit; permanently hung underlying probes can require process restart. See
+  `app/odi-dwh/docs/status-probe-security.md`.
+- Oracle DDL may commit before a later statement fails. Partial-state reporting is not automatic
+  rollback. Maintain backups, inspect actual state and obtain the required approval before recovery.
+- Isolated tests and source review do not replace deployment-specific TLS, proxy, privilege,
+  backup/restore or ODI runtime validation. Preserve explicit write approvals and scope gates.
 
 ## Secrets and data
 
