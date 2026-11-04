@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -17,8 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-import requests
-
+import ai_egress as requests
+from ai_egress import local_openai_key, validate_endpoint
 from config import LOCAL_OPENAI_API_KEY, LOCAL_OPENAI_BASE_URL, LOCAL_OPENAI_MODEL
 
 DEFAULT_MODEL = LOCAL_OPENAI_MODEL
@@ -134,6 +135,7 @@ def analyze_text(
             "message": "Input contains secret-like content; local model call was not attempted.",
         }
 
+    base_url = validate_endpoint(base_url)
     loaded_before = is_model_loaded(model)
     loaded_by_helper = False
     started = time.perf_counter()
@@ -159,23 +161,32 @@ def analyze_text(
             timeout=180,
         )
         elapsed = time.perf_counter() - started
-        body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
-        try:
-            output = body["choices"][0]["message"]["content"]
-        except Exception:
-            output = json.dumps(body, ensure_ascii=False)[:2000]
-        usage = body.get("usage", {}) if isinstance(body, dict) else {}
-        return {
-            "status": "ready" if response.status_code < 400 else "http_error",
+        result = {
+            "status": "http_error",
             "secret_printed": False,
             "model": model,
             "loaded_before": loaded_before,
             "loaded_by_helper": loaded_by_helper,
             "unload_after": unload_after,
             "elapsed_seconds": round(elapsed, 3),
-            "completion_tokens": usage.get("completion_tokens"),
-            "analysis": output,
+            "completion_tokens": None,
+            "analysis": "",
         }
+        if not 200 <= response.status_code < 300:
+            return result
+        result["status"] = "invalid_response"
+        try:
+            body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+            output = body["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            return result
+        if not isinstance(output, str):
+            return result
+        usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+        tokens = usage.get("completion_tokens")
+        tokens = tokens if type(tokens) is int and 0 <= tokens <= 1_000_000_000 else None
+        result.update(status="ready", analysis=output, completion_tokens=tokens)
+        return result
     finally:
         if loaded_by_helper and unload_after:
             unload_model(model)
@@ -188,12 +199,13 @@ def main() -> int:
     parser.add_argument("--task", default=DEFAULT_TASK)
     parser.add_argument("--model", default=os.getenv("LOCAL_OPENAI_MODEL") or DEFAULT_MODEL)
     parser.add_argument("--base-url", default=os.getenv("LOCAL_OPENAI_BASE_URL") or DEFAULT_BASE_URL)
-    parser.add_argument("--api-key", default=os.getenv("LOCAL_OPENAI_API_KEY") or LOCAL_OPENAI_API_KEY)
+    parser.add_argument("--api-key", default=None)
     parser.add_argument("--no-auto-load", action="store_true")
     parser.add_argument("--keep-loaded", action="store_true")
     parser.add_argument("--out", default="logs/local_llm_analyst.jsonl")
     args = parser.parse_args()
 
+    api_key = local_openai_key(args.base_url, DEFAULT_BASE_URL, LOCAL_OPENAI_API_KEY, explicit_key=args.api_key)
     if args.input_file:
         text = Path(args.input_file).read_text(encoding="utf-8", errors="ignore")
     else:
@@ -203,15 +215,19 @@ def main() -> int:
         task=args.task,
         model=args.model,
         base_url=args.base_url,
-        api_key=args.api_key,
+        api_key=api_key,
         auto_load=not args.no_auto_load,
         unload_after=not args.keep_loaded,
     )
     record = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "input_chars": len(text),
-        "task": args.task,
-        "result": result,
+        "task_chars": len(args.task),
+        "result": {"status": result["status"], "secret_printed": False,
+                   **{key: result[key] for key in ("loaded_before", "loaded_by_helper", "unload_after")
+                      if type(result.get(key)) is bool},
+                   **{key: result[key] for key in ("elapsed_seconds", "completion_tokens")
+                      if type(result.get(key)) in {int, float} and math.isfinite(result[key]) and result[key] >= 0}},
     }
     out_path = Path(args.out)
     out_path.parent.mkdir(exist_ok=True)

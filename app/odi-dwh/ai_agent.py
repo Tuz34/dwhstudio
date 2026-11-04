@@ -1,9 +1,13 @@
-import anthropic
+import json
 import logging
 import os
-import requests
-import json
 import re
+
+import anthropic
+import httpx
+
+import ai_egress as requests
+from ai_egress import CLAUDE_ORIGIN, CONFIG_LOCK, ClaudeTransport, local_openai_settings, validate_endpoint
 from config import (
     ANTHROPIC_API_KEY,
     LLM_PROVIDER,
@@ -26,7 +30,12 @@ OLLAMA_UNAVAILABLE_RESPONSE = '{"description": "The AI service is temporarily un
 
 
 def normalize_provider(provider: str | None = None) -> str:
-    value = (provider or os.getenv("LLM_PROVIDER") or LLM_PROVIDER or "hybrid").lower()
+    if provider is None:
+        with CONFIG_LOCK:
+            provider = os.getenv("LLM_PROVIDER") or LLM_PROVIDER or "hybrid"
+    if not isinstance(provider, str):
+        raise ValueError("Invalid provider")
+    value = provider.lower()
     if value in {"hybrid", "local_first", "auto_local"}:
         return "hybrid"
     if value in {"claude", "anthropic", "auto"}:
@@ -35,17 +44,22 @@ def normalize_provider(provider: str | None = None) -> str:
         return "ollama"
     if value in {"local_openai", "lmstudio", "lm_studio", "openai_compatible", "llamacpp", "vllm"}:
         return "local_openai"
-    return "hybrid"
+    raise ValueError("Invalid provider")
 
 def _get_claude_client():
     global _claude_client, _claude_client_key
-    key = os.getenv("ANTHROPIC_API_KEY") or ANTHROPIC_API_KEY
-    if not key:
-        raise RuntimeError("Claude API key is missing")
-    if _claude_client is None or _claude_client_key != key:
-        _claude_client = anthropic.Anthropic(api_key=key)
-        _claude_client_key = key
-    return _claude_client
+    with CONFIG_LOCK:
+        base_url = validate_endpoint(os.getenv("ANTHROPIC_BASE_URL") or CLAUDE_ORIGIN, cloud=True)
+        key = os.getenv("ANTHROPIC_API_KEY") or ANTHROPIC_API_KEY
+        if not key:
+            raise RuntimeError("Claude API key is missing")
+        if _claude_client is None or _claude_client_key != (key, base_url):
+            _claude_client = anthropic.Anthropic(
+                api_key=key, base_url=base_url, max_retries=0,
+                http_client=httpx.Client(transport=ClaudeTransport(), trust_env=False, follow_redirects=False),
+            )
+            _claude_client_key = (key, base_url)
+        return _claude_client
 
 SYSTEM_PROMPT = """You are a senior Data Warehouse (DWH) expert and the AI assistant of the DWH Studio platform.
 Your expertise spans Oracle 19c SQL, ODI/ETL mapping design, data quality & reconciliation, data lineage and impact analysis, and ODS/DWH modeling (surrogate keys, SCD, ETL watermarks) plus metadata.
@@ -248,7 +262,7 @@ def call_ollama(messages: list) -> str:
         response.raise_for_status()
         return response.json()["message"]["content"]
     except Exception as e:
-        logger.error("Could not connect to Ollama: %s", e)
+        logger.error("Could not connect to Ollama")
         return OLLAMA_UNAVAILABLE_RESPONSE
 
 def is_ollama_available() -> bool:
@@ -259,12 +273,8 @@ def is_ollama_available() -> bool:
         return False
 
 def is_local_openai_available() -> bool:
-    base_url = (os.getenv("LOCAL_OPENAI_BASE_URL") or LOCAL_OPENAI_BASE_URL).rstrip("/")
-    api_key = os.getenv("LOCAL_OPENAI_API_KEY") or LOCAL_OPENAI_API_KEY
-    headers = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
     try:
+        base_url, headers = local_openai_settings(LOCAL_OPENAI_BASE_URL, LOCAL_OPENAI_API_KEY)
         response = requests.get(f"{base_url}/models", headers=headers, timeout=(0.5, 1.0))
         return response.status_code == 200
     except Exception:
@@ -292,12 +302,8 @@ def _resolve_local_openai_model(configured_model: str, available_models: list) -
     return (chat_models or available_models)[0]
 
 def call_local_openai(messages: list) -> str:
-    base_url = (os.getenv("LOCAL_OPENAI_BASE_URL") or LOCAL_OPENAI_BASE_URL).rstrip("/")
+    base_url, headers = local_openai_settings(LOCAL_OPENAI_BASE_URL, LOCAL_OPENAI_API_KEY)
     model = os.getenv("LOCAL_OPENAI_MODEL") or LOCAL_OPENAI_MODEL
-    api_key = os.getenv("LOCAL_OPENAI_API_KEY") or LOCAL_OPENAI_API_KEY
-    headers = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
     model = _resolve_local_openai_model(model, _local_openai_model_ids(base_url, headers))
     payload = {
         "model": model,
@@ -305,14 +311,10 @@ def call_local_openai(messages: list) -> str:
         "temperature": 0.1,
         "stream": False,
     }
-    try:
-        response = requests.post(f"{base_url}/chat/completions", json=payload, headers=headers, timeout=90)
-        response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        logger.error("Could not connect to the local OpenAI-compatible LLM: %s", e)
-        raise
+    response = requests.post(f"{base_url}/chat/completions", json=payload, headers=headers, timeout=90)
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
 
 def call_claude(messages: list) -> str:
     client = _get_claude_client()
@@ -330,11 +332,11 @@ def call_claude(messages: list) -> str:
         )
         return resp.content[0].text
     except Exception as e:
-        logger.error("Claude API error: %s", e)
+        logger.error("Claude API error")
         raise
 
-def call_llm(messages: list) -> str:
-    provider = normalize_provider()
+def call_llm(messages: list, *, provider: str | None = None) -> str:
+    provider = normalize_provider(provider)
     if provider == "ollama":
         if not is_ollama_available():
             return '{"description": "The Ollama local LLM service is not running. Please check the Ollama/LM Studio settings.", "queries": []}'
@@ -370,19 +372,20 @@ def call_llm(messages: list) -> str:
                     raise RuntimeError(result)
                 return result
             except Exception as e:
-                logger.warning("LLM hybrid %s failed: %s", name, e)
+                logger.warning("LLM hybrid %s failed", name)
         return '{"description": "Local and cloud LLM services are unavailable. Check the local endpoint, Ollama or Claude settings.", "queries": []}'
 
     try:
         return call_claude(messages)
     except Exception as e:
-        logger.warning("Claude unavailable, local fallback active: %s", e)
+        logger.warning("Claude unavailable, local fallback active")
         try:
             return call_ollama(messages)
         except Exception:
             return call_local_openai(messages)
 
 def ask_ai(user_message: str, schema_info: str = "", history: list | None = None) -> tuple:
+    provider = normalize_provider()
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
     if history is not None:
@@ -422,7 +425,7 @@ def ask_ai(user_message: str, schema_info: str = "", history: list | None = None
     raw_dev = ""
 
     while turn < max_turns:
-        raw_dev = call_llm(current_messages)
+        raw_dev = call_llm(current_messages, provider=provider)
 
         result_dev = extract_json(raw_dev)
 
@@ -458,7 +461,7 @@ def ask_ai(user_message: str, schema_info: str = "", history: list | None = None
             {"role": "user", "content": qa_content}
         ]
 
-        raw_qa = call_llm(qa_messages)
+        raw_qa = call_llm(qa_messages, provider=provider)
 
         result_qa = extract_json(raw_qa)
         status = result_qa.get("status", "PASS").upper()

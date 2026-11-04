@@ -673,7 +673,7 @@ def test_capture_predictions_uses_injected_http_client_without_recording_auth():
 
     result = evals.capture_predictions(
         prompt_pack=prompt_pack,
-        base_url="http://local.example/v1",
+        base_url="http://localhost:1234/v1",
         model="local-test-model",
         api_key="secret-token-not-for-report",
         http_post=fake_post,
@@ -685,11 +685,11 @@ def test_capture_predictions_uses_injected_http_client_without_recording_auth():
     assert result["captured"] == 2
     assert set(result["outputs"]) == {item["id"] for item in prompt_pack["prompts"]}
     assert len(calls) == 2
-    assert all(call["url"] == "http://local.example/v1/chat/completions" for call in calls)
+    assert all(call["url"] == "http://localhost:1234/v1/chat/completions" for call in calls)
     assert all(call["headers"]["Authorization"] == "Bearer secret-token-not-for-report" for call in calls)
     assert "secret-token-not-for-report" not in payload
     assert "Authorization" not in payload
-    assert "http://local.example" not in payload
+    assert "http://localhost:1234" not in payload
 
 
 def test_capture_predictions_does_not_send_runtime_json_mode_by_default():
@@ -705,7 +705,7 @@ def test_capture_predictions_does_not_send_runtime_json_mode_by_default():
 
     evals.capture_predictions(
         prompt_pack=prompt_pack,
-        base_url="http://local.example/v1",
+        base_url="http://localhost:1234/v1",
         model="local-test-model",
         http_post=fake_post,
     )
@@ -726,7 +726,7 @@ def test_capture_predictions_can_send_json_response_format_when_enabled():
 
     evals.capture_predictions(
         prompt_pack=prompt_pack,
-        base_url="http://local.example/v1",
+        base_url="http://localhost:1234/v1",
         model="local-test-model",
         http_post=fake_post,
         use_runtime_json_mode=True,
@@ -745,7 +745,7 @@ def test_capture_predictions_does_not_store_http_error_body_as_output():
 
     result = evals.capture_predictions(
         prompt_pack=prompt_pack,
-        base_url="http://local.example/v1",
+        base_url="http://localhost:1234/v1",
         model="local-test-model",
         http_post=fake_post,
     )
@@ -767,7 +767,7 @@ def test_capture_predictions_treats_empty_content_as_failed_not_captured():
 
     result = evals.capture_predictions(
         prompt_pack=prompt_pack,
-        base_url="http://local.example/v1",
+        base_url="http://localhost:1234/v1",
         model="local-test-model",
         http_post=fake_post,
     )
@@ -793,7 +793,7 @@ def test_capture_predictions_blocks_sensitive_model_output():
 
     result = evals.capture_predictions(
         prompt_pack=prompt_pack,
-        base_url="http://local.example/v1",
+        base_url="http://localhost:1234/v1",
         model="local-test-model",
         http_post=fake_post,
     )
@@ -819,7 +819,7 @@ def test_export_predictions_writes_predictions_file_without_prompt_or_auth(tmp_p
     result = evals.export_predictions(
         path,
         prompt_pack=prompt_pack,
-        base_url="http://local.example/v1",
+        base_url="http://localhost:1234/v1",
         model="local-test-model",
         api_key="secret-token-not-for-report",
         http_post=fake_post,
@@ -833,7 +833,7 @@ def test_export_predictions_writes_predictions_file_without_prompt_or_auth(tmp_p
     assert saved["outputs"]
     assert "prompt" not in payload.lower()
     assert "secret-token-not-for-report" not in payload
-    assert "http://local.example" not in payload
+    assert "http://localhost:1234" not in payload
 
 
 class _FakeModelsResponse:
@@ -855,7 +855,7 @@ def test_probe_runtime_checks_model_list_without_recording_base_url_or_auth():
         return _FakeModelsResponse(["local-test-model", "other-model"])
 
     result = evals.probe_runtime(
-        base_url="http://local.example/v1",
+        base_url="http://localhost:1234/v1",
         model="local-test-model",
         api_key="secret-token-not-for-report",
         http_get=fake_get,
@@ -870,14 +870,14 @@ def test_probe_runtime_checks_model_list_without_recording_base_url_or_auth():
     assert result["model_count"] == 2
     assert calls == [
         {
-            "url": "http://local.example/v1/models",
+            "url": "http://localhost:1234/v1/models",
             "headers": {"Authorization": "Bearer secret-token-not-for-report"},
             "timeout": 10,
         }
     ]
     assert "secret-token-not-for-report" not in payload
     assert "Authorization" not in payload
-    assert "http://local.example" not in payload
+    assert "http://localhost:1234" not in payload
 
 
 def test_probe_runtime_records_only_error_type_when_endpoint_fails():
@@ -885,7 +885,7 @@ def test_probe_runtime_records_only_error_type_when_endpoint_fails():
         raise RuntimeError("http://user:password@local.example/v1 failed")
 
     result = evals.probe_runtime(
-        base_url="http://local.example/v1",
+        base_url="http://localhost:1234/v1",
         model="local-test-model",
         http_get=fake_get,
     )
@@ -914,7 +914,7 @@ def test_cli_runtime_probe_writes_report_without_static_eval_or_model_call(tmp_p
             "--runtime-probe-out",
             str(path),
             "--base-url",
-            "http://local.example/v1",
+            "http://localhost:1234/v1",
             "--model",
             "local-test-model",
             "--api-key",
@@ -933,7 +933,7 @@ def test_cli_runtime_probe_writes_report_without_static_eval_or_model_call(tmp_p
     assert saved["model_call_attempted"] is False
     assert saved["live_execution_attempted"] is False
     assert "secret-token-not-for-report" not in payload
-    assert "http://local.example" not in payload
+    assert "http://localhost:1234" not in payload
 
 
 @pytest.mark.parametrize(

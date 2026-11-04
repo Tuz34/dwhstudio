@@ -4,10 +4,11 @@ import json
 import os
 import re
 
-import requests
 from flask import has_request_context, session
 
+import ai_egress as requests
 import config
+from ai_egress import local_openai_settings
 from app_helpers import _group_odi_mapping_lineage_items
 from config import ORACLE_DSN
 from db import execute_select
@@ -644,12 +645,8 @@ def _is_llm_status_question(message: str) -> bool:
 
 
 def _local_openai_model_ids() -> list[str]:
-    base_url = os.getenv("LOCAL_OPENAI_BASE_URL", config.LOCAL_OPENAI_BASE_URL).rstrip("/")
-    headers = {}
-    api_key = os.getenv("LOCAL_OPENAI_API_KEY", "")
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
     try:
+        base_url, headers = local_openai_settings(config.LOCAL_OPENAI_BASE_URL)
         res = requests.get(f"{base_url}/models", headers=headers, timeout=2)
         res.raise_for_status()
         data = res.json()

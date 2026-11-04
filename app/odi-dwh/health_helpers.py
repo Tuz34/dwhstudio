@@ -3,10 +3,11 @@
 import os
 import subprocess
 
-import requests
-
+import ai_egress as requests
 import config
+from ai_egress import local_openai_settings
 from db import test_connection
+
 
 def _chk_oracle():
     try: return test_connection()
@@ -46,11 +47,7 @@ def _chk_claude():
 
 def _chk_local_openai():
     try:
-        base_url = (os.getenv("LOCAL_OPENAI_BASE_URL") or config.LOCAL_OPENAI_BASE_URL).rstrip("/")
-        headers = {}
-        api_key = os.getenv("LOCAL_OPENAI_API_KEY", "")
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        base_url, headers = local_openai_settings(config.LOCAL_OPENAI_BASE_URL)
         res = requests.get(f"{base_url}/models", headers=headers, timeout=2)
         return res.status_code == 200
     except Exception: return False

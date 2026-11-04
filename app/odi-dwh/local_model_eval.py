@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import requests
-
+import ai_egress as requests
+from ai_egress import local_openai_key, validate_endpoint
 
 THRESHOLDS: dict[str, float] = {
     "nl_to_sql": 0.80,
@@ -1675,7 +1675,7 @@ def capture_predictions(
     prompt_pack: dict[str, Any] | None = None,
     base_url: str,
     model: str,
-    api_key: str = "",
+    api_key: str | None = "",
     timeout: int = 180,
     use_runtime_json_mode: bool = False,
     http_post: Any = requests.post,
@@ -1690,14 +1690,19 @@ def capture_predictions(
     pack = prompt_pack or build_prompt_pack()
     outputs: dict[str, Any] = {}
     results = []
+    model_call_attempted = False
     for item in pack.get("prompts", []):
         case_id = str(item["id"])
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
         try:
+            endpoint = validate_endpoint(base_url)
+            key = api_key if api_key is not None else local_openai_key(
+                endpoint, os.getenv("LOCAL_OPENAI_BASE_URL") or "http://localhost:1234/v1")
+            headers = {"Content-Type": "application/json"}
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            model_call_attempted = True
             response = http_post(
-                f"{base_url.rstrip('/')}/chat/completions",
+                f"{endpoint.rstrip('/')}/chat/completions",
                 headers=headers,
                 json=_chat_payload(
                     model,
@@ -1771,7 +1776,7 @@ def capture_predictions(
         "version": "odi-63-v1",
         "mode": "prediction_capture",
         "model": model,
-        "model_call_attempted": total > 0,
+        "model_call_attempted": model_call_attempted,
         "live_execution_attempted": False,
         "total": total,
         "captured": len(outputs),
@@ -1789,7 +1794,7 @@ def export_predictions(
     prompt_pack: dict[str, Any] | None = None,
     base_url: str,
     model: str,
-    api_key: str = "",
+    api_key: str | None = "",
     timeout: int = 180,
     use_runtime_json_mode: bool = False,
     http_post: Any = requests.post,
@@ -1814,17 +1819,20 @@ def probe_runtime(
     *,
     base_url: str,
     model: str,
-    api_key: str = "",
+    api_key: str | None = "",
     timeout: int = 10,
     http_get: Any | None = None,
 ) -> dict[str, Any]:
     """Probe a local OpenAI-compatible runtime without requesting inference."""
 
     http_get = http_get or requests.get
-    headers = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
     try:
+        base_url = validate_endpoint(base_url)
+        key = api_key if api_key is not None else local_openai_key(
+            base_url, os.getenv("LOCAL_OPENAI_BASE_URL") or "http://localhost:1234/v1")
+        headers = {}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
         response = http_get(f"{base_url.rstrip('/')}/models", headers=headers, timeout=timeout)
         status_code = int(getattr(response, "status_code", 0) or 0)
         reachable = 200 <= status_code < 400
@@ -1948,7 +1956,7 @@ def main() -> int:
     parser.add_argument("--runtime-probe-out", help="Optional JSON output path for --probe-runtime.")
     parser.add_argument("--base-url", default=os.getenv("LOCAL_OPENAI_BASE_URL", "http://localhost:1234/v1"))
     parser.add_argument("--model", default=os.getenv("LOCAL_OPENAI_MODEL", "qwen/qwen2.5-coder-14b"))
-    parser.add_argument("--api-key", default=os.getenv("LOCAL_OPENAI_API_KEY", ""))
+    parser.add_argument("--api-key", default=None)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument(
         "--runtime-json-mode",

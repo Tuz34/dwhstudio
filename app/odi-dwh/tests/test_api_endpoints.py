@@ -4045,7 +4045,16 @@ class TestEnvironmentEndpoints:
         assert body == {"environment": "dev", "oracle_dsn": "APP_USER/orcl"}
 
     def test_project_hub_returns_filtered_architecture_with_statuses(self, app_client, monkeypatch, tmp_path):
+        import socket
+
         import app as app_module
+        import routes.environment as environment_routes
+
+        network_calls = []
+
+        def forbidden_network(*_args, **_kwargs):
+            network_calls.append(True)
+            raise AssertionError("Project-hub success test must not access the network")
 
         class FakeResponse:
             status_code = 200
@@ -4064,7 +4073,10 @@ class TestEnvironmentEndpoints:
         )
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(app_module, "test_connection", lambda: True)
-        monkeypatch.setattr(app_module.requests, "get", lambda *_args, **_kwargs: FakeResponse())
+        monkeypatch.setattr(environment_routes, "ai_get", lambda *_args, **_kwargs: FakeResponse())
+        monkeypatch.setattr(app_module.requests, "get", forbidden_network)
+        monkeypatch.setattr(socket, "getaddrinfo", forbidden_network)
+        monkeypatch.setattr(socket.socket, "connect", forbidden_network)
 
         resp = app_client.get("/api/project_hub")
 
@@ -4075,12 +4087,27 @@ class TestEnvironmentEndpoints:
         assert architecture["oracle"] == "Active"
         assert architecture["ollama"] == "Active"
         assert architecture["docker"] == "Active"
+        assert network_calls == []
 
     def test_project_hub_uses_english_down_status_text(self, app_client, monkeypatch, tmp_path):
+        import socket
+
         import app as app_module
+        import routes.environment as environment_routes
+
+        transport_calls = []
+        network_calls = []
+
+        def forbidden_network(*_args, **_kwargs):
+            network_calls.append(True)
+            raise AssertionError("Project-hub Down test must not access the network")
 
         class FakeResponse:
             status_code = 503
+
+        def fake_get(url, **kwargs):
+            transport_calls.append((url, kwargs))
+            return FakeResponse()
 
         (tmp_path / "project_hub.json").write_text(
             json.dumps({
@@ -4093,10 +4120,15 @@ class TestEnvironmentEndpoints:
         )
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(app_module, "test_connection", lambda: False)
-        monkeypatch.setattr(app_module.requests, "get", lambda *_args, **_kwargs: FakeResponse())
+        monkeypatch.setattr(environment_routes, "ai_get", fake_get)
+        monkeypatch.setattr(app_module.requests, "get", forbidden_network)
+        monkeypatch.setattr(socket, "getaddrinfo", forbidden_network)
+        monkeypatch.setattr(socket.socket, "connect", forbidden_network)
 
         resp = app_client.get("/api/project_hub")
 
+        assert network_calls == []
+        assert transport_calls == [(app_module.config.OLLAMA_TAGS_URL, {"timeout": 1.5})]
         assert resp.status_code == 200
         architecture = {item["id"]: item["status"] for item in resp.get_json()["architecture"]}
         assert architecture["oracle"] == "Down (Unavailable)"
