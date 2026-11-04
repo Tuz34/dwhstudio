@@ -58,6 +58,9 @@ GROOVY_ACTION_REGISTRY = {
     "repair_mapping_components.groovy": _action("repository_write"),
     "run_load_plan_remote.groovy": _action("load_plan_run"),
     "run_scenario.groovy": _action("scenario_run"),
+    "scd2_datastore_register.groovy": _action("repository_write"),
+    "scd2_mapping_create.groovy": _action("repository_write"),
+    "scd2_probe.groovy": _action("read_only"),
     "scenario_probe.groovy": _action("read_only"),
     "seed_model_datastore.groovy": _action("repository_write"),
     "seed_physical_topology.groovy": _action("topology_write"),
@@ -96,7 +99,35 @@ _PARAM_VAL_RE   = re.compile(r'^[a-zA-Z0-9._\-/\\ :,()#]+$')
 # Extended regex for expression values (=, ;, ', ||, CASE WHEN, LIKE '%X%', !=, &, [], etc.)
 _EXPR_VAL_RE    = re.compile(r"^[a-zA-Z0-9._\-/\\ :,()#=;'|*+<>%!&\[\]{}\"]+$")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
+_SCD2_ERROR_KEYS = frozenset(
+    {
+        "tool",
+        "status",
+        "mode",
+        "side_effects",
+        "repository_connection_attempted",
+        "raw_rows_included",
+        "pk_values_included",
+        "secret_printed",
+        "error_type",
+    }
+)
 _STRICT_STRUCTURED_ERROR_CONTRACTS = {
+    "scd2_probe.groovy": {
+        "tool": "odi.scd2_probe",
+        "mode": "generic_scd2_readiness_probe",
+        "keys": _SCD2_ERROR_KEYS,
+    },
+    "scd2_datastore_register.groovy": {
+        "tool": "odi.scd2_datastore_register",
+        "mode": "generic_absent_only_scd2_datastore_registration",
+        "keys": _SCD2_ERROR_KEYS,
+    },
+    "scd2_mapping_create.groovy": {
+        "tool": "odi.scd2_mapping_create",
+        "mode": "generic_absent_only_scd2_mapping_creation",
+        "keys": _SCD2_ERROR_KEYS,
+    },
     "dim_product_scd2_ikm_import.groovy": {
         "tool": "odi.dim_product_scd2_ikm_import",
         "mode": "fixed_sdk_reference_absent_only_ikm_import",
@@ -857,7 +888,8 @@ class OdiOrchestrator:
                           approved: bool = False,
                           scenario_name: str,
                           version: str,
-                          context: str = "GLOBAL") -> dict:
+                          context: str = "GLOBAL",
+                          extra_allowed_scenarios: frozenset | None = None) -> dict:
         """Run an allowlisted ODI scenario and return redacted structured evidence."""
         scenario = str(scenario_name or "").strip().upper()
         scen_version = str(version or "").strip()
@@ -877,7 +909,7 @@ class OdiOrchestrator:
                     }
                 ],
             }
-        if scenario not in _ODI24_ALLOWED_SCENARIOS:
+        if scenario not in _ODI24_ALLOWED_SCENARIOS and scenario not in (extra_allowed_scenarios or ()):
             return {
                 "tool": "odi.run_scenario_safe",
                 "status": "blocked_by_allowlist",

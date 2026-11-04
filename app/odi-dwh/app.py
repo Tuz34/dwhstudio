@@ -148,7 +148,7 @@ _DEPLOYMENT_SECURITY_PROFILE = validate_deployment_security({
 
 # S-10: GeÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â§erli owner/schema listesi ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â tÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¼m endpoint'lerde kullanÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â±lÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â±r
 # Hedef semalar + aktif kaynak Oracle semalari (SOURCE_ORACLE_SCHEMAS) dahil.
-_ALLOWED_OWNERS = {"DWH", "ODS", "AUDIT_USER", "DWH_FLAT", (config.AUDIT_ORACLE_USER or "").upper()}
+_ALLOWED_OWNERS = {"DWH", "DM", "ODS", "AUDIT_USER", "DWH_FLAT", (config.AUDIT_ORACLE_USER or "").upper()}
 if (config.SOURCE_DB_TYPE or "").lower() == "oracle":
     _ALLOWED_OWNERS |= set(config.SOURCE_ORACLE_SCHEMAS or [])
 

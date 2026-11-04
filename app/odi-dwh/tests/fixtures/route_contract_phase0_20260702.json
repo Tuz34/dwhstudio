@@ -1,5 +1,5 @@
 {
-  "route_count": 104,
+  "route_count": 108,
   "routes": [
     {
       "approval_required": false,
@@ -950,6 +950,54 @@
       "path": "/api/rollback/<batch_id>",
       "rate_limit": "3 per minute",
       "risk": "persistent_write"
+    },
+    {
+      "path": "/api/scd2/generate",
+      "methods": [
+        "POST"
+      ],
+      "function": "api_scd2_generate",
+      "line": 33,
+      "risk": "persistent_write",
+      "approval_required": true,
+      "rate_limit": "10 per minute",
+      "csrf_exempt": false
+    },
+    {
+      "path": "/api/scd2/plan",
+      "methods": [
+        "POST"
+      ],
+      "function": "api_scd2_plan",
+      "line": 21,
+      "risk": "write",
+      "approval_required": false,
+      "rate_limit": "20 per minute",
+      "csrf_exempt": false
+    },
+    {
+      "path": "/api/scd2/postflight",
+      "methods": [
+        "GET"
+      ],
+      "function": "api_scd2_postflight",
+      "line": 71,
+      "risk": "read",
+      "approval_required": false,
+      "rate_limit": "30 per minute",
+      "csrf_exempt": false
+    },
+    {
+      "path": "/api/scd2/run",
+      "methods": [
+        "POST"
+      ],
+      "function": "api_scd2_run",
+      "line": 52,
+      "risk": "persistent_write",
+      "approval_required": true,
+      "rate_limit": "5 per minute",
+      "csrf_exempt": false
     },
     {
       "approval_required": false,
