@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "broad_except_max": 300,
+  "broad_except_max": 302,
   "swallowed_handlers_max": 15,
   "return_annotation_ratio_min": 0.74,
   "ruff_max_by_code": {

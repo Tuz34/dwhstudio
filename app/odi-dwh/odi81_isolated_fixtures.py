@@ -1,0 +1,383 @@
+"""Fixed F1/F2/F3 preparation primitives. Importing this module performs no IO."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from decimal import Decimal
+from typing import Any
+
+Factory = Callable[[], Any]
+_FLOWS = {
+    "F1": ("ODI81_SRC_F1", "ODS_ODI81_F1"),
+    "F2": ("ODI81_SRC_F2", "ODS_ODI81_F2"),
+    "F3": ("ODI81_SRC_F3", "DWH_ODI81_F3"),
+}
+_BUSINESS = ("ENTITY_ID", "ATTR_TEXT", "VALUE_AMT")
+_ODS_EXTRA = ("INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID")
+_EDW_EXTRA = ("INSERT_DATE", "UPDATE_DATE", "CURRENT_FLAG", "EFFECTIVE_FROM",
+              "EFFECTIVE_TO", "SOURCE_SYSTEM", "ETL_BATCH_ID")
+_SEED = ((101, "FIXTURE_A", Decimal("10.00")), (102, "FIXTURE_B", Decimal("20.00")),
+         (103, "FIXTURE_C", Decimal("30.00")))
+_CHANGED = ((_SEED[0][0], "FIXTURE_A_UPDATED", _SEED[0][2]), *_SEED[1:],
+            (104, "FIXTURE_D", Decimal("40.00")))
+_META = "COLUMN_ID,COLUMN_NAME,DATA_TYPE,DATA_LENGTH,DATA_PRECISION,DATA_SCALE,CHAR_USED,CHAR_LENGTH,NULLABLE"
+_ERRORS = frozenset({"InvalidCount", "AutocommitNotDisabled", "CleanupFailed", "WriterMustBeDwh",
+                     "ColumnContractMismatch", "SourcePrimaryKeyMismatch", "FixtureStateMismatch",
+                     "SnapshotMismatch", "BackupMetadataMismatch", "SourceReaderCannotReadNewFixture",
+                     "SourceAlreadyExists", "AffectedCountMismatch", "DeltaMismatch", "NotPermanentTable",
+                     "SourceTriggersPresent"})
+
+
+class _Blocked(RuntimeError):
+    pass
+
+
+def _report(action: str) -> dict[str, Any]:
+    return {
+        "tool": "odi81.isolated_fixtures", "action": action, "status": "blocked",
+        "stage": "approval", "error_code": "ApprovalRequired", "counts": {},
+        "connection_attempted": False, "source_reader_verified": False,
+        "ddl_attempted": False, "object_may_exist": False,
+        "dml_attempted": False, "commit_attempted": False, "commit_completed": False,
+        "outcome_unknown": False, "manual_review_required": False,
+        "rollback_failed": False, "cursor_close_failed": False, "connection_close_failed": False,
+        "automatic_ddl_rollback_performed": False, "target_mutation_performed": False,
+        "raw_rows_included": False, "pk_values_included": False, "secret_printed": False,
+    }
+
+
+def _authorize(report: dict, flow: object, approved: object, scope: object, suffix: str) -> bool:
+    if approved is not True or not isinstance(flow, str) or flow not in _FLOWS:
+        return False
+    if scope != f"odi81_{flow.lower()}_{suffix}":
+        report["error_code"] = "ApprovalScopeMismatch"
+        return False
+    report["flow"] = flow
+    return True
+
+
+def _table(name: str) -> str:
+    return f'"DWH"."{name}"'
+
+
+def _columns(names: tuple[str, ...]) -> str:
+    return ",".join(f'"{name}"' for name in names)
+
+
+def _count(cursor: Any, sql: str, params: dict | None = None) -> int:
+    cursor.execute(sql, params or {})
+    row = cursor.fetchone()
+    if not isinstance(row, (list, tuple)) or len(row) != 1 or type(row[0]) is not int or row[0] < 0:
+        raise _Blocked("InvalidCount")
+    return row[0]
+
+
+def _need(condition: bool, code: str) -> None:
+    if not condition:
+        raise _Blocked(code)
+
+
+def _open(factory: Factory, report: dict, resources: list, *, readonly: bool) -> Any:
+    report["connection_attempted"] = True
+    connection = factory()
+    resources.append([connection, None])
+    _need(connection.autocommit is False, "AutocommitNotDisabled")
+    cursor = connection.cursor()
+    resources[-1][1] = cursor
+    # This must precede every query in each aggregate-reader transaction.
+    if readonly:
+        cursor.execute("SET TRANSACTION READ ONLY")
+    return cursor
+
+
+def _cleanup(resources: list, report: dict) -> None:
+    for connection, cursor in reversed(resources):
+        for resource, method, flag in ((connection, "rollback", "rollback_failed"),
+                                       (cursor, "close", "cursor_close_failed"),
+                                       (connection, "close", "connection_close_failed")):
+            if resource is None:
+                continue
+            try:
+                getattr(resource, method)()
+            except Exception:
+                # User-supplied resources can raise arbitrary ordinary exceptions.
+                # Never expose their text or skip the remaining cleanup attempts.
+                report[flag] = True
+    resources.clear()
+    if any(report[key] for key in ("rollback_failed", "cursor_close_failed", "connection_close_failed")):
+        report.update(status="failed", error_code="CleanupFailed", manual_review_required=True)
+        if report["dml_attempted"] and not report["commit_completed"] and report["rollback_failed"]:
+            report["outcome_unknown"] = True
+
+
+def _fail(report: dict, exc: Exception) -> None:
+    # Only our internal fixed codes are emitted, never an exception class/message.
+    code = exc.args[0] if type(exc) is _Blocked and exc.args else None
+    report["error_code"] = code if isinstance(code, str) and code in _ERRORS else "OperationFailed"
+    report["status"] = "failed" if report["ddl_attempted"] or report["dml_attempted"] else "blocked"
+    report["manual_review_required"] |= report["ddl_attempted"] or report["dml_attempted"]
+    report["outcome_unknown"] |= report["commit_attempted"] and not report["commit_completed"]
+
+
+@contextmanager
+def _operation(report: dict, resources: list, *, failure: Callable = _fail) -> Iterator[None]:
+    try:
+        yield
+    except Exception as exc:
+        # Deliberately broad at the public callback boundary, not an error-message logger.
+        failure(report, exc)
+    finally:
+        _cleanup(resources, report)
+
+
+def _owner(cursor: Any) -> None:
+    _need(_count(cursor, "SELECT COUNT(*) FROM DUAL WHERE SYS_CONTEXT('USERENV','SESSION_USER')='DWH'") == 1,
+          "WriterMustBeDwh")
+
+
+def _exists(cursor: Any, name: str) -> int:
+    return _count(cursor, "SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER='DWH' AND OBJECT_NAME=:name",
+                  {"name": name})
+
+
+def _business_metadata(cursor: Any, name: str, *, source: bool, flow: str) -> None:
+    _permanent_table(cursor, name)
+    names = _BUSINESS if source else _BUSINESS + (_EDW_EXTRA if flow == "F3" else _ODS_EXTRA)
+    binds = {"name": name, **{f"n{i}": col for i, col in enumerate(names)}}
+    permitted = ",".join(f":n{i}" for i in range(len(names)))
+    _need(_count(cursor, "SELECT COUNT(*) FROM ALL_TAB_COLUMNS WHERE OWNER='DWH' AND TABLE_NAME=:name",
+                 {"name": name}) == len(names), "ColumnContractMismatch")
+    _need(_count(cursor, f"SELECT COUNT(*) FROM ALL_TAB_COLUMNS WHERE OWNER='DWH' AND TABLE_NAME=:name "
+                 f"AND COLUMN_NAME IN ({permitted})", binds) == len(names), "ColumnContractMismatch")
+    _need(_count(cursor, """SELECT COUNT(*) FROM ALL_TAB_COLUMNS WHERE OWNER='DWH' AND TABLE_NAME=:name AND (
+        (COLUMN_ID=1 AND COLUMN_NAME='ENTITY_ID' AND DATA_TYPE='NUMBER' AND DATA_PRECISION=10 AND DATA_SCALE=0 AND NULLABLE='N') OR
+        (COLUMN_ID=2 AND COLUMN_NAME='ATTR_TEXT' AND DATA_TYPE='VARCHAR2' AND DATA_LENGTH=40 AND CHAR_USED='B' AND CHAR_LENGTH=40 AND NULLABLE='N') OR
+        (COLUMN_ID=3 AND COLUMN_NAME='VALUE_AMT' AND DATA_TYPE='NUMBER' AND DATA_PRECISION=10 AND DATA_SCALE=2 AND NULLABLE='N'))""",
+                 {"name": name}) == 3, "ColumnContractMismatch")
+    if source:
+        _need(_count(cursor, """SELECT COUNT(*) FROM ALL_CONSTRAINTS c
+            WHERE c.OWNER='DWH' AND c.TABLE_NAME=:name AND c.CONSTRAINT_TYPE='P'
+            AND c.STATUS='ENABLED' AND c.VALIDATED='VALIDATED'
+            AND (SELECT COUNT(*) FROM ALL_CONS_COLUMNS k WHERE k.OWNER=c.OWNER AND k.CONSTRAINT_NAME=c.CONSTRAINT_NAME)=1
+            AND EXISTS (SELECT 1 FROM ALL_CONS_COLUMNS k WHERE k.OWNER=c.OWNER
+                AND k.CONSTRAINT_NAME=c.CONSTRAINT_NAME AND k.COLUMN_NAME='ENTITY_ID' AND k.POSITION=1)""",
+                     {"name": name}) == 1, "SourcePrimaryKeyMismatch")
+
+
+def _expected(state: str) -> tuple[str, dict]:
+    rows = _SEED if state == "seed" else _CHANGED
+    params = {}
+    selects = []
+    for i, row in enumerate(rows):
+        params.update({f"k{i}": row[0], f"t{i}": row[1], f"v{i}": row[2]})
+        selects.append(f"SELECT :k{i} ENTITY_ID,:t{i} ATTR_TEXT,:v{i} VALUE_AMT FROM DUAL")
+    return "SELECT ENTITY_ID,ATTR_TEXT,VALUE_AMT FROM (" + " UNION ALL ".join(selects) + ")", params
+
+
+def _state(cursor: Any, name: str, state: str) -> dict[str, int]:
+    table = _table(name)
+    total = _count(cursor, f"SELECT COUNT(*) FROM {table}")
+    nulls = _count(cursor, f'SELECT COUNT(*) FROM {table} WHERE "ENTITY_ID" IS NULL OR "ATTR_TEXT" IS NULL OR "VALUE_AMT" IS NULL')
+    duplicates = _count(cursor, f'SELECT COUNT(*) FROM (SELECT "ENTITY_ID" FROM {table} GROUP BY "ENTITY_ID" HAVING COUNT(*)>1)')
+    _need(total == {"empty": 0, "seed": 3, "changed": 4}[state] and nulls == duplicates == 0,
+          "FixtureStateMismatch")
+    if state != "empty":
+        expected, params = _expected(state)
+        actual = f"SELECT {_columns(_BUSINESS)} FROM {table}"
+        for left, right in ((actual, expected), (expected, actual)):
+            _need(_count(cursor, f"SELECT COUNT(*) FROM ({left} MINUS {right})", params) == 0,
+                  "FixtureStateMismatch")
+    return {"rows": total, "null_business_rows": nulls, "duplicate_key_groups": duplicates}
+
+
+def _equal(cursor: Any, left: str, right: str, columns: tuple[str, ...]) -> None:
+    projection = _columns(columns)
+    for a, b in ((left, right), (right, left)):
+        _need(_count(cursor, f"SELECT COUNT(*) FROM (SELECT {projection} FROM {_table(a)} "
+                     f"MINUS SELECT {projection} FROM {_table(b)})") == 0, "SnapshotMismatch")
+
+
+def _permanent_table(cursor: Any, name: str) -> None:
+    _need(_count(cursor, "SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER='DWH' AND TABLE_NAME=:name AND TEMPORARY='N'",
+                 {"name": name}) == 1, "NotPermanentTable")
+
+
+def _no_source_triggers(cursor: Any, name: str) -> None:
+    _need(_count(cursor, "SELECT COUNT(*) FROM ALL_TRIGGERS WHERE TABLE_OWNER='DWH' "
+                 "AND TABLE_NAME=:name AND STATUS='ENABLED'", {"name": name}) == 0,
+          "SourceTriggersPresent")
+
+
+def _backup(cursor: Any, flow: str, *, source: bool, run: int, state: str, compare_current: bool) -> str:
+    original = _FLOWS[flow][0 if source else 1]
+    backup = f"ODI81_{flow}_{'S' if source else 'T'}_R{run}_BKP"
+    columns = _BUSINESS if source else _BUSINESS + (_EDW_EXTRA if flow == "F3" else _ODS_EXTRA)
+    # No PK constraint is required on a CTAS backup; key uniqueness is counted instead.
+    _permanent_table(cursor, backup)
+    if not source:
+        _business_metadata(cursor, backup, source=False, flow=flow)
+    if source:
+        _need(_count(cursor, "SELECT COUNT(*) FROM ALL_TAB_COLUMNS WHERE OWNER='DWH' AND TABLE_NAME=:name",
+                     {"name": backup}) == 3, "BackupMetadataMismatch")
+    for a, b in ((original, backup), (backup, original)):
+        _need(_count(cursor, f"SELECT COUNT(*) FROM (SELECT {_META} FROM ALL_TAB_COLUMNS "
+                     "WHERE OWNER='DWH' AND TABLE_NAME=:a MINUS "
+                     f"SELECT {_META} FROM ALL_TAB_COLUMNS WHERE OWNER='DWH' AND TABLE_NAME=:b)",
+                     {"a": a, "b": b}) == 0, "BackupMetadataMismatch")
+    _state(cursor, backup, state)
+    if compare_current:
+        _state(cursor, original, state)
+        _equal(cursor, original, backup, columns)
+    return backup
+
+
+def _reader_check(factory: Factory, flow: str, report: dict, *, state: str | None) -> None:
+    resources: list = []
+    report["source_reader_verified"] = False
+    try:
+        cursor = _open(factory, report, resources, readonly=True)
+        if state is None:
+            # An absent object's per-object grant cannot be tested before CREATE. Fail closed
+            # unless this actual reader already has schema ownership or SELECT ANY TABLE.
+            _need(_count(cursor, """SELECT COUNT(*) FROM DUAL WHERE SYS_CONTEXT('USERENV','SESSION_USER')='DWH'
+                OR EXISTS (SELECT 1 FROM SESSION_PRIVS WHERE PRIVILEGE='SELECT ANY TABLE')""") == 1,
+                  "SourceReaderCannotReadNewFixture")
+        else:
+            name = _FLOWS[flow][0]
+            _business_metadata(cursor, name, source=True, flow=flow)
+            _state(cursor, name, state)
+            report["source_reader_verified"] = True
+    finally:
+        _cleanup(resources, report)
+    _need(report["error_code"] != "CleanupFailed", "CleanupFailed")
+
+
+def prepare_source(flow: str, writer_factory: Factory, source_reader_factory: Factory, *,
+                   approved: object = False, approval_scope: object = None) -> dict[str, Any]:
+    """Create/seed one absent fixed source. DDL is not rollback-safe; never retry/reset."""
+    report = _report("prepare_source")
+    if not _authorize(report, flow, approved, approval_scope, "prepare_source"):
+        return report
+    resources: list = []
+    with _operation(report, resources):
+        report["stage"] = "source_reader_preflight"
+        _reader_check(source_reader_factory, flow, report, state=None)
+        report["stage"] = "absence_preflight"
+        cursor = _open(writer_factory, report, resources, readonly=False)
+        _owner(cursor)
+        source = _FLOWS[flow][0]
+        _need(_exists(cursor, source) == 0, "SourceAlreadyExists")
+        report.update(stage="create_source", ddl_attempted=True, object_may_exist=True)
+        cursor.execute(f"CREATE TABLE {_table(source)} (ENTITY_ID NUMBER(10) NOT NULL, "
+                       "ATTR_TEXT VARCHAR2(40 BYTE) NOT NULL, VALUE_AMT NUMBER(10,2) NOT NULL, "
+                       f"CONSTRAINT PK_{source} PRIMARY KEY (ENTITY_ID))")
+        _permanent_table(cursor, source)
+        cursor.execute(f"LOCK TABLE {_table(source)} IN EXCLUSIVE MODE NOWAIT")
+        _business_metadata(cursor, source, source=True, flow=flow)
+        _no_source_triggers(cursor, source)
+        report.update(stage="seed_source", dml_attempted=True)
+        for key, text, amount in _SEED:
+            cursor.execute(f"INSERT INTO {_table(source)} ({_columns(_BUSINESS)}) VALUES (:key,:text,:amount)",
+                           {"key": key, "text": text, "amount": amount})
+            _need(type(cursor.rowcount) is int and cursor.rowcount == 1, "AffectedCountMismatch")
+        _business_metadata(cursor, source, source=True, flow=flow)
+        report["counts"] = _state(cursor, source, "seed")
+        report.update(stage="commit", commit_attempted=True)
+        resources[0][0].commit()
+        report["commit_completed"] = True
+        _cleanup(resources, report)
+        _need(report["error_code"] != "CleanupFailed", "CleanupFailed")
+        report["stage"] = "source_reader_postflight"
+        _reader_check(source_reader_factory, flow, report, state="seed")
+        report.update(status="passed", stage="completed", error_code=None)
+    return report
+
+
+def mutate_source(flow: str, writer_factory: Factory, source_reader_factory: Factory, *,
+                  approved: object = False, approval_scope: object = None) -> dict[str, Any]:
+    """Exactly one update + insert, after fixed source/target R2 backup comparisons."""
+    report = _report("mutate_source")
+    if not _authorize(report, flow, approved, approval_scope, "mutate_source"):
+        return report
+    resources: list = []
+    with _operation(report, resources):
+        report["stage"] = "source_reader_preflight"
+        _reader_check(source_reader_factory, flow, report, state="seed")
+        report["stage"] = "backup_preflight"
+        cursor = _open(writer_factory, report, resources, readonly=False)
+        _owner(cursor)
+        source, target = _FLOWS[flow]
+        # Reject views/synonyms before any lock could reach their underlying objects.
+        for name in (source, target, f"ODI81_{flow}_S_R2_BKP", f"ODI81_{flow}_T_R2_BKP"):
+            _permanent_table(cursor, name)
+        # Keep the source, target and retained checkpoints stable through this transaction.
+        cursor.execute(f"LOCK TABLE {_table(source)} IN EXCLUSIVE MODE NOWAIT")
+        for name in (target, f"ODI81_{flow}_S_R2_BKP", f"ODI81_{flow}_T_R2_BKP"):
+            cursor.execute(f"LOCK TABLE {_table(name)} IN SHARE MODE NOWAIT")
+        _business_metadata(cursor, source, source=True, flow=flow)
+        _no_source_triggers(cursor, source)
+        _business_metadata(cursor, target, source=False, flow=flow)
+        _backup(cursor, flow, source=True, run=2, state="seed", compare_current=True)
+        _backup(cursor, flow, source=False, run=2, state="seed", compare_current=True)
+        report.update(stage="mutate_source", dml_attempted=True)
+        cursor.execute(f'UPDATE {_table(source)} SET "ATTR_TEXT"=:text WHERE "ENTITY_ID"=:key',
+                       {"text": _CHANGED[0][1], "key": _SEED[0][0]})
+        _need(type(cursor.rowcount) is int and cursor.rowcount == 1, "AffectedCountMismatch")
+        cursor.execute(f"INSERT INTO {_table(source)} ({_columns(_BUSINESS)}) VALUES (:key,:text,:amount)",
+                       dict(zip(("key", "text", "amount"), _CHANGED[-1])))
+        _need(type(cursor.rowcount) is int and cursor.rowcount == 1, "AffectedCountMismatch")
+        report["counts"] = {**_state(cursor, source, "changed"), "updated": 1, "inserted": 1}
+        report.update(stage="commit", commit_attempted=True)
+        resources[0][0].commit()
+        report["commit_completed"] = True
+        _cleanup(resources, report)
+        _need(report["error_code"] != "CleanupFailed", "CleanupFailed")
+        report["stage"] = "source_reader_postflight"
+        _reader_check(source_reader_factory, flow, report, state="changed")
+        report.update(status="passed", stage="completed", error_code=None)
+    return report
+
+
+def verify_flow(flow: str, run: int, phase: str, reader_factory: Factory, source_reader_factory: Factory, *,
+                approved: object = False, approval_scope: object = None) -> dict[str, Any]:
+    """Read-only before/after evidence; never authorizes or invokes a target run."""
+    report = _report("verify_flow")
+    if not _authorize(report, flow, approved, approval_scope, "verify_flow"):
+        return report
+    if type(run) is not int or run not in (1, 2, 3) or phase not in ("before_run", "after_run"):
+        report["error_code"] = "InvalidCheckpoint"
+        return report
+    resources: list = []
+    with _operation(report, resources):
+        state = "seed" if run == 1 else "changed"
+        report["stage"] = "source_reader_preflight"
+        _reader_check(source_reader_factory, flow, report, state=state)
+        report["stage"] = "snapshot_verification"
+        cursor = _open(reader_factory, report, resources, readonly=True)
+        source, target = _FLOWS[flow]
+        _business_metadata(cursor, source, source=True, flow=flow)
+        _business_metadata(cursor, target, source=False, flow=flow)
+        source_counts = _state(cursor, source, state)
+        target_state = ("empty" if run == 1 else "seed" if run == 2 else "changed") if phase == "before_run" else state
+        target_counts = _state(cursor, target, target_state)
+        checkpoint_state = {1: "empty", 2: "seed", 3: "changed"}[run]
+        backup = _backup(cursor, flow, source=False, run=run, state=checkpoint_state,
+                         compare_current=phase == "before_run")
+        report["counts"] = {"source_rows": source_counts["rows"], "target_rows": target_counts["rows"],
+                            "null_business_rows": 0, "duplicate_key_groups": 0}
+        if phase == "after_run":
+            _equal(cursor, source, target, _BUSINESS)
+            report["counts"].update(source_minus_target=0, target_minus_source=0)
+            if run > 1:
+                changed = _count(cursor, f'SELECT COUNT(*) FROM {_table(target)} t JOIN {_table(backup)} b '
+                                 'ON t.ENTITY_ID=b.ENTITY_ID WHERE t.ATTR_TEXT<>b.ATTR_TEXT OR t.VALUE_AMT<>b.VALUE_AMT')
+                unchanged = _count(cursor, f'SELECT COUNT(*) FROM {_table(target)} t JOIN {_table(backup)} b '
+                                   'ON t.ENTITY_ID=b.ENTITY_ID WHERE t.ATTR_TEXT=b.ATTR_TEXT AND t.VALUE_AMT=b.VALUE_AMT')
+                inserted = _count(cursor, f'SELECT COUNT(*) FROM {_table(target)} t WHERE NOT EXISTS '
+                                  f'(SELECT 1 FROM {_table(backup)} b WHERE b.ENTITY_ID=t.ENTITY_ID)')
+                _need((changed, unchanged, inserted) == ((1, 2, 1) if run == 2 else (0, 4, 0)), "DeltaMismatch")
+                report["counts"].update(changed_existing=changed, unchanged_existing=unchanged, inserted=inserted)
+        report.update(status="passed", stage="completed", error_code=None, run=run, phase=phase,
+                      logical_business_comparison_only=True, physical_dml_count_proven=False)
+    return report
