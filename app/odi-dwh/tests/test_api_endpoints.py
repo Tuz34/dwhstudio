@@ -2568,7 +2568,7 @@ class TestSchemaImpactAndPreflight:
         class FakeOrchestrator:
             def sync_datastore_column(self, **kwargs):
                 calls.append(kwargs)
-                return "SUCCESS: ODI datastore metadata synced"
+                return "SUCCESS: ODI datastore metadata sync committed"
 
         monkeypatch.setattr(odi_orchestrator, "OdiOrchestrator", FakeOrchestrator)
 

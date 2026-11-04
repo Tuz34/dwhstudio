@@ -326,6 +326,13 @@ def groovy_sync_failure_reason(output: str) -> str | None:
     if not isinstance(output, str):
         return "ODI Groovy returned an invalid result."
     if not _groovy_output_failed(output):
+        # This fixed script emits the acknowledgement only after commit returns.
+        acknowledgements = sum(
+            line.strip() == "SUCCESS: ODI datastore metadata sync committed"
+            for line in _strip_known_jmx_noise(output).splitlines()
+        )
+        if acknowledgements != 1:
+            return "ODI Groovy did not confirm the metadata sync commit."
         return None
     error_type = re.search(r"\berror_type=([A-Za-z][A-Za-z0-9_$]{0,127})\b", output)
     if error_type:
