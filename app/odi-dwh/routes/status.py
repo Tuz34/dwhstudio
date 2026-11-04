@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Blueprint, jsonify
 
+from status_probe_cache import StatusProbeCache
 
 bp = Blueprint("status", __name__)
+_PROBE_CACHE = StatusProbeCache()
 
 
 @bp.route("/api/status")
@@ -31,11 +32,11 @@ def api_status():
         "langgraph": app_module._chk_graph_health,
         "ai_orchestrator": app_module._chk_ai_orchestrator,
     }
-    checks = {}
-    with ThreadPoolExecutor(max_workers=11) as executor:
-        futures = {executor.submit(fn): name for name, fn in checkers.items()}
-        for future in as_completed(futures):
-            checks[futures[future]] = future.result()
+    checks, retry_after = _PROBE_CACHE.read(checkers)
+    if checks is None:
+        return jsonify({"error": "Status request limit exceeded."}), 429, {
+            "Retry-After": str(retry_after), "Cache-Control": "no-store",
+        }
 
     all_ok = all(checks.values())
     return jsonify({
@@ -43,4 +44,4 @@ def api_status():
         "checks": checks,
         "count": f"{sum(1 for value in checks.values() if value)}/{len(checks)}",
         "llm_provider": normalize_provider(os.getenv("LLM_PROVIDER", "hybrid")),
-    })
+    }), 200, {"Cache-Control": "no-store"}
