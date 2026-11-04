@@ -11,17 +11,18 @@ mapping, sets the target staging location, assigns the approved IKM and then han
 - Same logical schema (source and target datastores share the logical schema, so the same data
   server and physical schema): the source belongs in the target execution unit and needs no AP. The
   script tries `design.moveNodes` for the source node; any AP that still remains gets the load KM.
-- Validation: the baseline no-argument `mapping.validate()` gate is unchanged (true means valid). A
-  second call, `mapping.validate(issues, false)`, only collects messages; in SDK 12.2.1.4 it returns
-  TRUE when errors were found (`hasValidationErrors`), the inverse of the no-argument call, and
-  either signal fails the mapping. On failure the physical design's own messages are added.
+- Validation: in SDK 12.2.1.4 both `validate()` overloads return TRUE when errors were found (the
+  no-argument form delegates to the issue-list form). The script uses
+  `mapping.validate(issues, false)` as the single gate (`hasValidationErrors`): true fails the
+  mapping, false lets it commit. The earlier "true means valid" reading rolled back valid mappings.
+  On failure the physical design's own messages are added to the collected issues.
 - The Groovy error line stays one JSON object and gains additive keys `validation_messages` (at most
   20 entries, ERROR/FATAL/WARNING only; each complete entry, severity prefix included, is capped at
   300 characters; quoted text, URLs and key=value secrets are masked on a best-effort basis) and
   `physical_design` (`same_schema`, `access_points`, `access_points_with_lkm`, `access_point_names`,
   `physical_nodes`, `source_moved`). The success line carries `physical_design` too.
-- These are raw Groovy diagnostics for the process log only. On failure the script exits non-zero,
-  the orchestrator replaces the output with a generic `GroovyProcessError`, and
+- These are raw Groovy stdout diagnostics only. On failure the script exits non-zero, the
+  orchestrator captures and discards that stdout and raises a generic `GroovyProcessError`, and
   `mapping_generator` reads only the status flags and `error_type`, so `validation_messages` do not
   reach `POST /api/mapping/generate` responses. Redaction is best effort and the free-form SDK text
   must not be forwarded to any API or UI without a separately reviewed safe projection.

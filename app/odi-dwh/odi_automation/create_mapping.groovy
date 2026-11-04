@@ -94,6 +94,11 @@ def summarizeIssues = { issues ->
     return out
 }
 
+// True when the SDK reports validation errors; collects the issues for the structured error line.
+def mappingHasErrors = { mp, List issues ->
+    return mp.validate(issues, false) == true
+}
+
 // On failure also ask the physical design for its own messages (the logical result is often a bare
 // false) and record the node names; never throws, so the original failure stays the reported one.
 def collectDesignFailure = { dsg, List issues, Map diag ->
@@ -873,14 +878,11 @@ try {
         println "WARNING: Physical node not found, KM assignment skipped"
     }
     
-    // Baseline gate, semantics unchanged: the no-argument validate() returns true when valid.
-    def vr = mapping.validate()
-    boolean baselineInvalid = (vr instanceof Boolean && !vr) ||
-        (vr != null && !(vr instanceof Boolean) && vr.metaClass.respondsTo(vr, 'isValid') && !vr.isValid())
-    // SDK 12.2.1.4: validate(List issues, boolean onlyErrors) returns TRUE when errors were found.
+    // SDK 12.2.1.4: BOTH validate() overloads return TRUE when errors were found (the no-argument
+    // form delegates to the issue-list form). The issue-list overload is the only gate.
     List validationIssues = new ArrayList()
-    boolean hasValidationErrors = mapping.validate(validationIssues, false)
-    if (hasValidationErrors || baselineInvalid) {
+    boolean hasValidationErrors = mappingHasErrors(mapping, validationIssues)
+    if (hasValidationErrors) {
         validationMessages = collectDesignFailure(design, validationIssues, physicalDiag)
         throw new IllegalStateException("Mapping validation failed")
     }

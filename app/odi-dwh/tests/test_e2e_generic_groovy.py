@@ -424,7 +424,7 @@ def test_repository_preflight_has_no_write_or_data_operations():
 def test_create_mapping_assigns_load_km_to_access_points_after_final_staging():
     text = _text("create_mapping.groovy")
     staging = text.index("design.setStagingLocationName(locName)")
-    final_pass = text[staging:text.index("def vr") if "def vr" in text else text.index("boolean mappingValid")]
+    final_pass = text[staging:text.index("boolean hasValidationErrors")]
 
     # The AP nodes are re-read from the final design, after the last staging change.
     assert "FINAL PASS" in final_pass
@@ -452,13 +452,13 @@ def test_create_mapping_surfaces_validate_messages_in_structured_error():
     text = _text("create_mapping.groovy")
     catch = text[text.index("} catch (Exception e) {"):]
 
-    # SDK 12.2.1.4: validate(List, boolean) returns TRUE when errors were found (inverted vs. the
-    # no-argument validate(), which keeps returning true for a valid mapping).
-    assert "boolean hasValidationErrors = mapping.validate(validationIssues, false)" in text
-    assert "if (hasValidationErrors || baselineInvalid) {" in text
-    assert "mappingValid" not in text
-    assert "def vr = mapping.validate()" in text
-    assert "(vr instanceof Boolean && !vr)" in text
+    # SDK 12.2.1.4: both validate() overloads return TRUE when errors were found; the issue-list
+    # overload is the single gate and the no-argument call (read as "true = valid") is gone.
+    assert "boolean hasValidationErrors = mappingHasErrors(mapping, validationIssues)" in text
+    assert "mp.validate(issues, false) == true" in text
+    assert "if (hasValidationErrors) {" in text
+    assert "mappingValid" not in text and "baselineInvalid" not in text
+    assert "mapping.validate()" not in text and "def vr =" not in text
     assert "collectDesignFailure(design, validationIssues, physicalDiag)" in text
     assert '"validation_messages":' in catch and '"physical_design":' in catch
     assert "JsonOutput.toJson(validationMessages)" in catch
@@ -480,6 +480,13 @@ assert sameLogicalSchema(ds(dwh), ds(dwh))
 assert sameLogicalSchema(ds(ls(7, "LGCL_DWH")), ds(ls(7, "LGCL_DWH")))
 assert !sameLogicalSchema(ds(ls(8, "LGCL_HR")), ds(dwh))
 assert !sameLogicalSchema(ds(null), ds(dwh))
+
+def noErrors = new Expando(validate: { issues, only -> false })
+def withErrors = new Expando(validate: { issues, only -> issues.add("x"); true })
+def sink = []
+assert !mappingHasErrors(noErrors, sink)          // false = no errors -> the mapping commits
+assert mappingHasErrors(withErrors, sink)         // true = errors found -> the mapping fails
+assert sink == ["x"]
 
 def issue = { level, msg -> new Expando(getLevel: { level }, getMessage: { msg }) }
 def messages = summarizeIssues([issue("INFO", "ignored"), issue("ERROR", "bad\nnode password=hunter2 x"),
