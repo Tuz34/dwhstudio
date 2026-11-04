@@ -14,9 +14,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 
 @pytest.fixture
-def app_client():
+def app_client(monkeypatch):
     """Create a Flask test client."""
     from app import app, limiter
+    from routes import status
+    from status_probe_cache import StatusProbeCache
+    probe_cache = StatusProbeCache()
+    monkeypatch.setattr(status, "_PROBE_CACHE", probe_cache)
     app.config["TESTING"] = True
     app.config["WTF_CSRF_ENABLED"] = False  # Disable CSRF during tests.
     app.config["RATELIMIT_ENABLED"] = False  # The test suite calls the same endpoint rapidly.
@@ -27,6 +31,7 @@ def app_client():
             yield client
     finally:
         limiter.enabled = old_limiter_enabled
+        probe_cache.close()
 
 
 @pytest.fixture
