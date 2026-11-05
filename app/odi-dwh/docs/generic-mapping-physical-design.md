@@ -11,6 +11,10 @@ mapping, sets the target staging location, assigns the approved IKM and then han
 - Same logical schema (source and target datastores share the logical schema, so the same data
   server and physical schema): the source belongs in the target execution unit and needs no AP. The
   script tries `design.moveNodes` for the source node; any AP that still remains gets the load KM.
+- Repository KM readiness: `mapping_preflight.groovy` runs before any DDL or MAPPING_LOG write. An
+  approved IKM absent from the repository returns `error_code: ikm_not_imported` from
+  `POST /api/mapping/generate` on both engines. The KM is not imported and no other KM is chosen.
+  An ambiguous match or a failed lookup returns `repository_preflight_failed` with the step `code`.
 - Validation: in SDK 12.2.1.4 both `validate()` overloads return TRUE when errors were found (the
   no-argument form delegates to the issue-list form). The script uses
   `mapping.validate(issues, false)` as the single gate (`hasValidationErrors`): true fails the

@@ -355,9 +355,9 @@ def test_repository_preflight_helpers_are_exact_and_physical_behaviorally():
     helpers = text[text.index("def inspectIkm ="):text.index("def odi = null")]
     _run_isolated_helpers(helpers + r'''
 def km = { name, id -> new Expando(getName: { name }, getInternalId: { id }) }
-assert inspectIkm([], "IKM Oracle Merge").code == "ikm_missing"
+assert inspectIkm([], "IKM Oracle Merge").code == "ikm_not_imported"
 assert inspectIkm([km("IKM Oracle Merge", 1), km("ikm oracle merge", 2)], "IKM Oracle Merge").code == "ikm_ambiguous"
-assert inspectIkm([km("IKM Oracle Merge Custom", 1)], "IKM Oracle Merge").code == "ikm_missing"
+assert inspectIkm([km("IKM Oracle Merge Custom", 1)], "IKM Oracle Merge").code == "ikm_not_imported"
 assert inspectIkm([km("IKM Oracle Merge", 7)], "IKM Oracle Merge").ikm_id == "7"
 def model = { code, owner, resource, id ->
     def ds = new Expando(getName: { code + "_ALIAS" }, getResourceName: { resource },

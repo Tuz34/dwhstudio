@@ -75,7 +75,8 @@ def normalize_repository_preflight(
         return failure
     if payload.get("status") != "passed":
         code = payload.get("code")
-        allowed = {"approval_required", "ikm_missing", "ikm_ambiguous", "repository_lookup_failed",
+        allowed = {"approval_required", "ikm_not_approved", "ikm_not_imported", "ikm_ambiguous",
+                   "repository_lookup_failed",
                    "source_identity_missing", "source_identity_ambiguous", "source_identity_unverified"}
         return {**base, "code": code if isinstance(code, str) and code in allowed else "repository_lookup_failed"}
     if (payload.get("repository_connection_attempted") is not True

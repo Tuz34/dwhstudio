@@ -74,6 +74,8 @@ class RepositoryPreflightBlockedError(RuntimeError):
     def __init__(self, detail: dict) -> None:
         super().__init__("repository_preflight_failed: repository identity could not be verified")
         self.detail = detail
+        if detail.get("code") == "ikm_not_imported":
+            self.error_code = "ikm_not_imported"
 
 def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> str:
     """Escape single quotes in an Oracle SQL literal."""
