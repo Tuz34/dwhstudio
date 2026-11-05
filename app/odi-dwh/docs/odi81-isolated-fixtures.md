@@ -66,9 +66,13 @@ module intentionally does not call it. Rebind to the final deployed interface.
 
 ## Backup and verification boundaries
 
-This slice does **not create backups**. A separately reviewed absent-only
-backup creator is required; missing or mismatched backups block progression.
-The helper never claims an existing backup was created now.
+`create_retained_backup` creates one absent checkpoint by explicit column DDL
+and `INSERT SELECT`, then commits. An existing permanent table is retained
+only when its metadata and checkpoint already match. A view, a column drift,
+or a row drift blocks before any copy, and the object is not altered or
+dropped. Missing backups still block mutation and verification. A comparison
+that runs after the catalog reader opens and then disagrees is failed. A
+factory error before that open stays blocked.
 
 Before source mutation, require `DWH.ODI81_Fn_S_R2_BKP` and
 `DWH.ODI81_Fn_T_R2_BKP`, both matching the three-row seed checkpoint. The source

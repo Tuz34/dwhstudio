@@ -57,9 +57,11 @@ class Database:
         if backups:
             self.create(f"ODI81_{flow}_S_R2_BKP", fixture._BUSINESS, fixture._SEED)
 
-    def create(self, name, columns, rows):
-        types = {"ENTITY_ID": "INTEGER", "ATTR_TEXT": "TEXT", "VALUE_AMT": "NUMERIC"}
-        definitions = ",".join(f'"{col}" {types.get(col, "TEXT")}' for col in columns)
+    def create(self, name, columns, rows, *, types=None):
+        column_types = {"ENTITY_ID": "INTEGER", "ATTR_TEXT": "TEXT", "VALUE_AMT": "NUMERIC"}
+        if types:
+            column_types.update(types)
+        definitions = ",".join(f'"{col}" {column_types.get(col, "TEXT")}' for col in columns)
         self.db.execute(f'CREATE TABLE "{name}" ({definitions})')
         for row in rows:
             values = tuple(float(v) if isinstance(v, Decimal) else v for v in row) + (None,) * (len(columns) - 3)
@@ -149,6 +151,8 @@ class Cursor:
             translated = sql.replace('"DWH".', "").replace(" MINUS ", " EXCEPT ")
             translated = translated.replace("NUMBER(10,2)", "NUMERIC").replace("NUMBER(10)", "INTEGER")
             translated = translated.replace("VARCHAR2(40 BYTE)", "TEXT")
+            # Bare NUMBER is ETL_BATCH_ID. INTEGER affinity keeps the copied batch id comparable.
+            translated = translated.replace(" NUMBER", " INTEGER")
             values = {key: float(value) if isinstance(value, Decimal) else value for key, value in params.items()}
             cur = db.db.execute(translated, values)
             self.result = cur.fetchone() if cur.description else None

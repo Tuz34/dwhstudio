@@ -1,9 +1,10 @@
 # ODI-81 F4/F5 SCD2 acceptance harness
 
 Offline fixture and application-path code. Importing either module does no IO.
-No live database, ODI, or HTTP call is made by the tests. The frozen F1-F3
-helper is imported and not edited. A full eleven-column witness for F1-F3
-remains on the frozen snapshot-noop change and is not claimed here.
+No live database, ODI, or HTTP call is made by the tests. F1-F3 now use the
+classic `/api/mapping/generate` and `/api/mapping/run` path in
+`odi81-classic-app-flow.md`. This harness remains the F4/F5 SCD2 path. A mocked
+classic call is not a native ODI load.
 
 ## Fixed manifest
 
@@ -121,8 +122,7 @@ the binding. A non-200 response, an unexpected status, a version or context
 mismatch, a failed verification, or a missing backup stops every later step.
 There is no retry and no cleanup/reset.
 
-F1-F3 prepare through the existing helper, then stop with
-`app_target_contract_gap`. Their targets are ODS or type-1 tables. Calling
-`/api/scd2/generate` would create a surrogate SCD2 table and commit that DDL.
-`/api/mapping/generate` is not this SCD2 path. The driver does not invent a
-success witness for that gap.
+F1-F3 do not call `/api/scd2/generate`. That route would create a surrogate
+SCD2 target. Their classic request, backup order, and run witnesses are
+described in `odi81-classic-app-flow.md`. Native live acceptance remains a
+later phase.

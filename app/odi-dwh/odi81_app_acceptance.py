@@ -17,6 +17,10 @@ HttpClient = Callable[[str, Mapping[str, Any]], Any]
 Factory = fixtures.Factory
 GENERATE_PATH = "/api/scd2/generate"
 RUN_PATH = "/api/scd2/run"
+CLASSIC_GENERATE_PATH = "/api/mapping/generate"
+CLASSIC_RUN_PATH = "/api/mapping/run"
+CLASSIC_VERSION = "001"
+CLASSIC_ENGINE = "classic"
 CANONICAL_CALLS = (
     "prepare_source",
     "app_generate",
@@ -35,24 +39,51 @@ CANONICAL_CALLS = (
     "app_run_3",
     "verify_after_r3",
 )
+LEGACY_CALLS = (
+    "prepare_source",
+    "app_generate",
+    "backup_target_r1",
+    "verify_before_r1",
+    "app_run_1",
+    "verify_after_r1",
+    "backup_source",
+    "backup_target_r2",
+    "mutate_source",
+    "verify_before_r2",
+    "app_run_2",
+    "verify_after_r2",
+    "backup_target_r3",
+    "verify_before_r3",
+    "app_run_3",
+    "verify_after_r3",
+)
 LEGACY: dict[str, dict[str, str]] = {
     "F1": {
         "source_owner": "DWH",
         "source_table": "ODI81_SRC_F1",
         "target_owner": "DWH",
         "target_table": "ODS_ODI81_F1",
+        "mapping_name": "MAP_ODI81_F1",
+        "integration_type": "IU",
+        "load_mode": "incremental",
     },
     "F2": {
         "source_owner": "DWH",
         "source_table": "ODI81_SRC_F2",
         "target_owner": "DWH",
         "target_table": "ODS_ODI81_F2",
+        "mapping_name": "MAP_ODI81_F2",
+        "integration_type": "CONTROL_APPEND",
+        "load_mode": "full_reload",
     },
     "F3": {
         "source_owner": "DWH",
         "source_table": "ODI81_SRC_F3",
         "target_owner": "DWH",
         "target_table": "DWH_ODI81_F3",
+        "mapping_name": "MAP_ODI81_F3",
+        "integration_type": "IU",
+        "load_mode": "type1",
     },
 }
 _WRITE_FLAGS = (
@@ -75,13 +106,12 @@ def required_scopes(flow: str) -> tuple[str, ...]:
     """Exact approvals that must already be true before the first callback."""
     name = flow.lower()
     if flow in LEGACY:
-        return (
-            f"odi81_{name}_prepare_source",
-            f"odi81_{name}_generate",
-            f"odi81_{name}_run_1",
-            f"odi81_{name}_run_2",
-            f"odi81_{name}_run_3",
-        )
+        return tuple(f"odi81_{name}_{suffix}" for suffix in (
+            "prepare_source", "generate", "backup_target_r1", "verify_before_r1", "run_1",
+            "verify_after_r1", "backup_source", "backup_target_r2", "mutate_source",
+            "verify_before_r2", "run_2", "verify_after_r2", "backup_target_r3",
+            "verify_before_r3", "run_3", "verify_after_r3",
+        ))
     return (
         f"odi81_{name}_prepare_source",
         f"odi81_{name}_generate",
@@ -129,6 +159,46 @@ def run_body(flow: str, context: str) -> dict[str, Any]:
     body["scenario_version"] = fixtures.SCENARIO_VERSION
     body["context"] = context
     return body
+
+
+def classic_params(flow: str) -> dict[str, Any]:
+    """Locked classic generate parameters. F2 truncates; F1 and F3 merge on ENTITY_ID."""
+    spec = LEGACY[flow]
+    incremental = spec["integration_type"] == "IU"
+    return {
+        "mapping_name": spec["mapping_name"],
+        "src_model": "ORACLE_DWH",
+        "src_owner": spec["source_owner"],
+        "src_table": spec["source_table"],
+        "tgt_model": "ORACLE_DWH" if flow == "F3" else "ORACLE_ODS",
+        "tgt_owner": spec["target_owner"],
+        "tgt_table": spec["target_table"],
+        "integration_type": spec["integration_type"],
+        "update_key_columns": ["ENTITY_ID"] if incremental else [],
+        "update_key_kind": "primary" if incremental else "unique",
+        "needs_skey": False,
+        "drop_target_if_exists": False,
+        "replace_existing_mapping": False,
+        "context": "GLOBAL",
+        "description": "",
+    }
+
+
+def classic_generate_body(flow: str) -> dict[str, Any]:
+    """POST /api/mapping/generate body. The engine is classic and approval is literal."""
+    return {"approved": True, "engine": CLASSIC_ENGINE, "params": classic_params(flow)}
+
+
+def classic_run_body(flow: str, context: str) -> dict[str, Any]:
+    """POST /api/mapping/run body. Only the documented full reload truncates the target."""
+    spec = LEGACY[flow]
+    return {
+        "approved": True,
+        "mapping_name": spec["mapping_name"],
+        "scenario_version": CLASSIC_VERSION,
+        "context": context,
+        "truncate_target_table": spec["load_mode"] == "full_reload",
+    }
 
 
 def _report() -> dict[str, Any]:
@@ -260,37 +330,158 @@ def _http_step(
     return scratch
 
 
+def _audit_names(flow: str) -> tuple[str, ...]:
+    if flow == "F3":
+        return isolated._EDW_EXTRA
+    return isolated._ODS_EXTRA
+
+
+def _accept_classic_generate(flow: str, status: int, payload: Mapping[str, Any]) -> None:
+    """Accept only a successful classic generation whose key and audit shape match."""
+    if status != 200 or payload.get("overall_status") != "SUCCESS":
+        raise isolated._Blocked("HttpFailed")
+    params = payload.get("params")
+    steps = payload.get("steps")
+    if type(params) is not dict or type(steps) is not dict:
+        raise isolated._Blocked("HttpFailed")
+    expected = classic_params(flow)
+    for key in (
+        "mapping_name", "src_model", "src_owner", "src_table", "tgt_model", "tgt_owner",
+        "tgt_table", "integration_type", "update_key_columns", "update_key_kind",
+        "needs_skey", "drop_target_if_exists", "replace_existing_mapping", "context",
+    ):
+        if params.get(key) != expected[key]:
+            raise isolated._Blocked("ColumnContractMismatch")
+    step = steps.get("create_target_table")
+    if type(step) is not dict or step.get("status") not in {"CREATED", "ALREADY_IN_SYNC"}:
+        raise isolated._Blocked("HttpFailed")
+    if step.get("table") != f"DWH.{expected['tgt_table']}":
+        raise isolated._Blocked("ColumnContractMismatch")
+    key = step.get("key")
+    if type(key) is not dict:
+        raise isolated._Blocked("TargetPrimaryKeyMismatch")
+    if expected["integration_type"] == "CONTROL_APPEND":
+        if key.get("status") != "NONE" or key.get("columns") not in ([], None):
+            raise isolated._Blocked("ColumnContractMismatch")
+    elif key.get("kind") != "primary" or key.get("columns") != ["ENTITY_ID"]:
+        raise isolated._Blocked("TargetPrimaryKeyMismatch")
+    elif key.get("status") not in {"CREATED", "ALREADY_PRESENT"}:
+        raise isolated._Blocked("TargetPrimaryKeyMismatch")
+    if step["status"] == "CREATED" and list(step.get("default_columns_added") or []) != list(_audit_names(flow)):
+        raise isolated._Blocked("ColumnContractMismatch")
+
+
+def _accept_classic_run(flow: str, context: str, status: int, payload: Mapping[str, Any]) -> None:
+    """Accept the generic scenario payload only when version, context and mode match."""
+    if status != 200 or payload.get("status") != "SUCCESS":
+        raise isolated._Blocked("HttpFailed")
+    expected = classic_run_body(flow, context)
+    if payload.get("scenario") != f"{expected['mapping_name']}_SCN":
+        raise isolated._Blocked("HttpFailed")
+    if payload.get("version") != CLASSIC_VERSION:
+        raise isolated._Blocked("ScenarioVersionMismatch")
+    if payload.get("context") != context:
+        raise isolated._Blocked("ContextMismatch")
+    if payload.get("truncate_target_table") is not expected["truncate_target_table"]:
+        raise isolated._Blocked("HttpFailed")
+
+
 def _run_legacy(
     report: dict[str, Any],
     flow: str,
+    http_client: HttpClient,
     writer_factories: Mapping[str, Factory],
+    reader_factories: Mapping[str, Factory],
     source_reader_factory: Factory,
+    context: str,
 ) -> dict[str, Any]:
-    child = isolated.prepare_source(
-        flow,
-        writer_factories["DWH"],
-        source_reader_factory,
-        approved=True,
-        approval_scope=f"odi81_{flow.lower()}_prepare_source",
-    )
-    if not _accept_step(report, "prepare_source", child):
+    """Drive F1-F3 through classic generate/run. Backups precede the source change."""
+    report["native_odi_proven"] = False
+    name = flow.lower()
+    writer = writer_factories["DWH"]
+    reader = reader_factories["DWH"]
+
+    def scope(suffix: str) -> str:
+        return f"odi81_{name}_{suffix}"
+
+    def generate_ok(status: int, payload: dict[str, Any]) -> None:
+        _accept_classic_generate(flow, status, payload)
+
+    def run_ok(status: int, payload: dict[str, Any]) -> None:
+        _accept_classic_run(flow, context, status, payload)
+
+    if not _accept_step(report, "prepare_source", isolated.prepare_source(
+        flow, writer, source_reader_factory, approved=True, approval_scope=scope("prepare_source"),
+    )):
         return report
-    # F1-F3 targets are ODS/type-1 tables. /api/scd2/generate would DDL a
-    # surrogate SCD2 target and commit it. There is no safe app endpoint here.
-    report["calls"].append("app_generate")
-    report["steps"].append({
-        "action": "app_generate",
-        "status": "blocked",
-        "error_code": "app_target_contract_gap",
-    })
-    report.update(
-        status="blocked",
-        stage="app_generate",
-        error_code="app_target_contract_gap",
-        downstream_stopped=True,
-        manual_review_required=bool(child.get("ddl_attempted")),
-    )
-    return fixtures._finish(report)
+    if not _accept_step(report, "app_generate", _http_step(
+        report, http_client, CLASSIC_GENERATE_PATH, classic_generate_body(flow), generate_ok,
+    )):
+        return report
+    if not _accept_step(report, "backup_target_r1", isolated.create_retained_backup(
+        flow, "target", 1, writer, approved=True, approval_scope=scope("backup_target_r1"),
+    )):
+        return report
+    if not _accept_step(report, "verify_before_r1", isolated.verify_flow(
+        flow, 1, "before_run", reader, source_reader_factory,
+        approved=True, approval_scope=scope("verify_before_r1"),
+    )):
+        return report
+    if not _accept_step(report, "app_run_1", _http_step(
+        report, http_client, CLASSIC_RUN_PATH, classic_run_body(flow, context), run_ok,
+    )):
+        return report
+    if not _accept_step(report, "verify_after_r1", isolated.verify_flow(
+        flow, 1, "after_run", reader, source_reader_factory,
+        approved=True, approval_scope=scope("verify_after_r1"),
+    )):
+        return report
+    if not _accept_step(report, "backup_source", isolated.create_retained_backup(
+        flow, "source", 2, writer, approved=True, approval_scope=scope("backup_source"),
+    )):
+        return report
+    if not _accept_step(report, "backup_target_r2", isolated.create_retained_backup(
+        flow, "target", 2, writer, approved=True, approval_scope=scope("backup_target_r2"),
+    )):
+        return report
+    if not _accept_step(report, "mutate_source", isolated.mutate_source(
+        flow, writer, source_reader_factory, approved=True, approval_scope=scope("mutate_source"),
+    )):
+        return report
+    if not _accept_step(report, "verify_before_r2", isolated.verify_flow(
+        flow, 2, "before_run", reader, source_reader_factory,
+        approved=True, approval_scope=scope("verify_before_r2"),
+    )):
+        return report
+    if not _accept_step(report, "app_run_2", _http_step(
+        report, http_client, CLASSIC_RUN_PATH, classic_run_body(flow, context), run_ok,
+    )):
+        return report
+    if not _accept_step(report, "verify_after_r2", isolated.verify_flow(
+        flow, 2, "after_run", reader, source_reader_factory,
+        approved=True, approval_scope=scope("verify_after_r2"),
+    )):
+        return report
+    if not _accept_step(report, "backup_target_r3", isolated.create_retained_backup(
+        flow, "target", 3, writer, approved=True, approval_scope=scope("backup_target_r3"),
+    )):
+        return report
+    if not _accept_step(report, "verify_before_r3", isolated.verify_flow(
+        flow, 3, "before_run", reader, source_reader_factory,
+        approved=True, approval_scope=scope("verify_before_r3"),
+    )):
+        return report
+    if not _accept_step(report, "app_run_3", _http_step(
+        report, http_client, CLASSIC_RUN_PATH, classic_run_body(flow, context), run_ok,
+    )):
+        return report
+    if not _accept_step(report, "verify_after_r3", isolated.verify_flow(
+        flow, 3, "after_run", reader, source_reader_factory,
+        approved=True, approval_scope=scope("verify_after_r3"),
+    )):
+        return report
+    report.update(status="passed", stage="completed", error_code=None, physical_dml_count_proven=False)
+    return report
 
 
 def _run_scd2(
@@ -432,7 +623,10 @@ def run_acceptance(
     assert reader_factories is not None
     assert source_reader_factory is not None
     if flow in LEGACY:
-        return _run_legacy(report, flow, writer_factories, source_reader_factory)
+        return _run_legacy(
+            report, flow, http_client, writer_factories, reader_factories,
+            source_reader_factory, context,
+        )
     return _run_scd2(
         report, flow, http_client, writer_factories, reader_factories,
         source_reader_factory, context, source_model_bindings,
