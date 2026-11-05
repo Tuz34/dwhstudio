@@ -8,6 +8,7 @@ and the redaction rules the schema cannot express with local references.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -107,6 +108,7 @@ def validate_document(document: Any, schema: Mapping[str, Any] | None = None) ->
         _assert_supported(schema, "")
         active_schema = schema
     issues: list[ValidationIssue] = []
+    _reject_non_json_numbers(document, "", issues)
     _validate(document, active_schema, active_schema, "", issues)
     if isinstance(document, Mapping):
         _check_integrity(document, issues)
@@ -154,6 +156,8 @@ def _assert_supported(schema: Mapping[str, Any] | Any, path: str) -> None:
             _assert_supported(additional, f"{path}/additionalProperties")
         elif additional not in {True, False}:
             raise SchemaError(f"additionalProperties at {path or '/'} must be a boolean or a schema.")
+    if "enum" in schema and not isinstance(schema["enum"], list):
+        raise SchemaError(f"enum at {path or '/'} must be an array.")
     if "pattern" in schema:
         if not isinstance(schema["pattern"], str):
             raise SchemaError(f"pattern at {path or '/'} must be a string.")
@@ -200,6 +204,95 @@ def _join(path: str, part: object) -> str:
     return f"{path}/{part}"
 
 
+def _json_equal(left: Any, right: Any) -> bool:
+    """JSON equality. Booleans are distinct from numbers, including 0 and 1."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        if isinstance(left, float) and not math.isfinite(left):
+            return False
+        if isinstance(right, float) and not math.isfinite(right):
+            return False
+        return left == right
+    if isinstance(left, str) or isinstance(right, str):
+        return isinstance(left, str) and isinstance(right, str) and left == right
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, list) or isinstance(right, list):
+        if not isinstance(left, list) or not isinstance(right, list) or len(left) != len(right):
+            return False
+        return all(_json_equal(item, other) for item, other in zip(left, right, strict=True))
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        if set(left) != set(right):
+            return False
+        return all(_json_equal(left[key], right[key]) for key in left)
+    return False
+
+
+def _json_in(instance: Any, options: Any) -> bool:
+    if not isinstance(options, list):
+        raise SchemaError("enum must be an array.")
+    return any(_json_equal(instance, option) for option in options)
+
+
+_NONFINITE_MESSAGE = "Numeric value is not a finite JSON number."
+_CYCLE_MESSAGE = "Value contains a cyclic container."
+
+
+def _attributes_boundary(path: str) -> bool:
+    return path == "attributes" or path.endswith("/attributes")
+
+
+def _reject_non_json_numbers(instance: Any, path: str, issues: list[ValidationIssue]) -> None:
+    """Walk objects, arrays, and tuples on an explicit stack.
+
+    Free-form ``attributes`` values stay out of diagnostic paths. The contract
+    field name is kept; keys and indexes inside that object are not.
+    A container already present on the active ancestor chain is a cycle.
+    The same container reached again after that chain has moved on is acyclic
+    and is walked again.
+    """
+    # Each frame is ("visit", value, path, inside_attributes) or ("leave", identity, "", False).
+    frames: list[tuple[str, Any, str, bool]] = [("visit", instance, path, False)]
+    ancestors: set[int] = set()
+    while frames:
+        kind, current, current_path, inside_flag = frames.pop()
+        if kind == "leave":
+            ancestors.discard(current)
+            continue
+        inside_attributes = inside_flag or _attributes_boundary(current_path)
+        if isinstance(current, bool):
+            continue
+        if isinstance(current, float) and not math.isfinite(current):
+            issues.append(ValidationIssue(current_path or "/", _NONFINITE_MESSAGE))
+            continue
+        if not isinstance(current, (Mapping, list, tuple)):
+            continue
+        identity = id(current)
+        if identity in ancestors:
+            issues.append(ValidationIssue(current_path or "/", _CYCLE_MESSAGE))
+            continue
+        ancestors.add(identity)
+        frames.append(("leave", identity, "", False))
+        children: list[tuple[Any, str, bool]] = []
+        if isinstance(current, Mapping):
+            for name, value in current.items():
+                if inside_attributes:
+                    children.append((value, current_path, True))
+                elif name == "attributes":
+                    children.append((value, _join(current_path, name), True))
+                else:
+                    children.append((value, _join(current_path, name), False))
+        else:
+            for index, item in enumerate(current):
+                if inside_attributes:
+                    children.append((item, current_path, True))
+                else:
+                    children.append((item, _join(current_path, index), False))
+        for value, child_path, child_inside in reversed(children):
+            frames.append(("visit", value, child_path, child_inside))
+
+
 def _validate(
     instance: Any,
     schema: Mapping[str, Any],
@@ -214,9 +307,9 @@ def _validate(
     if expected is not None and not _type_ok(instance, expected):
         issues.append(ValidationIssue(path or "/", f"Expected type {expected}."))
         return
-    if "const" in schema and instance != schema["const"]:
+    if "const" in schema and not _json_equal(instance, schema["const"]):
         issues.append(ValidationIssue(path or "/", f"Expected {schema['const']!r}."))
-    if "enum" in schema and instance not in schema["enum"]:
+    if "enum" in schema and not _json_in(instance, schema["enum"]):
         issues.append(ValidationIssue(path or "/", "Value is outside the allowed set."))
     if "not" in schema:
         nested: list[ValidationIssue] = []

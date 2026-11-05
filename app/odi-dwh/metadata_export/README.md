@@ -21,6 +21,9 @@ must honor at that boundary. This slice does not include the adapter.
 
 `contract_version` is `1.0.0` (`CONTRACT_VERSION` in `contract.py`).
 `producer` is always `dwh-studio`. The schema uses JSON Schema draft 2020-12.
+The local validator compares `const` and `enum` with JSON equality, so a boolean
+is distinct from `0` and `1`. It rejects NaN and infinities inside objects, arrays,
+and tuples. A tuple is not accepted where the schema requires a JSON array.
 
 ## Document shape
 

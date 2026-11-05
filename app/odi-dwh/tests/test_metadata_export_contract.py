@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,7 +26,7 @@ from metadata_export.contract import (
     MetadataNode,
     Provenance,
 )
-from metadata_export.validate import load_fixture, load_schema, validate_document
+from metadata_export.validate import SchemaError, load_fixture, load_schema, validate_document
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "metadata_export"
@@ -301,6 +304,330 @@ def test_confidence_outside_unit_interval_is_rejected():
     document = _copy(load_fixture())
     document["nodes"][0]["confidence"] = 1.2
     assert not validate_document(document).valid
+
+
+def test_json_const_and_enum_keep_booleans_distinct_from_numbers():
+    document = _copy(load_fixture())
+    document["redaction_policy"]["strip_attributes"] = 1
+    result = validate_document(document)
+    assert not result.valid
+    assert any(issue.path.endswith("/strip_attributes") for issue in result.issues)
+
+    numeric_const = {"const": 1}
+    assert not validate_document(True, numeric_const).valid
+    assert validate_document(1, numeric_const).valid
+    assert validate_document(1.0, numeric_const).valid
+    assert not validate_document(False, {"const": 0}).valid
+    assert validate_document(0, {"const": 0}).valid
+    assert not validate_document(0, {"const": False}).valid
+    assert validate_document(False, {"const": False}).valid
+
+    boolean_enum = {"enum": [True]}
+    assert not validate_document(1, boolean_enum).valid
+    assert validate_document(True, boolean_enum).valid
+
+
+def _nested_attributes(depth: int, leaf: object) -> dict[str, object]:
+    current: dict[str, object] = {"nested_level": leaf}
+    for _ in range(depth - 1):
+        current = {"nested_level": current}
+    return current
+
+
+def _diagnostics(result: object) -> str:
+    issues = getattr(result, "issues")
+    lines = [repr(result), str(getattr(result, "valid"))]
+    for issue in issues:
+        lines.extend((issue.path, issue.message, str(issue)))
+    return "\n".join(lines)
+
+
+def test_nan_and_infinities_are_rejected_in_json_containers():
+    nan_document = _copy(load_fixture())
+    nan_document["nodes"][0]["attributes"] = {"synthetic_ratio": float("nan")}
+    nan_result = validate_document(nan_document)
+    assert not nan_result.valid
+    assert any(issue.path.endswith("/attributes") and "finite" in issue.message for issue in nan_result.issues)
+    assert all("synthetic_ratio" not in issue.path for issue in nan_result.issues)
+
+    infinite_document = _copy(load_fixture())
+    infinite_document["nodes"][0]["confidence"] = float("inf")
+    infinite_result = validate_document(infinite_document)
+    assert not infinite_result.valid
+    assert any(issue.path.endswith("/confidence") for issue in infinite_result.issues)
+
+    nested_document = _copy(load_fixture())
+    nested_document["nodes"][0]["attributes"] = {"samples": [0.5, float("-inf")]}
+    nested_result = validate_document(nested_document)
+    assert not nested_result.valid
+    assert any(issue.path.endswith("/attributes") and "finite" in issue.message for issue in nested_result.issues)
+    assert all("/attributes/" not in issue.path for issue in nested_result.issues)
+
+
+def test_hidden_placeholder_nonfinite_diagnostics_omit_attribute_sentinel():
+    document = _copy(load_fixture())
+    index = next(i for i, node in enumerate(document["nodes"]) if node["visibility"] == "hidden")
+    document["nodes"][index]["attributes"] = {
+        "SENTINEL_KEY": {"marker": "SENTINEL_VALUE", "ratio": float("nan")},
+    }
+    result = validate_document(document)
+    diagnostic = _diagnostics(result)
+    assert not result.valid
+    assert "SENTINEL_KEY" not in diagnostic
+    assert "SENTINEL_VALUE" not in diagnostic
+    assert any(issue.path == f"/nodes/{index}/attributes" and "finite" in issue.message for issue in result.issues)
+    assert all("/attributes/" not in issue.path for issue in result.issues)
+
+
+_CYCLE_MESSAGE = "Value contains a cyclic container."
+
+_MAPPING_CYCLE_SCRIPT = r"""
+import json
+from metadata_export.validate import _reject_non_json_numbers
+
+cyclic = {}
+cyclic["ratio"] = float("nan")
+cyclic["SENTINEL_KEY"] = cyclic
+cyclic["marker"] = "SENTINEL_VALUE"
+issues = []
+_reject_non_json_numbers(cyclic, "/nodes/0/attributes", issues)
+print(json.dumps({
+    "paths": [issue.path for issue in issues],
+    "messages": [issue.message for issue in issues],
+    "rendered": [str(issue) for issue in issues],
+}))
+"""
+
+_CONTAINER_CYCLE_SCRIPT = r"""
+import json
+from metadata_export.validate import load_fixture, validate_document
+
+def fresh():
+    return json.loads(json.dumps(load_fixture()))
+
+def pack(result):
+    return {
+        "valid": result.valid,
+        "paths": [issue.path for issue in result.issues],
+        "messages": [issue.message for issue in result.issues],
+        "rendered": [str(issue) for issue in result.issues],
+    }
+
+listed = fresh()
+through_list = {}
+through_list["SENTINEL_KEY"] = "SENTINEL_VALUE"
+through_list["via"] = [through_list, float("nan")]
+listed["nodes"][0]["attributes"] = through_list
+
+tupled = fresh()
+through_tuple = {}
+through_tuple["SENTINEL_KEY"] = "SENTINEL_VALUE"
+through_tuple["via"] = (float("-inf"), through_tuple)
+tupled["nodes"][0]["attributes"] = through_tuple
+
+print(json.dumps({
+    "list": pack(validate_document(listed)),
+    "tuple": pack(validate_document(tupled)),
+}))
+"""
+
+
+def _child_env() -> dict[str, str]:
+    kept = ("SYSTEMROOT", "PATH", "PATHEXT", "TEMP", "TMP", "WINDIR", "COMSPEC")
+    env = {key: os.environ[key] for key in kept if key in os.environ}
+    env["PYTHONPATH"] = str(PACKAGE_ROOT.parent)
+    env["RUN_LIVE_DB_TESTS"] = "false"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _run_bounded_script(script: str, timeout: float = 2.0) -> dict[str, object]:
+    """Run a validator snippet in a child and kill the child when the timeout expires."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd=PACKAGE_ROOT.parent,
+        env=_child_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        pytest.fail(f"validator exceeded {timeout:.0f}s and was killed")
+    assert proc.returncode == 0, stderr
+    payload = json.loads(stdout)
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _assert_redacted_attribute_diagnostics(payload: dict[str, object], path: str) -> None:
+    paths = payload["paths"]
+    messages = payload["messages"]
+    rendered = payload["rendered"]
+    assert isinstance(paths, list)
+    assert isinstance(messages, list)
+    assert isinstance(rendered, list)
+    diagnostic = "\n".join(str(line) for line in rendered)
+    assert "SENTINEL_KEY" not in diagnostic
+    assert "SENTINEL_VALUE" not in diagnostic
+    assert paths
+    assert all(item == path for item in paths)
+    assert all("/attributes/" not in str(item) for item in paths)
+    assert _CYCLE_MESSAGE in messages
+    assert any("finite" in str(item) for item in messages)
+
+
+def test_mapping_self_cycle_finishes_with_redacted_diagnostics():
+    payload = _run_bounded_script(_MAPPING_CYCLE_SCRIPT)
+    _assert_redacted_attribute_diagnostics(payload, "/nodes/0/attributes")
+
+
+def test_list_and_tuple_cycles_finish_with_redacted_diagnostics():
+    payload = _run_bounded_script(_CONTAINER_CYCLE_SCRIPT)
+    for kind in ("list", "tuple"):
+        section = payload[kind]
+        assert isinstance(section, dict)
+        assert section["valid"] is False
+        _assert_redacted_attribute_diagnostics(section, "/nodes/0/attributes")
+
+
+def test_shared_acyclic_containers_are_not_cycles():
+    document = _copy(load_fixture())
+    shared_map = {"finite": 1, "nested": {"ok": True}}
+    shared_list = [0.25, {"finite": 0.5}]
+    shared_tuple = (0.25, 0.75)
+    document["nodes"][0]["attributes"] = {
+        "left": shared_map,
+        "right": shared_map,
+        "samples": shared_list,
+        "samples_again": shared_list,
+        "pair": shared_tuple,
+        "pair_again": shared_tuple,
+        "empty_left": (),
+        "empty_right": (),
+    }
+    result = validate_document(document)
+    assert result.valid, _diagnostics(result)
+    assert all("cyclic" not in issue.message for issue in result.issues)
+
+    nan_document = _copy(load_fixture())
+    shared_nan = {"ratio": float("nan")}
+    nan_document["nodes"][0]["attributes"] = {"left": shared_nan, "right": shared_nan}
+    rejected = validate_document(nan_document)
+    diagnostic = _diagnostics(rejected)
+    assert not rejected.valid
+    assert any(issue.path == "/nodes/0/attributes" and "finite" in issue.message for issue in rejected.issues)
+    assert all("cyclic" not in issue.message for issue in rejected.issues)
+    assert "ratio" not in diagnostic
+
+
+def test_deep_attribute_nest_returns_a_validation_result():
+    document = _copy(load_fixture())
+    document["nodes"][0]["attributes"] = _nested_attributes(1500, {"finite": 1})
+    result = validate_document(document)
+    assert type(result).__name__ == "ValidationResult"
+    assert result.valid, _diagnostics(result)
+
+
+def test_deep_nonfinite_attribute_is_rejected_without_recursion_error():
+    document = _copy(load_fixture())
+    document["nodes"][0]["attributes"] = _nested_attributes(1100, float("nan"))
+    result = validate_document(document)
+    assert type(result).__name__ == "ValidationResult"
+    assert not result.valid
+    assert any(issue.path == "/nodes/0/attributes" and "finite" in issue.message for issue in result.issues)
+    assert all("nested_level" not in f"{issue.path}\n{issue.message}" for issue in result.issues)
+
+
+def test_tuple_nan_is_rejected_and_finite_tuple_values_stay_in_bounds():
+    finite = _copy(load_fixture())
+    finite["nodes"][0]["attributes"] = {"pair": (0.25, 0.75)}
+    assert validate_document(finite).valid
+
+    nonfinite = _copy(load_fixture())
+    nonfinite["nodes"][0]["attributes"] = {"pair": (0.25, float("nan"))}
+    rejected = validate_document(nonfinite)
+    assert not rejected.valid
+    assert any(issue.path == "/nodes/0/attributes" and "finite" in issue.message for issue in rejected.issues)
+    assert all("pair" not in issue.path for issue in rejected.issues)
+
+    array_position = _copy(load_fixture())
+    conflicting = next(node for node in array_position["nodes"] if node.get("status") == "conflicting")
+    conflicting["conflict_ids"] = tuple(conflicting["conflict_ids"])
+    assert not validate_document(array_position).valid
+
+
+def test_enum_shape_is_checked_before_an_instance_visits_it():
+    schema = {"type": "object", "properties": {"skipped": {"enum": "not-an-array"}}}
+    with pytest.raises(SchemaError, match="enum"):
+        validate_document({}, schema)
+
+
+def test_duplicate_node_id_is_rejected():
+    document = _copy(load_fixture())
+    document["nodes"][1]["id"] = document["nodes"][0]["id"]
+    result = validate_document(document)
+    assert not result.valid
+    assert any("Duplicate id" in issue.message and issue.path.endswith("/id") for issue in result.issues)
+
+
+def test_count_mismatch_is_rejected():
+    document = _copy(load_fixture())
+    document["counts"]["nodes"] = int(document["counts"]["nodes"]) + 1
+    result = validate_document(document)
+    assert not result.valid
+    assert any(issue.path == "/counts/nodes" for issue in result.issues)
+
+
+def test_conflicting_object_without_conflict_ids_is_rejected():
+    document = _copy(load_fixture())
+    conflicting = next(node for node in document["nodes"] if node.get("status") == "conflicting")
+    del conflicting["conflict_ids"]
+    result = validate_document(document)
+    assert not result.valid
+    assert any(
+        issue.path.endswith("/conflict_ids") and "must list conflict_ids" in issue.message
+        for issue in result.issues
+    )
+
+
+def test_dangling_conflict_id_is_rejected():
+    document = _copy(load_fixture())
+    conflicting = next(node for node in document["nodes"] if node.get("status") == "conflicting")
+    conflicting["conflict_ids"] = ["cfl-missing"]
+    result = validate_document(document)
+    assert not result.valid
+    assert any("does not match a conflict" in issue.message for issue in result.issues)
+
+
+def test_nonboolean_explicit_is_rejected():
+    document = _copy(load_fixture())
+    document["edges"][0]["explicit"] = 1
+    result = validate_document(document)
+    assert not result.valid
+    assert any(issue.path.endswith("/explicit") and "boolean" in issue.message for issue in result.issues)
+
+
+def test_wrong_contract_version_is_rejected():
+    document = _copy(load_fixture())
+    document["contract_version"] = "9.9.9"
+    result = validate_document(document)
+    assert not result.valid
+    assert any(issue.path.endswith("/contract_version") for issue in result.issues)
+
+
+def test_missing_edge_field_is_rejected():
+    document = _copy(load_fixture())
+    del document["edges"][0]["relationship"]
+    result = validate_document(document)
+    assert not result.valid
+    assert any(
+        issue.path.endswith("/relationship") and "missing" in issue.message.lower()
+        for issue in result.issues
+    )
 
 
 def test_dataclass_hidden_node_omits_attributes():
