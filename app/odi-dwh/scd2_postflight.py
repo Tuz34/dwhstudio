@@ -228,8 +228,8 @@ def collect_stock_postflight(
 ) -> dict[str, Any]:
     """A read-only, strict stock witness. Existing legacy collection is unchanged.
 
-    Wiring the app's run gate to this witness is a separate integration step;
-    collection success must never be confused with native scenario success.
+    The app's stock run gate uses this witness; collection success must never
+    be confused with native scenario success or business-row parity.
     """
     result: dict[str, Any] = {
         "mode": "stock_scd2_postflight", "status": "error", "counts": {},

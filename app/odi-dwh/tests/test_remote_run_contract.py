@@ -271,8 +271,9 @@ def test_scd2_preserves_count_postflight_after_unknown(monkeypatch):
     orch.run_scenario_remote = lambda **kw: contract.transport_failure("run", "RemoteTimeout")
     monkeypatch.setattr(scd2_service, "_target_is_scd2", lambda *a: True)
     count_calls = []
-    monkeypatch.setattr(scd2_service.scd2_postflight, "collect_postflight",
-                        lambda *a, **k: count_calls.append(1) or {"status": "ok", "counts": {"target_total": 3}})
+    monkeypatch.setattr(scd2_service.scd2_postflight, "collect_stock_postflight",
+                        lambda *a, **k: count_calls.append(1) or {"status": "ok", "stock_contract_valid": True,
+                            "source_current_count_equal": True, "counts": {"target_total": 3}})
     payload, code = scd2_service.run(REQUEST, make_services(orch), approved=True)
     assert code == 502 and payload["status"] == "run_unknown" and len(count_calls) == 2
 

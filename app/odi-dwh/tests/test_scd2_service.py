@@ -318,11 +318,19 @@ def run_catalog_handler(plan, counts):
     rows = plan_catalog_rows(plan)
 
     def handler(sql, params):
+        if sql == "SET TRANSACTION READ ONLY":
+            return []
         if "FROM ALL_TAB_COLUMNS" in sql:
             return rows
         if "TO_CHAR(MAX" in sql:
             return [("2026-11-04",)]
-        return [(counts.pop(0) if counts else 5,)]
+        if sql in {
+            'SELECT COUNT(*) FROM "DM"."DIM_CUSTOMER"',
+            'SELECT COUNT(*) FROM "DM"."DIM_CUSTOMER" WHERE "CURRENT_FLAG"=\'1\'',
+            'SELECT COUNT(*) FROM "DWH"."ODS_CUSTOMERS"',
+        }:
+            return [(counts.pop(0) if counts else 5,)]
+        return [(0,)]
 
     return handler
 
@@ -339,6 +347,7 @@ def test_run_executes_scenario_and_returns_count_only_postflight(plan):
     assert set(counts) == {
         "target_total", "target_current", "max_effective_from", "rows_with_effective_to_set",
         "duplicate_current_groups", "invalid_date_order_rows", "source_count",
+        "invalid_current_flag_rows", "invalid_open_end_rows", "invalid_closed_end_rows", "null_natural_key_rows",
     }
     assert counts["max_effective_from"] == "2026-11-04"
     assert "preflight" in payload and payload["raw_rows_included"] is False
