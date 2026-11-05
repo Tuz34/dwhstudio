@@ -90,6 +90,9 @@ The role-only scopes cannot authorize an expression write. `stable_repair` with
 - Attestation means `no_active_odi_session_writes_attested=True`. An operator states this. The
   script separately refuses when running, waiting or queued ODI sessions exist, but it cannot
   see someone editing metadata in ODI Studio.
+  Session counts are sampled before mutation and again after flush, before commit.
+  These samples are not a repository-wide lock; the exclusive operator attestation
+  remains necessary throughout the operation.
 - The receipt directory must be an existing absolute path chosen by server code.
 
 A failed gate makes no script call. The script checks action, approval and scope again before

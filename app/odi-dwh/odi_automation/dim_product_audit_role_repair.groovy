@@ -407,6 +407,8 @@ try {
             if (stableAction && verified.profile != wantedProfile) block("post_write_verification")
             if (!stableAction && verified.profile != contract.profile) block("post_write_verification")
             afterImage = verified.image
+            activeSessionCount = countActiveSessions(em)
+            if (activeSessionCount != 0) block("active_odi_sessions")
             commitAttempted = true
             txnMgr.commit(txnStatus)
             commitAcknowledged = true
