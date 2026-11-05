@@ -65,20 +65,33 @@ fixed `InvalidGroovyEnvelope` error. The new Groovy actions are registered in
 
 ## Execution user (grantee)
 
-DML grants go to the Oracle user named by the config key `ODI_EXEC_USER`
-(default `ODI_EXEC`). Before any DDL the executor checks `ALL_USERS`; if the
-user does not exist, generation stops with `blocked_grantee_missing` and a
-message naming the missing user, with no DDL executed. A `SELECT` grant to
-`APP_USER` (needed so the app's own count-only postflight can read the target)
-is opt-in with `"grant_select_to_app_user": true` in the request.
+When grants are enabled, the execution account is the Oracle username on the
+single data server reached from the target model, the `GLOBAL` context, and the
+physical schema whose name is the target owner. The read-only probe uses public
+SDK getters (`getCode`, `getLogicalSchema`, `getPhysicalSchema`, `getSchemaName`,
+`getDataServer`, `getTechnology`, and the inherited `AbstractOdiDataServer.getUsername`).
+It does not read a password, JDBC URL, connection property, or the data server's
+topology name, and it does not take the first match.
+`ODI_EXEC_USER` is not that proof. A missing, ambiguous, or non-Oracle topology
+stops generation with `blocked_execution_identity` before any DDL. The response
+carries a reason code and counts, not the account name.
+
+An explicit `exec_user` argument must equal that proven account or generation
+stops with `execution_identity_rejected`. A request field cannot choose the
+account. Preview stays connectionless and does not emit execution grants until
+the proof exists. A `SELECT` grant to `APP_USER` remains opt-in with
+`"grant_select_to_app_user": true`. Before DDL the executor still checks
+`ALL_USERS`; a missing grantee stops with `blocked_grantee_missing` and a
+message that does not name the account.
 
 Two cases skip the grants instead of failing:
 
 - `ODI_EXEC_GRANTS_ENABLED=false` (env, default `true`): use this when ODI
   executes as the target owners themselves (for example DWH for DWH targets and
-  DM for DM targets) and there is no separate execution user. The executor then
-  skips the `ALL_USERS` grantee check and all grant statements (also in the
-  repair path for an existing table), and the plan preview and result report
+  DM for DM targets) and there is no separate execution user. Generation does
+  not query topology for an execution account. The executor then skips the
+  `ALL_USERS` grantee check and all grant statements (also in the repair path
+  for an existing table), and the plan preview and result report
   `grants_skipped_by_config: true`.
 - When the grantee equals the target owner (case-insensitive) a grant would raise
   ORA-01749, so it is skipped and `grants_skipped_owner_is_grantee: true` is

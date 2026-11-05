@@ -9,6 +9,7 @@ from typing import Any
 
 import oracledb
 
+import execution_identity
 import scd2_builder
 
 logger = logging.getLogger("dwh_app.scd2_target_executor")
@@ -163,7 +164,12 @@ def _apply_grants(
             logger.warning("SCD2 grant failed: %s", type(exc).__name__)
 
 
-def _recover_existing(cursor: Any, plan: Mapping[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+def _recover_existing(
+    cursor: Any,
+    plan: Mapping[str, Any],
+    result: dict[str, Any],
+    execution_username: str | None,
+) -> dict[str, Any]:
     """Existing matching table: verify the sequence and grants.
 
     Repairs stay inside the absent-only scope (create a missing sequence, add
@@ -183,7 +189,7 @@ def _recover_existing(cursor: Any, plan: Mapping[str, Any], result: dict[str, An
             return result
         result["sequence_created"] = True
         repaired.append("sequence")
-    required = scd2_builder.required_grants(plan)
+    required = scd2_builder.required_grants(plan, execution_username)
     missing: list[tuple[str, str, str]] = []
     if required:
         cursor.execute(
@@ -214,12 +220,42 @@ def _error_status(exc: oracledb.Error) -> str:
     return "failed"
 
 
+def _proven_username(
+    plan: Mapping[str, Any], identity_proof: execution_identity.ExecutionIdentityProof | None
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Return the proven account, or a redacted block. Config is not consulted."""
+    if not scd2_builder.grants_enabled():
+        return None, None
+    if not isinstance(identity_proof, execution_identity.ExecutionIdentityProof):
+        blocked = _base("blocked_execution_identity", plan, approved=True)
+        blocked["code"] = "execution_identity_unverified"
+        return None, blocked
+    if plan["options"].get("exec_user_requested") and plan["options"].get("exec_user") != identity_proof.username:
+        blocked = _base("blocked_execution_identity", plan, approved=True)
+        blocked["code"] = "execution_identity_rejected"
+        return None, blocked
+    if identity_proof.schema_name != plan["target"]["owner"]:
+        blocked = _base("blocked_execution_identity", plan, approved=True)
+        blocked["code"] = "execution_identity_unverified"
+        return None, blocked
+    if identity_proof.model_code != plan["models"]["target"]:
+        blocked = _base("blocked_execution_identity", plan, approved=True)
+        blocked["code"] = "execution_identity_unverified"
+        return None, blocked
+    if identity_proof.context_code != execution_identity.EXECUTION_CONTEXT:
+        blocked = _base("blocked_execution_identity", plan, approved=True)
+        blocked["code"] = "execution_identity_unverified"
+        return None, blocked
+    return identity_proof.username, None
+
+
 def execute_target_ddl(
     plan: Mapping[str, Any],
     *,
     approved: object,
     connection_factory: Callable[[], Any],
     ddl_user: str = "APP_USER",  # kept for call compatibility; grants no longer depend on it
+    identity_proof: execution_identity.ExecutionIdentityProof | None = None,
 ) -> dict[str, Any]:
     """Create the SCD2 sequence and table only when both are absent.
 
@@ -228,6 +264,9 @@ def execute_target_ddl(
     """
     if approved is not True:
         return _base("blocked_until_approval", plan, approved=approved)
+    username, identity_block = _proven_username(plan, identity_proof)
+    if identity_block is not None:
+        return identity_block
     owner = plan["target"]["owner"]
     table = plan["target"]["table"]
     sequence = plan["surrogate_key"]["sequence"]
@@ -239,17 +278,14 @@ def execute_target_ddl(
         result["connection_attempted"] = True
         cursor = connection.cursor()
         stage = "preflight_grantees"
-        result.update(scd2_builder.grant_skip_flags(plan))
-        missing_users = [u for u in scd2_builder.required_grantees(plan) if not _user_exists(cursor, u)]
+        result.update(scd2_builder.grant_skip_flags(plan, username))
+        missing_users = [
+            user for user in scd2_builder.required_grantees(plan, username) if not _user_exists(cursor, user)
+        ]
         if missing_users:
             result["status"] = "blocked_grantee_missing"
-            result["missing_grantees"] = missing_users
-            result["message"] = (
-                "Required grantee user(s) "
-                + ", ".join(missing_users)
-                + " do not exist in the database. Create the user or set ODI_EXEC_USER to the "
-                "ODI execution user, then retry. No DDL was executed."
-            )
+            result["missing_grantee_count"] = len(missing_users)
+            result["message"] = "A required grantee does not exist. No DDL was executed."
             return result
         stage = "preflight_table"
         if _table_exists(cursor, owner, table):
@@ -259,7 +295,7 @@ def execute_target_ddl(
                 result["status"] = "blocked_target_exists_mismatch"
                 return result
             stage = "recover_existing"
-            return _recover_existing(cursor, plan, result)
+            return _recover_existing(cursor, plan, result, username)
         stage = "preflight_sequence"
         sequence_present = _sequence_exists(cursor, owner, sequence)
         result["sequence_already_existed"] = sequence_present
@@ -284,7 +320,7 @@ def execute_target_ddl(
         result["column_count"] = len(actual)
 
         stage = "grants"
-        grants = scd2_builder.required_grants(plan)
+        grants = scd2_builder.required_grants(plan, username)
         if grants:
             result["write_operations_attempted"].append("grants")
             _apply_grants(cursor, plan, grants, result)

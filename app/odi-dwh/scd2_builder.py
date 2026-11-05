@@ -209,7 +209,7 @@ def _target_column(name: str, data_type: str, nullable: bool, role: str) -> dict
 
 
 def default_exec_user() -> str:
-    """Execution user from config (ODI_EXEC_USER, default ODI_EXEC)."""
+    """Configured label only. Grants do not treat this name as the execution account."""
     from config import ODI_EXEC_USER
 
     return ODI_EXEC_USER
@@ -233,7 +233,7 @@ def build_scd2_plan(
     only metadata: no rows, no key values, no credentials.
     """
     req = validate_request(request)
-    grantee = _identifier(exec_user or default_exec_user(), "invalid_exec_user")
+    requested = _identifier(exec_user, "invalid_exec_user") if exec_user is not None else None
     source = normalize_source_columns(source_columns)
     by_name = {column["name"]: column for column in source}
 
@@ -330,7 +330,11 @@ def build_scd2_plan(
         "target_columns": columns,
         "primary_key": {"name": _pk_name(req["target_table"]), "columns": [sk_name]},
         "alternate_key": {"name": _ak_name(req["target_table"]), "columns": list(req["natural_key"])},
-        "options": {"grant_select_to_app_user": req["grant_reader"], "exec_user": grantee},
+        "options": {
+            "grant_select_to_app_user": req["grant_reader"],
+            "exec_user_requested": requested is not None,
+            **({"exec_user": requested} if requested is not None else {}),
+        },
         "knowledge_modules": {
             "ikm": "IKM Oracle Slowly Changing Dimension",
             "lkm": "LKM SQL to Oracle (Built-In)",
@@ -385,39 +389,54 @@ def render_create_sequence(plan: Mapping[str, Any]) -> str:
     return f'CREATE SEQUENCE "{owner}"."{sequence}" START WITH 1 INCREMENT BY 1 NOCYCLE'
 
 
-def _all_grants(plan: Mapping[str, Any]) -> list[tuple[str, str, str]]:
+def _execution_grants(
+    plan: Mapping[str, Any], execution_username: str | None
+) -> list[tuple[str, str, str]]:
+    """Least privilege for a proven account, plus an explicit APP_USER SELECT."""
     table = plan["target"]["table"]
-    sequence = plan["surrogate_key"]["sequence"]
-    exec_user = plan["options"]["exec_user"]
-    grants = [(table, exec_user, privilege) for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")]
-    grants.append((sequence, exec_user, "SELECT"))
+    grants: list[tuple[str, str, str]] = []
+    if execution_username is not None:
+        sequence = plan["surrogate_key"]["sequence"]
+        grants.extend(
+            (table, execution_username, privilege)
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+        )
+        grants.append((sequence, execution_username, "SELECT"))
     if plan.get("options", {}).get("grant_select_to_app_user") is True:
         grants.append((table, "APP_USER", "SELECT"))
     return grants
 
 
-def grant_skip_flags(plan: Mapping[str, Any]) -> dict[str, bool]:
+def grant_skip_flags(
+    plan: Mapping[str, Any], execution_username: str | None = None
+) -> dict[str, bool]:
     """Boolean flags explaining why grants are skipped (only true flags are returned)."""
     if not grants_enabled():
         return {"grants_skipped_by_config": True}
+    if execution_username is None:
+        return {}
     owner = str(plan["target"]["owner"]).upper()
-    if any(grantee.upper() == owner for _name, grantee, _privilege in _all_grants(plan)):
+    grants = _execution_grants(plan, execution_username)
+    if any(grantee.upper() == owner for _name, grantee, _privilege in grants):
         return {"grants_skipped_owner_is_grantee": True}
     return {}
 
 
-def required_grants(plan: Mapping[str, Any]) -> list[tuple[str, str, str]]:
+def required_grants(
+    plan: Mapping[str, Any], execution_username: str | None = None
+) -> list[tuple[str, str, str]]:
     """Required (object name, grantee, privilege) triples.
 
-    The execution user (``ODI_EXEC_USER``, default ODI_EXEC) only by default. A SELECT for APP_USER (needed by the app's own
-    count-only postflight read) is opt-in via ``grant_select_to_app_user``. Returns an empty list when grants are
-    disabled by config (``ODI_EXEC_GRANTS_ENABLED=false``); grants whose grantee is the target owner are dropped
-    because an owner cannot grant to itself (ORA-01749).
+    The execution account is the topology proof passed by the caller. A configured
+    name and ``options.exec_user`` are not used here. A SELECT for APP_USER is
+    opt-in via ``grant_select_to_app_user``. Returns an empty execution-grant list
+    when grants are disabled, and drops a grantee equal to the target owner
+    (ORA-01749). Preview omits the execution account until that proof exists.
     """
     if not grants_enabled():
         return []
     owner = str(plan["target"]["owner"]).upper()
-    return [g for g in _all_grants(plan) if g[1].upper() != owner]
+    return [grant for grant in _execution_grants(plan, execution_username) if grant[1].upper() != owner]
 
 
 def render_grant_statement(plan: Mapping[str, Any], grant: tuple[str, str, str]) -> str:
@@ -429,9 +448,12 @@ def render_grant_statements(plan: Mapping[str, Any]) -> list[str]:
     return [render_grant_statement(plan, grant) for grant in required_grants(plan)]
 
 
-def required_grantees(plan: Mapping[str, Any]) -> list[str]:
+def required_grantees(
+    plan: Mapping[str, Any], execution_username: str | None = None
+) -> list[str]:
     """Distinct grantee users that must exist before any DDL runs."""
-    return sorted({grantee for _name, grantee, _privilege in required_grants(plan)})
+    grants = required_grants(plan, execution_username)
+    return sorted({grantee for _name, grantee, _privilege in grants})
 
 
 def expected_target_metadata(plan: Mapping[str, Any]) -> list[tuple[str, str, bool]]:

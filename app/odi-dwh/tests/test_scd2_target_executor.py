@@ -4,12 +4,14 @@ import inspect
 
 import pytest
 
+import execution_identity
 import scd2_builder
 import scd2_target_executor as executor
 from tests.scd2_support import (
     REQUEST,
     SOURCE_COLUMNS,
     connection_factory,
+    identity_payload,
     oracle_error,
     plan_catalog_rows,
 )
@@ -33,7 +35,8 @@ def plan():
 
 
 def handler_for(
-    plan, *, table_exists=0, sequence_exists=0, catalog=None, fail_on=None, error="ORA-01031: x", grants="all", users=None
+    plan, *, table_exists=0, sequence_exists=0, catalog=None, fail_on=None, error="ORA-01031: x",
+    grants="all", users=None, execution_user="ODI_EXEC",
 ):
     users = users or {}
     rows = plan_catalog_rows(plan) if catalog is None else catalog
@@ -51,11 +54,29 @@ def handler_for(
             return rows
         if "FROM ALL_TAB_PRIVS" in sql:
             if grants == "all":
-                return [(g, p, t) for t, g, p in scd2_builder.required_grants(plan)]
+                return [(g, p, t) for t, g, p in scd2_builder.required_grants(plan, execution_user)]
             return list(grants)
         return []
 
     return handler
+
+
+def proven(plan, username="ODI_EXEC"):
+    """Proof from the normalizer. A hand-built object is not accepted by these helpers."""
+    status, proof = execution_identity.interpret_execution_identity(
+        identity_payload(plan, username),
+        model_code=plan["models"]["target"],
+        context_code=execution_identity.EXECUTION_CONTEXT,
+        schema_name=plan["target"]["owner"],
+    )
+    assert proof is not None and status["status"] == "passed" and "username" not in status
+    return proof
+
+
+def execute(plan, *, username="ODI_EXEC", **kwargs):
+    if "identity_proof" not in kwargs:
+        kwargs["identity_proof"] = proven(plan, username)
+    return executor.execute_target_ddl(plan, **kwargs)
 
 
 def test_blocked_without_exact_boolean_approval(plan):
@@ -71,7 +92,7 @@ def test_blocked_without_exact_boolean_approval(plan):
 
 def test_creates_sequence_then_table_then_grants(plan):
     log = []
-    result = executor.execute_target_ddl(
+    result = execute(
         plan, approved=True, connection_factory=connection_factory(log, handler_for(plan)), ddl_user="DWH_DDL"
     )
     assert result["status"] == "created"
@@ -87,7 +108,7 @@ def test_creates_sequence_then_table_then_grants(plan):
 
 def test_existing_matching_table_is_not_touched(plan):
     log = []
-    result = executor.execute_target_ddl(
+    result = execute(
         plan, approved=True, connection_factory=connection_factory(log, handler_for(plan, table_exists=1, sequence_exists=1))
     )
     assert result["status"] == "already_exists_matching"
@@ -97,7 +118,7 @@ def test_existing_matching_table_is_not_touched(plan):
 def test_existing_mismatching_table_is_blocked_not_altered(plan):
     log = []
     wrong = plan_catalog_rows(plan)[:-1]
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory(log, handler_for(plan, table_exists=1, catalog=wrong)),
@@ -108,7 +129,7 @@ def test_existing_mismatching_table_is_blocked_not_altered(plan):
 
 def test_existing_sequence_is_reused_and_reported(plan):
     log = []
-    result = executor.execute_target_ddl(
+    result = execute(
         plan, approved=True, connection_factory=connection_factory(log, handler_for(plan, sequence_exists=1))
     )
     assert result["status"] == "created"
@@ -119,7 +140,7 @@ def test_existing_sequence_is_reused_and_reported(plan):
 
 def test_table_failure_after_sequence_reports_partial_state(plan):
     log = []
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory(log, handler_for(plan, fail_on="CREATE TABLE")),
@@ -134,7 +155,7 @@ def test_table_failure_after_sequence_reports_partial_state(plan):
 
 
 def test_privilege_failure_before_any_write_is_a_clean_block(plan):
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory([], handler_for(plan, fail_on="CREATE SEQUENCE")),
@@ -159,14 +180,14 @@ def test_verification_mismatch_after_create_is_partial(plan):
             return good[:-1]
         return []
 
-    result = executor.execute_target_ddl(plan, approved=True, connection_factory=connection_factory([], handler))
+    result = execute(plan, approved=True, connection_factory=connection_factory([], handler))
     assert result["status"] == "partial_failure"
     assert result["stage"] == "verify_target"
     assert result["target_created"] is True and result["sequence_created"] is True
 
 
 def test_failed_grant_is_counted_not_hidden(plan):
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory([], handler_for(plan, fail_on="TO ODI_EXEC")),
@@ -179,7 +200,7 @@ def test_connection_failure_is_reported_without_details(plan):
     def broken():
         raise oracle_error("ORA-12541: secret host detail")
 
-    result = executor.execute_target_ddl(plan, approved=True, connection_factory=broken)
+    result = execute(plan, approved=True, connection_factory=broken)
     assert result["status"] == "failed"
     assert result["connection_attempted"] is False
     assert "host detail" not in str(result)
@@ -193,7 +214,7 @@ def test_executor_source_has_no_drop_or_alter_path():
 
 def test_existing_table_with_missing_sequence_and_grants_is_repaired_without_touching_the_table(plan):
     log = []
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory(log, handler_for(plan, table_exists=1, grants=[])),
@@ -207,9 +228,9 @@ def test_existing_table_with_missing_sequence_and_grants_is_repaired_without_tou
 
 
 def test_existing_table_only_missing_grants_are_granted(plan):
-    present = [(g, p, t) for t, g, p in scd2_builder.required_grants(plan) if p != "DELETE"]
+    present = [(g, p, t) for t, g, p in scd2_builder.required_grants(plan, "ODI_EXEC") if p != "DELETE"]
     log = []
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory(log, handler_for(plan, table_exists=1, sequence_exists=1, grants=present)),
@@ -222,7 +243,7 @@ def test_existing_table_only_missing_grants_are_granted(plan):
 
 def test_existing_complete_target_needs_no_writes(plan):
     log = []
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory(log, handler_for(plan, table_exists=1, sequence_exists=1)),
@@ -232,7 +253,7 @@ def test_existing_complete_target_needs_no_writes(plan):
 
 
 def test_existing_table_repair_failure_is_blocked_target_incomplete(plan):
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory(
@@ -240,7 +261,7 @@ def test_existing_table_repair_failure_is_blocked_target_incomplete(plan):
         ),
     )
     assert result["status"] == "blocked_target_incomplete" and result["missing"] == ["grants"]
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory([], handler_for(plan, table_exists=1, fail_on="CREATE SEQUENCE")),
@@ -273,21 +294,24 @@ def test_catalog_read_maps_multibyte_rows():
 
 def test_missing_exec_user_blocks_before_any_ddl_with_exact_message(plan):
     log = []
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory(log, handler_for(plan, users={"ODI_EXEC": 0})),
     )
     assert result["status"] == "blocked_grantee_missing"
-    assert result["missing_grantees"] == ["ODI_EXEC"]
-    assert "ODI_EXEC_USER" in result["message"] and "No DDL was executed" in result["message"]
+    assert result["missing_grantee_count"] == 1
+    assert "missing_grantees" not in result
+    assert result["message"] == "A required grantee does not exist. No DDL was executed."
+    assert "ODI_EXEC" not in str(result)
     assert not any(sql.startswith(("CREATE", "GRANT", "DROP", "ALTER")) for sql in log)
+    assert result["connection_attempted"] is True
     assert result["target_created"] is False and result["sequence_created"] is False
 
 
 def test_missing_grantee_also_blocks_the_existing_table_repair_path(plan):
     log = []
-    result = executor.execute_target_ddl(
+    result = execute(
         plan,
         approved=True,
         connection_factory=connection_factory(log, handler_for(plan, table_exists=1, users={"ODI_EXEC": 0})),
@@ -296,7 +320,10 @@ def test_missing_grantee_also_blocks_the_existing_table_repair_path(plan):
     assert not any(sql.startswith(("CREATE", "GRANT")) for sql in log)
 
 
-def test_configured_exec_user_is_used_for_grants_and_existence_check():
+def test_explicit_request_grants_only_the_matching_proof(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "ODI_EXEC_USER", "CFG_EXEC")
     custom = scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS, exec_user="etl_runner")
     assert custom["options"]["exec_user"] == "ETL_RUNNER"
     log = []
@@ -312,11 +339,20 @@ def test_configured_exec_user_is_used_for_grants_and_existence_check():
             return plan_catalog_rows(custom)
         return []
 
-    result = executor.execute_target_ddl(custom, approved=True, connection_factory=connection_factory(log, handler))
+    refused = executor.execute_target_ddl(
+        custom, approved=True, connection_factory=connection_factory([], handler)
+    )
+    assert refused["status"] == "blocked_execution_identity"
+    assert refused["connection_attempted"] is False
+    assert "ETL_RUNNER" not in str(refused) and "CFG_EXEC" not in str(refused)
+
+    result = execute(
+        custom, username="ETL_RUNNER", approved=True, connection_factory=connection_factory(log, handler)
+    )
     assert result["status"] == "created" and asked == ["ETL_RUNNER"]
     grants = [sql for sql in log if sql.startswith("GRANT")]
     assert grants and all(sql.endswith("TO ETL_RUNNER") for sql in grants)
-    assert not any("ODI_EXEC" in sql for sql in log)
+    assert not any("ODI_EXEC" in sql or "CFG_EXEC" in sql for sql in log)
 
 
 def test_exec_user_must_be_a_valid_identifier():
@@ -324,11 +360,15 @@ def test_exec_user_must_be_a_valid_identifier():
         scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS, exec_user="X; DROP USER Y")
 
 
-def test_default_exec_user_comes_from_config(monkeypatch):
+def test_configured_label_is_not_copied_onto_the_plan(monkeypatch):
     import config
 
     monkeypatch.setattr(config, "ODI_EXEC_USER", "CFG_EXEC")
-    assert scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)["options"]["exec_user"] == "CFG_EXEC"
+    plan = scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)
+    assert "exec_user" not in plan["options"]
+    assert plan["options"]["exec_user_requested"] is False
+    assert scd2_builder.default_exec_user() == "CFG_EXEC"
+    assert "CFG_EXEC" not in " ".join(scd2_builder.render_grant_statements(plan))
 
 
 def test_grants_disabled_by_config_issue_no_grant_sql_and_no_user_check(monkeypatch):
@@ -382,8 +422,9 @@ def test_plan_preview_reports_grants_skipped_by_config(monkeypatch):
 def test_grantee_equal_to_owner_is_skipped_not_granted():
     plan = scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS, exec_user="dm")
     log = []
-    result = executor.execute_target_ddl(
-        plan, approved=True, connection_factory=connection_factory(log, handler_for(plan))
+    result = execute(
+        plan, username="DM", approved=True,
+        connection_factory=connection_factory(log, handler_for(plan, execution_user="DM")),
     )
     assert result["status"] == "created"
     assert result["grants_skipped_owner_is_grantee"] is True
@@ -394,7 +435,7 @@ def test_grantee_equal_to_owner_is_skipped_not_granted():
 
 def test_default_enabled_has_no_skip_flags(plan):
     assert scd2_builder.grant_skip_flags(plan) == {}
-    result = executor.execute_target_ddl(
+    result = execute(
         plan, approved=True, connection_factory=connection_factory([], handler_for(plan))
     )
     assert "grants_skipped_by_config" not in result and "grants_skipped_owner_is_grantee" not in result
@@ -419,8 +460,9 @@ def test_reader_opt_in_with_owner_as_grantee_emits_only_reader_grant():
         {**REQUEST, "grant_select_to_app_user": True}, SOURCE_COLUMNS, exec_user="DM"
     )
     log = []
-    result = executor.execute_target_ddl(
-        plan, approved=True, connection_factory=connection_factory(log, handler_for(plan))
+    result = execute(
+        plan, username="DM", approved=True,
+        connection_factory=connection_factory(log, handler_for(plan, execution_user="DM")),
     )
     assert result["status"] == "created" and result["grants_skipped_owner_is_grantee"] is True
     grants = [sql for sql in log if sql.startswith("GRANT")]
