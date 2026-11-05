@@ -310,6 +310,8 @@ def _owners_for(flow: str) -> tuple[str, ...]:
 
 def prove_owners(owners: tuple[str, ...], context: object, raw: object) -> None:
     """Prove the injected binding matches the app model map. No connection is opened."""
+    if type(context) is not str or context != "GLOBAL":
+        raise isolated._Blocked("ContextMismatch")
     for owner in owners:
         if owner not in scd2_builder.SOURCE_MODEL_BY_OWNER:
             raise isolated._Blocked("source_model_disagrees_with_app")
@@ -703,6 +705,15 @@ def _copy_rows(cursor: Any, owner: str, original: str, backup: str, columns: tup
 def _checkpoint_matches(cursor: Any, flow: str, kind: str, owner: str, original: str, backup: str) -> None:
     columns = BUSINESS if kind == "source" else (SK[flow], *BUSINESS, *AUDIT)
     _metadata_equal(cursor, owner, original, backup)
+    counts = []
+    key = "ENTITY_ID" if kind == "source" else SK[flow]
+    for name in (original, backup):
+        table = _q(owner, name)
+        counts.append(isolated._count(cursor, f"SELECT COUNT(*) FROM {table}"))
+        isolated._need(_null_audit(cursor, owner, name, columns) == 0, "InvalidCheckpoint")
+        duplicate = isolated._count(cursor, f'SELECT COUNT(*) FROM (SELECT "{key}" FROM {table} GROUP BY "{key}" HAVING COUNT(*)>1)')
+        isolated._need(duplicate == 0, "InvalidCheckpoint")
+    isolated._need(counts[0] == counts[1], "InvalidCheckpoint")
     left = f"SELECT {_projection(columns)} FROM {_q(owner, original)}"
     right = f"SELECT {_projection(columns)} FROM {_q(owner, backup)}"
     _projection_equal(cursor, left, right, {}, "InvalidCheckpoint")
@@ -888,6 +899,46 @@ def _snapshot_equal(cursor: Any, flow: str, owner: str, table: str, backup: str)
     _projection_equal(cursor, left, right, {}, "SnapshotMismatch")
 
 
+def _history_delta(cursor: Any, flow: str, owner: str, target: str) -> dict[str, int]:
+    """Prove old-version retention and unchanged rows against the pre-run2 backup."""
+    backup = backup_name(flow, "target", 2)
+    _permanent(cursor, owner, backup)
+    _metadata_equal(cursor, owner, target, backup)
+    expected, params = _expected_business("seed")
+    _prove_target_shape(cursor, flow, owner, backup, "seed", expected, params)
+    table, baseline = _q(owner, target), _q(owner, backup)
+    key = SK[flow]
+    all_columns = (key, *BUSINESS, *AUDIT)
+    preserved = (key, *BUSINESS, "EFFECTIVE_FROM", "INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID")
+
+    def fields(alias: str, names: tuple[str, ...]) -> str:
+        return ",".join(f'{alias}."{_ident(name)}"' for name in names)
+
+    same = " AND ".join(
+        f'(C."{name}"=B."{name}" OR (C."{name}" IS NULL AND B."{name}" IS NULL))'
+        for name in BUSINESS[1:]
+    )
+    changed = " OR ".join(
+        f'(C."{name}"<>B."{name}" OR (C."{name}" IS NULL AND B."{name}" IS NOT NULL) OR '
+        f'(C."{name}" IS NOT NULL AND B."{name}" IS NULL))' for name in BUSINESS[1:]
+    )
+    join = 'C."ENTITY_ID"=B."ENTITY_ID" AND C."CURRENT_FLAG"=\'1\''
+    actual_history = f'SELECT {fields("H", preserved)} FROM {table} H WHERE H."CURRENT_FLAG"=\'0\''
+    old_changed = f'SELECT {fields("B", preserved)} FROM {baseline} B WHERE EXISTS (SELECT 1 FROM {table} C WHERE {join} AND ({changed}))'
+    _projection_equal(cursor, actual_history, old_changed, {}, "HistoryMismatch")
+    unchanged_old = f'SELECT {fields("B", all_columns)} FROM {baseline} B WHERE EXISTS (SELECT 1 FROM {table} C WHERE {join} AND {same})'
+    unchanged_now = f'SELECT {fields("C", all_columns)} FROM {table} C JOIN {baseline} B ON {join} WHERE {same}'
+    _projection_equal(cursor, unchanged_old, unchanged_now, {}, "SnapshotMismatch")
+    unchanged = isolated._count(cursor, f"SELECT COUNT(*) FROM ({unchanged_now})")
+    changed_rows = isolated._count(cursor, f'SELECT COUNT(*) FROM {table} C JOIN {baseline} B ON {join} WHERE ({changed})')
+    inserted = isolated._count(cursor, f'SELECT COUNT(*) FROM {table} C WHERE C."CURRENT_FLAG"=\'1\' AND NOT EXISTS (SELECT 1 FROM {baseline} B WHERE C."ENTITY_ID"=B."ENTITY_ID")')
+    reused = isolated._count(cursor, f'SELECT COUNT(*) FROM {table} C WHERE C."CURRENT_FLAG"=\'1\' AND '
+        f'NOT EXISTS (SELECT 1 FROM {baseline} B WHERE C."ENTITY_ID"=B."ENTITY_ID" AND {same}) '
+        f'AND EXISTS (SELECT 1 FROM {baseline} P WHERE P."{key}"=C."{key}")')
+    isolated._need((unchanged, changed_rows, inserted, reused) == (2, 1, 1, 0), "HistoryMismatch")
+    return {"unchanged_versions": unchanged, "new_changed_versions": changed_rows, "inserted_keys": inserted, "reused_surrogate_keys": reused}
+
+
 def _verify_scope(flow: object, run: object, phase: object) -> str | None:
     if not isinstance(flow, str) or type(run) is not int or run not in (1, 2, 3):
         return None
@@ -951,9 +1002,14 @@ def verify_target(
             _metadata_equal(cursor, spec["target_owner"], spec["target_table"], backup)
             source_sql = f"SELECT {_projection(BUSINESS)} FROM {_q(spec['source_owner'], spec['source_table'])}"
             live_parity = None if target_state == "empty" else source_sql
+            parity_params: dict[str, Any] = {}
+            if phase == "before_run" and run == 2:
+                live_parity, parity_params = _expected_business("seed")
             counts = _prove_target_shape(
-                cursor, flow, spec["target_owner"], spec["target_table"], target_state, live_parity, {},
+                cursor, flow, spec["target_owner"], spec["target_table"], target_state, live_parity, parity_params,
             )
+            if target_state == "changed":
+                counts.update(_history_delta(cursor, flow, spec["target_owner"], spec["target_table"]))
             constant_sql, params = (None, {}) if backup_state == "empty" else _expected_business(backup_state)
             _prove_target_shape(
                 cursor, flow, spec["target_owner"], backup, backup_state, constant_sql, params,

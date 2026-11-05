@@ -27,9 +27,11 @@ CANONICAL_CALLS = (
     "backup_source",
     "mutate_source",
     "backup_target_r2",
+    "verify_before_r2",
     "app_run_2",
     "verify_after_r2",
     "backup_target_r3",
+    "verify_before_r3",
     "app_run_3",
     "verify_after_r3",
 )
@@ -65,6 +67,7 @@ _WRITE_FLAGS = (
     "rollback_failed",
     "cursor_close_failed",
     "connection_close_failed",
+    "http_write_attempted",
 )
 
 
@@ -89,9 +92,11 @@ def required_scopes(flow: str) -> tuple[str, ...]:
         f"odi81_{name}_backup_source",
         f"odi81_{name}_mutate_source",
         f"odi81_{name}_backup_target_r2",
+        f"odi81_{name}_verify_before_r2",
         f"odi81_{name}_run_2",
         f"odi81_{name}_verify_after_r2",
         f"odi81_{name}_backup_target_r3",
+        f"odi81_{name}_verify_before_r3",
         f"odi81_{name}_run_3",
         f"odi81_{name}_verify_after_r3",
     )
@@ -134,6 +139,7 @@ def _report() -> dict[str, Any]:
     report["steps"] = []
     report["http_log"] = []
     report["downstream_stopped"] = False
+    report["http_write_attempted"] = False
     return report
 
 
@@ -208,7 +214,7 @@ def _parts(response: Any) -> tuple[int, dict[str, Any]]:
 def _accept_generate(status: int, payload: Mapping[str, Any]) -> None:
     if status != 200 or payload.get("status") != "generated":
         raise isolated._Blocked("HttpFailed")
-    if payload.get("scenario_version", fixtures.SCENARIO_VERSION) != fixtures.SCENARIO_VERSION:
+    if payload.get("scenario_version") != fixtures.SCENARIO_VERSION:
         raise isolated._Blocked("ScenarioVersionMismatch")
 
 
@@ -234,6 +240,9 @@ def _http_step(
 ) -> dict[str, Any]:
     scratch = fixtures._report("http")
     scratch["verification_failed"] = True
+    scratch["http_write_attempted"] = True
+    scratch["outcome_unknown"] = True
+    scratch["manual_review_required"] = True
     box: dict[str, Any] = {}
 
     def invoke() -> None:
@@ -244,7 +253,8 @@ def _http_step(
         status, payload = _parts(box["value"])
         report["http_log"].append({"path": path, "http_status": status})
         accept(status, payload)
-        scratch.update(status="passed", error_code=None, verification_failed=False)
+        scratch.update(status="passed", error_code=None, verification_failed=False,
+                       outcome_unknown=False, manual_review_required=False)
     if scratch["status"] != "passed":
         scratch["status"] = "failed" if scratch["status"] == "blocked" else scratch["status"]
     return scratch
@@ -343,6 +353,11 @@ def _run_scd2(
         approval_scope=f"odi81_{name}_backup_target_r2", **common,
     )):
         return report
+    if not _accept_step(report, "verify_before_r2", fixtures.verify_target(
+        flow, 2, "before_run", reader_factories, source_reader_factory,
+        approval_scope=f"odi81_{name}_verify_before_r2", **common,
+    )):
+        return report
     if not _accept_step(report, "app_run_2", _http_step(
         report, http_client, RUN_PATH, run_body(flow, context),
         lambda status, payload: _accept_run(flow, context, status, payload),
@@ -356,6 +371,11 @@ def _run_scd2(
     if not _accept_step(report, "backup_target_r3", fixtures.create_backup(
         flow, "target", 3, writer_factories,
         approval_scope=f"odi81_{name}_backup_target_r3", **common,
+    )):
+        return report
+    if not _accept_step(report, "verify_before_r3", fixtures.verify_target(
+        flow, 3, "before_run", reader_factories, source_reader_factory,
+        approval_scope=f"odi81_{name}_verify_before_r3", **common,
     )):
         return report
     if not _accept_step(report, "app_run_3", _http_step(

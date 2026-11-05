@@ -341,6 +341,7 @@ def test_after_run_counts_and_business_parity(db, run, current, historical, tota
 
 def test_run3_full_snapshot_witness(db):
     _ready(db)
+    db.install_backup("F4", "target", 2, "seed")
     result = verify(db, run=3, phase="after_run")
     assert result["status"] == "passed", result
     assert result["full_target_snapshot_equal"] is True
@@ -426,6 +427,7 @@ def test_invalid_flag_and_date_range_fail(db):
 
 def test_stale_backup_snapshot_is_not_a_pass(db):
     _ready(db, backup="changed")
+    db.install_backup("F4", "target", 2, "seed")
     db.db.execute('UPDATE "DIM_ODI81_F4" SET "UPDATE_DATE"=? WHERE "ODI81_F4_SK"=2', ("2024-07-01T00:00:00",))
     result = verify(db, run=3)
     assert result["status"] == "failed"

@@ -33,6 +33,26 @@ fixed DIM_PRODUCT source-system literal is not applied to these fixtures.
 
 Expected shapes:
 
+Every run now has a distinct, freshly executed `before_run` verification and
+approval scope, including runs 2 and 3. Before run 2 the target must still match
+the retained seed checkpoint, not the source that has already been changed.
+Retained backup equality requires actual row totals and unique/non-null row
+identities in addition to both MINUS projections; duplicate identical rows
+cannot count as a valid backup. Source and target metadata remain fixed.
+
+After run 2 and on run 3, the retained run-2 before-image also proves the expired
+version's original business values, surrogate, start date and audit values. Only
+its current flag/end date may change. The two unchanged current rows must retain
+their complete projections, and changed/new rows must receive fresh surrogates.
+This prevents a history-shaped overwrite from passing as Type 2.
+
+HTTP writes are marked attempted and uncertain before invoking the client.
+Timeouts, unknown or malformed responses require manual reconciliation and stop
+all downstream work without retry. Only a verified successful response clears
+that call's uncertainty. The driver and individual fixture gates accept only
+GLOBAL before any callback, even if another context has a syntactically valid
+binding. These are offline-tested code invariants, not native load evidence.
+
 | Checkpoint | Current | Historical | Total |
 | --- | --- | --- | --- |
 | Before run 1 | 0 | 0 | 0 |
