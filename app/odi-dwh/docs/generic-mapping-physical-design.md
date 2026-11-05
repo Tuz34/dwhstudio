@@ -37,3 +37,17 @@ mapping, sets the target staging location, assigns the approved IKM and then han
   `source_moved=false`, and any remaining access point still gets the load KM.
 - The default graph engine runs the same read-only repository preflight as the classic engine
   before the first DDL step, so internal ODS/DWH sources carry their verified source identity.
+  `run_mapping_graph` still compiles with an in-memory checkpoint and still writes that state
+  through the existing persistence hook.
+- Trusted source model: `ODI_SOURCE_MODEL_BINDINGS` is an optional server JSON object,
+  `{"CONTEXT": {"PHYSICAL_OWNER": "MODEL_CODE"}}`. The default empty value selects nothing.
+  Two Oracle models for the same physical owner in the requested context still return
+  `source_identity_ambiguous`. A configured pair keeps only that exact model code, and only
+  when one repository model has it. That model still has to pass the physical schema, context,
+  Oracle technology, resource, shortcut and datastore checks. A missing code, a second model
+  with the same code, a wrong owner or context, a non-Oracle technology, a shortcut, or two
+  conflicting datastores stays blocked. There is no first match and no fallback.
+  `src_model` and `_odi_source_identity` do not choose the code. After Groovy returns, Python
+  requires `source.model_code` to equal the server value. Invalid JSON, types, identifiers or
+  duplicate keys return `source_model_config_invalid` with no repository connection.
+  This is a static contract, not a live repository proof.

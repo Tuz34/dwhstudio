@@ -447,18 +447,33 @@ class MappingGenerator:
         return bindings
 
     def _preflight_odi_repository(self, params: dict) -> dict:
+        from config import ODI_SOURCE_MODEL_BINDINGS
         from odi_orchestrator import OdiOrchestrator
+        from source_model_policy import SourceModelConfigError, trusted_source_model_code
 
         internal = params["src_model"] in INTERNAL_SOURCE_MODELS
         owner = params["src_owner"] if internal else None
         table = params["src_table"] if internal else None
+        params.pop("_odi_source_identity", None)
+        try:
+            expected = trusted_source_model_code(params["context"], owner, ODI_SOURCE_MODEL_BINDINGS)
+        except SourceModelConfigError:
+            raise RepositoryPreflightBlockedError({
+                "tool": "odi.mapping_preflight",
+                "status": "blocked",
+                "side_effects": False,
+                "repository_connection_attempted": False,
+                "code": "source_model_config_invalid",
+            }) from None
         try:
             result = OdiOrchestrator().preflight_mapping(
                 approved=True, ikm_name=params["ikm_name"], src_owner=owner, src_table=table, context=params["context"],
             )
         except Exception as exc:
             raise RepositoryPreflightBlockedError({"code": "repository_lookup_failed"}) from exc
-        result = normalize_repository_preflight(result, params["ikm_name"], owner, table, params["context"])
+        result = normalize_repository_preflight(
+            result, params["ikm_name"], owner, table, params["context"], expected_model_code=expected,
+        )
         if result["status"] != "passed":
             raise RepositoryPreflightBlockedError(result)
         params["_odi_ikm_id"] = result["ikm_id"]

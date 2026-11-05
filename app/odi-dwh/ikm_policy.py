@@ -66,6 +66,7 @@ def verified_source_identity(source: object, owner: str, table: str, context: st
 
 def normalize_repository_preflight(
     payload: object, ikm_name: str, owner: str | None, table: str | None, context: str,
+    *, expected_model_code: str | None = None,
 ) -> dict:
     """Project a strict metadata-only proof; unknown/malformed output never authorizes writes."""
     base = {"tool": "odi.mapping_preflight", "status": "blocked", "side_effects": False,
@@ -76,9 +77,13 @@ def normalize_repository_preflight(
     if payload.get("status") != "passed":
         code = payload.get("code")
         allowed = {"approval_required", "ikm_not_approved", "ikm_not_imported", "ikm_ambiguous",
-                   "repository_lookup_failed",
+                   "repository_lookup_failed", "source_model_config_invalid",
                    "source_identity_missing", "source_identity_ambiguous", "source_identity_unverified"}
-        return {**base, "code": code if isinstance(code, str) and code in allowed else "repository_lookup_failed"}
+        safe = code if isinstance(code, str) and code in allowed else "repository_lookup_failed"
+        # Invalid server configuration is rejected before Groovy starts.
+        if safe == "source_model_config_invalid" and payload.get("repository_connection_attempted") is False:
+            return {**base, "code": safe, "repository_connection_attempted": False}
+        return {**base, "code": safe}
     if (payload.get("repository_connection_attempted") is not True
             or type(payload.get("ikm_match_count")) is not int or payload["ikm_match_count"] != 1
             or payload.get("ikm_name") != ikm_name
@@ -92,5 +97,12 @@ def normalize_repository_preflight(
             return {**base, "code": "source_identity_unverified"}
     elif payload.get("source") is not None:
         return failure
+    if expected_model_code is not None and (
+        source is None
+        or not isinstance(expected_model_code, str)
+        or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", expected_model_code)
+        or source["model_code"] != expected_model_code
+    ):
+        return {**base, "code": "source_identity_unverified"}
     return {**base, "status": "passed", "ikm_name": ikm_name, "ikm_id": payload["ikm_id"],
             "ikm_match_count": 1, "source": source}
