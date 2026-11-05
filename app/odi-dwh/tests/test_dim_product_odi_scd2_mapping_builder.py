@@ -141,7 +141,7 @@ def test_dedicated_mapping_script_is_fixed_scd_public_api_and_non_destructive():
         'final String TARGET_TABLE = "DIM_PRODUCT"',
         "INTEGRATION_TYPE_SCD",
         "setTargetComponentKM",
-        "setXKM",
+        "setLKM",
         "SEQ_DIM_PRODUCT.NEXTVAL",
         "ExecuteOnLocation.TARGET",
         "mapping already exists",
@@ -158,6 +158,24 @@ def test_dedicated_mapping_script_is_fixed_scd_public_api_and_non_destructive():
         "printstacktrace",
     ):
         assert forbidden not in lowered
+
+
+def test_mapping_script_text_keeps_the_gate_calls_where_no_java_runtime_exists():
+    """Static fallback for CI. Behaviour is in test_dim_product_scd2_mapping_create_fake_sdk.py."""
+    script = (PROJECT_ROOT / "odi_automation" / SCRIPT_NAME).read_text(encoding="utf-8")
+
+    for required in (
+        "mapping.validate(finalIssues, false)",
+        "RootIssue.isErrorOrFatal(finalIssues)",
+        "design.getAllAPNodes()",
+        "node.setLKM(lkm)",
+        "getLKMName()",
+        "getIKMOptionValue(optionName)",
+        "candidates.size() != 1",
+    ):
+        assert required in script
+    for forbidden in ("setXKM", "getXKMName", "mapping.validate()", "setCheckKM", "setScdType"):
+        assert forbidden not in script
 
 
 def test_orchestrator_mapping_wrapper_uses_fixed_script_without_object_params(monkeypatch):
