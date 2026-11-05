@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Sequence
 from datetime import date
 from typing import Any
@@ -131,16 +132,17 @@ def build_stock_postflight_statements(
 ) -> dict[str, str]:
     """Strict stock-profile counts; legacy Y/N and 9999 are never valid here."""
     if (
-        not isinstance(owner, str) or not isinstance(table, str)
-        or isinstance(natural_key, (str, bytes)) or not isinstance(natural_key, Sequence)
+        type(owner) is not str or type(table) is not str
+        or type(natural_key) not in (list, tuple)
         or not 1 <= len(natural_key) <= 128
-        or any(not isinstance(key, str) for key in natural_key)
+        or any(type(key) is not str for key in natural_key)
         or (source is not None and (
-            not isinstance(source, tuple) or len(source) != 2
-            or any(not isinstance(part, str) for part in source)
+            type(source) is not tuple or len(source) != 2
+            or any(type(part) is not str for part in source)
         ))
     ):
         raise scd2_builder.Scd2PlanError("invalid_identifier")
+    natural_key = tuple(natural_key)
     statements = build_postflight_statements(owner, table, natural_key, source=source)
     target = _quoted(owner, table)
     keys = ", ".join(f'"{key}"' for key in natural_key)
@@ -192,7 +194,7 @@ def _read_stock_counts(
         value = row[0]
         if name == "max_effective_from":
             if value is not None:
-                if not isinstance(value, str) or len(value) != 10:
+                if type(value) is not str or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
                     raise ValueError("Invalid date aggregate")
                 date.fromisoformat(value)
         elif type(value) is not int or value < 0:
@@ -207,14 +209,17 @@ def _finish_stock_resource(resource: Any, method: str) -> bool:
 
 
 def _cleanup_stock_resources(resources: list[Any]) -> bool:
-    clean = True
-    # A rollback failure must not prevent either resource from closing.
+    # Even process-control exceptions must attempt every remaining cleanup step.
     connection = resources[0] if resources else None
     cursor = resources[1] if len(resources) > 1 else None
-    for resource, method in ((connection, "rollback"), (cursor, "close"), (connection, "close")):
-        if resource is not None and call_sanitized(_finish_stock_resource, resource, method) is not True:
-            clean = False
-    return clean
+    try:
+        rolled = connection is None or call_sanitized(_finish_stock_resource, connection, "rollback") is True
+    finally:
+        try:
+            cursor_closed = cursor is None or call_sanitized(_finish_stock_resource, cursor, "close") is True
+        finally:
+            connection_closed = connection is None or call_sanitized(_finish_stock_resource, connection, "close") is True
+    return rolled and cursor_closed and connection_closed
 
 
 def collect_stock_postflight(
@@ -229,6 +234,8 @@ def collect_stock_postflight(
     result: dict[str, Any] = {
         "mode": "stock_scd2_postflight", "status": "error", "counts": {},
         "contract_profile": "stock_1_0_2400", "stock_contract_valid": False,
+        "business_parity_proven": False, "physical_noop_proven": False,
+        "history_overlap_checked": False, "source_current_count_equal": None,
         "connection_attempted": False, "read_only_transaction": False,
         "raw_rows_included": False, "pk_values_included": False, "secret_printed": False,
     }
@@ -252,4 +259,5 @@ def collect_stock_postflight(
     return {
         **result, "status": "ok" if valid else "invalid_stock_contract", "counts": counts,
         "stock_contract_valid": valid, "read_only_transaction": True,
+        "source_current_count_equal": counts["source_count"] == counts["target_current"] if source is not None else None,
     }

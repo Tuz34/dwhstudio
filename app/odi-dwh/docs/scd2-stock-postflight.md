@@ -20,3 +20,15 @@ Application run-gate integration is a separate serialized code step after the
 concurrent execution-identity work releases `scd2_service.py`. Until that step
 is reviewed and merged, this helper's tests do not establish that the API uses
 the stricter collector. Code-first Phase A remains open. No live check was run.
+
+`ok` means the structural checks passed and the read-only transaction completed,
+not that a load is complete. Empty targets and targets with only closed history
+can be structurally valid. Cross-version interval overlap is not checked. Source
+count equality is reported separately, never confused with business-value parity.
+The later application gate must check its expected source/current counts and the
+acceptance harness must prove attribute changes and rerun equality independently.
+The report explicitly leaves business parity and physical no-op proof false.
+
+Inputs are exact built-in strings and a copied list/tuple of key names; custom
+Python formatting or mutating sequence subclasses are not accepted as SQL names.
+Date aggregates require exact ASCII YYYY-MM-DD plus calendar validation.

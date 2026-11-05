@@ -9,11 +9,16 @@ import scd2_postflight as postflight
 
 
 class Connection:
-    def __init__(self, rows=(), *, autocommit=False):
+    def __init__(self, rows=(), *, autocommit=False, secondary_keys=None, source_rows=None):
         self.autocommit = autocommit
         self.db = sqlite3.connect(":memory:")
-        self.db.execute("CREATE TABLE DIM_TEST (NK INTEGER, CURRENT_FLAG TEXT, EFFECTIVE_FROM TEXT, EFFECTIVE_TO TEXT)")
-        self.db.executemany("INSERT INTO DIM_TEST VALUES (?,?,?,?)", rows)
+        self.db.execute("CREATE TABLE DIM_TEST (NK INTEGER, CURRENT_FLAG TEXT, EFFECTIVE_FROM TEXT, EFFECTIVE_TO TEXT, NK2 INTEGER DEFAULT 1)")
+        self.db.executemany("INSERT INTO DIM_TEST(NK,CURRENT_FLAG,EFFECTIVE_FROM,EFFECTIVE_TO) VALUES (?,?,?,?)", rows)
+        for rowid, value in enumerate(secondary_keys or [], 1):
+            self.db.execute("UPDATE DIM_TEST SET NK2=? WHERE rowid=?", (value, rowid))
+        if source_rows is not None:
+            self.db.execute("CREATE TABLE SRC_TEST (NK INTEGER)")
+            self.db.executemany("INSERT INTO SRC_TEST VALUES (?)", [(i,) for i in range(source_rows)])
         self.db.commit()
         self.db.execute("PRAGMA query_only=ON")
         self.statements = []
@@ -21,6 +26,10 @@ class Connection:
         self.cursor_closed = False
         self.fail_read = self.fail_rollback = self.fail_close = False
         self.interrupt = False
+        self.interrupt_stage = None
+        self.interrupt_error = KeyboardInterrupt
+        self.override_row = False
+        self.row_value = None
         self.bad_count = None
         self.override_count = False
 
@@ -29,6 +38,8 @@ class Connection:
 
     def rollback(self):
         self.rollbacks += 1
+        if self.interrupt_stage == "rollback":
+            raise self.interrupt_error
         if self.fail_rollback:
             raise RuntimeError("SYNTHETIC_PRIVATE_ROLLBACK")
         self.db.rollback()
@@ -36,6 +47,8 @@ class Connection:
     def close(self):
         self.closes += 1
         self.db.close()
+        if self.interrupt_stage == "connection_close":
+            raise self.interrupt_error
         if self.fail_close:
             raise OSError("SYNTHETIC_PRIVATE_CLOSE")
 
@@ -62,12 +75,16 @@ class Cursor:
         self.rows = connection.db.execute(sql).fetchall()
         if connection.override_count and "COUNT(*)" in sql:
             self.rows = [(connection.bad_count,)]
+        if connection.override_row:
+            self.rows = [connection.row_value]
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
 
     def close(self):
         self.connection.cursor_closed = True
+        if self.connection.interrupt_stage == "cursor_close":
+            raise self.connection.interrupt_error
 
 
 def collect(connection):
@@ -83,6 +100,7 @@ def test_stock_sql_and_transaction_execute_real_synthetic_counts():
     assert result["counts"]["target_current"] == 1
     assert result["counts"]["rows_with_effective_to_set"] == 1
     assert result["stock_contract_valid"] is True
+    assert result["connection_attempted"] is True and result["read_only_transaction"] is True
     assert connection.statements[0] == "SET TRANSACTION READ ONLY"
     assert connection.rollbacks == connection.closes == 1 and connection.cursor_closed
     assert result["raw_rows_included"] is False and result["pk_values_included"] is False
@@ -125,6 +143,7 @@ def test_autocommit_refusal_precedes_all_statements(autocommit):
     connection = Connection(autocommit=autocommit)
     result = collect(connection)
     assert result["status"] == "error" and connection.statements == []
+    assert result["connection_attempted"] is True and result["read_only_transaction"] is False
     assert connection.closes == 1
 
 
@@ -142,6 +161,7 @@ def test_bad_identifiers_never_call_the_factory():
     called = []
     result = postflight.collect_stock_postflight("SYS", "DIM_TEST", ["NK"], lambda: called.append(True))
     assert result["status"] == "invalid_request" and called == []
+    assert result["connection_attempted"] is False and result["read_only_transaction"] is False
 
 
 def test_factory_failure_is_fixed_text_not_exception_body():
@@ -171,3 +191,65 @@ def test_invalid_key_shapes_fail_before_connection(keys):
     calls = []
     result = postflight.collect_stock_postflight("DWH", "DIM_TEST", keys, lambda: calls.append(True))
     assert result["status"] == "invalid_request" and not calls
+
+
+@pytest.mark.parametrize("value", ["2026-W01-1", "20260101  ", "2026-02-30", "2026-01-01 ", "２０２６-01-01"])
+def test_maximum_date_requires_exact_ascii_calendar_format(value):
+    result = collect(Connection([(1, "1", value, "2400-01-01")]))
+    assert result["status"] == "error" and result["counts"] == {}
+
+
+@pytest.mark.parametrize("row", [None, (), (0, 0), (0, "EXTRA_PRIVATE")])
+def test_aggregate_row_width_is_pinned(row):
+    connection = Connection()
+    connection.override_row, connection.row_value = True, row
+    result = collect(connection)
+    assert result["status"] == "error" and result["counts"] == {}
+
+
+@pytest.mark.parametrize("stage", ["rollback", "cursor_close", "connection_close"])
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+def test_process_control_during_cleanup_still_attempts_all_resources(stage, error):
+    connection = Connection()
+    connection.interrupt_stage, connection.interrupt_error = stage, error
+    with pytest.raises(error):
+        collect(connection)
+    assert connection.rollbacks == connection.closes == 1 and connection.cursor_closed
+
+
+def test_all_natural_key_columns_participate_in_grouping_and_null_check():
+    rows = [(1, "1", "2026-01-01", "2400-01-01")] * 2
+    connection = Connection(rows, secondary_keys=[1, 2])
+    result = postflight.collect_stock_postflight("DWH", "DIM_TEST", ["NK", "NK2"], lambda: connection)
+    assert result["status"] == "ok" and result["counts"]["duplicate_current_groups"] == 0
+    connection = Connection(rows[:1], secondary_keys=[None])
+    result = postflight.collect_stock_postflight("DWH", "DIM_TEST", ["NK", "NK2"], lambda: connection)
+    assert result["status"] == "invalid_stock_contract" and result["counts"]["null_natural_key_rows"] == 1
+
+
+def test_source_count_is_metadata_not_a_business_parity_proof():
+    connection = Connection(source_rows=3)
+    result = postflight.collect_stock_postflight("DWH", "DIM_TEST", ["NK"], lambda: connection, source=("DWH", "SRC_TEST"))
+    assert result["status"] == "ok" and result["counts"]["source_count"] == 3
+    assert result["source_current_count_equal"] is False
+    assert result["business_parity_proven"] is False and result["physical_noop_proven"] is False
+
+
+@pytest.mark.parametrize("source", [[], ["DWH", "SRC_TEST"], (), ("DWH",), ("DWH", None), ("SYS", "SRC_TEST"), ("DWH", "X;DELETE")])
+def test_source_shape_and_identifiers_are_validated_before_connection(source):
+    calls = []
+    result = postflight.collect_stock_postflight("DWH", "DIM_TEST", ["NK"], lambda: calls.append(True), source=source)
+    assert result["status"] == "invalid_request" and calls == []
+
+
+def test_custom_python_types_cannot_supply_formatted_sql():
+    class Label(str):
+        def __format__(self, spec):
+            return "MALFORMED_SQL_LABEL"
+    class Keys(list):
+        pass
+    for owner, table, keys in [(Label("DWH"), "DIM_TEST", ["NK"]), ("DWH", Label("DIM_TEST"), ["NK"]),
+                               ("DWH", "DIM_TEST", [Label("NK")]), ("DWH", "DIM_TEST", Keys(["NK"]))]:
+        calls = []
+        result = postflight.collect_stock_postflight(owner, table, keys, lambda: calls.append(True))
+        assert result["status"] == "invalid_request" and calls == []
