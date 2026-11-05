@@ -36,7 +36,29 @@ _ROOT_KEYS = {
     "secret_printed",
     "result",
 }
-_ERROR_KEYS = (_ROOT_KEYS - {"result"}) | {"error_type"}
+_OUTCOME_FLAGS = (
+    "commit_attempted",
+    "commit_acknowledged",
+    "rollback_attempted",
+    "rollback_succeeded",
+    "manual_recovery_review_required",
+)
+_FAILURE_KEYS = (_ROOT_KEYS - {"result"}) | {"error_type", "repository_outcome", *_OUTCOME_FLAGS}
+# The only failure reports the writer can truthfully make, as
+# (status, side_effects, then the five _OUTCOME_FLAGS in order).
+# side_effects None means unknown. A flag of None means either boolean is accepted.
+_FAILURE_STATES: dict[str, tuple[Any, ...]] = {
+    "no_transaction": ("error", False, False, False, False, False, False),
+    "rolled_back": ("error", False, False, False, True, True, False),
+    "rollback_failed": ("outcome_unknown", None, False, False, True, False, True),
+    "commit_outcome_unknown": ("outcome_unknown", None, True, False, True, None, True),
+    "committed": ("committed_report_incomplete", True, True, True, False, False, True),
+}
+_FAILURE_MESSAGES = {
+    "error": "ODI SCD2 mapping creation failed.",
+    "outcome_unknown": "ODI SCD2 mapping repository outcome is unknown.",
+    "committed_report_incomplete": "ODI SCD2 mapping was committed but its report is incomplete.",
+}
 _RESULT_KEYS = {
     "status",
     "mapping_name",
@@ -124,7 +146,7 @@ def build_dim_product_odi_scd2_mapping_request(
     return _base("ready_for_dedicated_mapping_builder_execution")
 
 
-def _normalized_base(status: str, *, side_effects: bool) -> dict[str, Any]:
+def _normalized_base(status: str, *, side_effects: bool | None) -> dict[str, Any]:
     return {
         "tool": TOOL,
         "status": status,
@@ -138,32 +160,57 @@ def _normalized_base(status: str, *, side_effects: bool) -> dict[str, Any]:
 
 
 def _invalid(error_type: str = "InvalidMappingOutput") -> dict[str, Any]:
+    """Rejected output proves nothing about the repository, so its state stays unverified."""
     safe_type = error_type if _ERROR_TYPE_RE.fullmatch(error_type) else "InvalidMappingOutput"
     return {
-        **_normalized_base("blocked_invalid_mapping_output", side_effects=False),
+        **_normalized_base("blocked_invalid_mapping_output", side_effects=None),
         "error": "ODI SCD2 mapping output was rejected.",
         "error_type": safe_type,
+        "repository_outcome": "unverified",
+        "manual_recovery_review_required": True,
     }
 
 
 def _non_negative_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    return type(value) is int and value >= 0
+
+
+def _exact_int(value: object, expected: int) -> bool:
+    return type(value) is int and value == expected
+
+
+def _failure_state_matches(payload: Mapping[str, Any], outcome: object) -> bool:
+    if not isinstance(outcome, str) or outcome not in _FAILURE_STATES:
+        return False
+    status, side_effects, *flags = _FAILURE_STATES[outcome]
+    if payload.get("status") != status or payload.get("side_effects") is not side_effects:
+        return False
+    for name, expected in zip(_OUTCOME_FLAGS, flags, strict=True):
+        value = payload.get(name)
+        if type(value) is not bool or (expected is not None and value is not expected):
+            return False
+    return True
 
 
 def normalize_dim_product_odi_scd2_mapping(
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Accept only fixed identity plus count/status metadata from the writer."""
+    """Accept only fixed identity plus count/status metadata from the writer.
+
+    A failure report keeps its exact repository state. Only a clean rollback or a
+    failure before the transaction started can report no side effects.
+    """
     try:
         if not isinstance(payload, Mapping):
             return _invalid()
-        if payload.get("status") == "error":
+        if payload.get("status") in _FAILURE_MESSAGES:
             error_type = payload.get("error_type")
+            outcome = payload.get("repository_outcome")
             if (
-                set(payload) != _ERROR_KEYS
+                set(payload) != _FAILURE_KEYS
                 or payload.get("tool") != TOOL
                 or payload.get("mode") != RAW_MODE
-                or payload.get("side_effects") is not False
+                or not _failure_state_matches(payload, outcome)
                 or payload.get("repository_connection_attempted") is not True
                 or payload.get("raw_rows_included") is not False
                 or payload.get("pk_values_included") is not False
@@ -173,9 +220,11 @@ def normalize_dim_product_odi_scd2_mapping(
             ):
                 return _invalid()
             return {
-                **_normalized_base("error", side_effects=False),
-                "error": "ODI SCD2 mapping creation failed.",
+                **_normalized_base(payload["status"], side_effects=payload["side_effects"]),
+                "error": _FAILURE_MESSAGES[payload["status"]],
                 "error_type": error_type,
+                "repository_outcome": outcome,
+                **{name: payload[name] for name in _OUTCOME_FLAGS},
             }
 
         result = payload.get("result")
@@ -193,15 +242,15 @@ def normalize_dim_product_odi_scd2_mapping(
             or set(result) != _RESULT_KEYS
             or result.get("status") != "passed"
             or result.get("mapping_name") != MAPPING_NAME
-            or result.get("source_component_count") != 1
-            or result.get("target_component_count") != 1
-            or result.get("target_attribute_count") != 26
-            or result.get("mapped_attribute_count") != 26
+            or not _exact_int(result.get("source_component_count"), 1)
+            or not _exact_int(result.get("target_component_count"), 1)
+            or not _exact_int(result.get("target_attribute_count"), 26)
+            or not _exact_int(result.get("mapped_attribute_count"), 26)
             or result.get("integration_type") != INTEGRATION_TYPE
             or result.get("target_ikm") != TARGET_IKM
             or not _non_negative_int(result.get("access_point_count"))
             or not _non_negative_int(result.get("lkm_assigned_count"))
-            or result["lkm_assigned_count"] > result["access_point_count"]
+            or result["lkm_assigned_count"] != result["access_point_count"]
             or result.get("commit_completed") is not True
         ):
             return _invalid()

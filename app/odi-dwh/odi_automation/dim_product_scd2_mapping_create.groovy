@@ -28,6 +28,7 @@ import oracle.odi.domain.project.OdiProject
 import oracle.odi.domain.project.finder.IOdiIKMFinder
 import oracle.odi.domain.project.finder.IOdiLKMFinder
 import oracle.odi.domain.project.finder.IOdiProjectFinder
+import oracle.odi.domain.root.RootIssue
 import oracle.odi.domain.runtime.scenario.OdiScenario
 import oracle.odi.domain.runtime.scenario.finder.IOdiScenarioFinder
 
@@ -56,11 +57,26 @@ final Map<String, String> FIXED_EXPRESSIONS = [
     SOURCE_SYSTEM: "'SH'",
     ETL_BATCH_ID: "<%=odiRef.getSession(\"SESS_NO\")%>",
 ]
+// Stock IKM option contract. Flow and static control stay off, so no CKM runs and no
+// CKM is chosen here. The other options are read back and never written: a stock
+// default that differs blocks the commit.
+final Map<String, Boolean> STOCK_IKM_OPTIONS = [
+    FLOW_CONTROL: false,
+    STATIC_CONTROL: false,
+    RECYCLE_ERRORS: false,
+    TRUNCATE: false,
+    DELETE_ALL: false,
+    CREATE_TARG_TABLE: false,
+    COMMIT: true,
+]
+final List<String> WRITTEN_IKM_OPTIONS = ["FLOW_CONTROL", "STATIC_CONTROL"]
 
 def odi = null
 boolean standaloneMode = false
 ITransactionManager txnMgr = null
 ITransactionStatus txnStatus = null
+boolean commitAttempted = false
+boolean commitAcknowledged = false
 
 def safeFlags = {
     [
@@ -157,17 +173,22 @@ try {
         }
     }
 
+    // A KM is usable only when exactly one exact-name candidate is global or owned by
+    // this project. Two candidates are ambiguous and block; none is picked arbitrarily.
+    def resolveFixedKm = { finder, String kmName ->
+        List candidates = (finder.findByName(kmName) ?: []).findAll { km ->
+            kmName == km.getName() &&
+                (km.isGlobal() || km.getProject()?.getCode()?.equalsIgnoreCase(projectCode))
+        }
+        if (candidates.size() != 1) {
+            throw new IllegalStateException("Fixed knowledge module contract is unavailable")
+        }
+        return candidates[0]
+    }
     IOdiIKMFinder ikmFinder = (IOdiIKMFinder) em.getFinder(OdiIKM.class)
-    OdiIKM ikm = (ikmFinder.findByName(TARGET_IKM) ?: []).find {
-        it.getName()?.equalsIgnoreCase(TARGET_IKM)
-    }
+    OdiIKM ikm = resolveFixedKm(ikmFinder, TARGET_IKM)
     IOdiLKMFinder lkmFinder = (IOdiLKMFinder) em.getFinder(OdiLKM.class)
-    OdiLKM lkm = (lkmFinder.findByName(LKM_NAME) ?: []).find {
-        it.getName()?.equalsIgnoreCase(LKM_NAME)
-    }
-    if (ikm == null || lkm == null) {
-        throw new IllegalStateException("Fixed knowledge module contract is unavailable")
-    }
+    OdiLKM lkm = resolveFixedKm(lkmFinder, LKM_NAME)
     if (ikm.getIntegrationType() != "SLOWLY_CHANGING_DIMENSION") {
         throw new IllegalStateException("Fixed IKM integration type mismatch")
     }
@@ -207,11 +228,14 @@ try {
     }
 
     MapPhysicalDesign design = mapping.getPhysicalDesign(0)
-    MapPhysicalNode targetNode = design.getPhysicalNodes().find {
-        it.isTargetNode() &&
-            (it.getName()?.equalsIgnoreCase(TARGET_TABLE) ||
-             it.getName()?.equalsIgnoreCase(targetComponent.getName()))
+    def findTargetNode = {
+        design.getPhysicalNodes().find {
+            it.isTargetNode() &&
+                (it.getName()?.equalsIgnoreCase(TARGET_TABLE) ||
+                 it.getName()?.equalsIgnoreCase(targetComponent.getName()))
+        }
     }
+    MapPhysicalNode targetNode = findTargetNode()
     if (targetNode == null) {
         throw new IllegalStateException("Fixed target physical node is unavailable")
     }
@@ -222,28 +246,63 @@ try {
     design.setStagingLocationName(stagingLocation)
     design.resetSpec()
 
-    targetNode = design.getPhysicalNodes().find {
-        it.isTargetNode() &&
-            (it.getName()?.equalsIgnoreCase(TARGET_TABLE) ||
-             it.getName()?.equalsIgnoreCase(targetComponent.getName()))
-    }
+    targetNode = findTargetNode()
     if (targetNode == null) {
         throw new IllegalStateException("Fixed target node was lost after physical reset")
     }
     targetNode.setTargetComponentKM(ikm)
-    if (!TARGET_IKM.equalsIgnoreCase(targetNode.getTargetComponentKMName())) {
-        throw new IllegalStateException("Fixed target IKM assignment mismatch")
-    }
 
-    List<MapPhysicalNode> accessPoints = design.getPhysicalNodes().findAll {
-        it.isAPNode()
-    }
-    accessPoints.each { node ->
-        node.setXKM(lkm)
-        if (!LKM_NAME.equalsIgnoreCase(node.getXKMName())) {
-            throw new IllegalStateException("Fixed LKM assignment mismatch")
+    def writeIkmOptions = { MapPhysicalNode node ->
+        WRITTEN_IKM_OPTIONS.each { String optionName ->
+            def optionValue = node.getIKMOptionValue(optionName)
+            if (optionValue == null) {
+                throw new IllegalStateException("Fixed IKM option is unavailable")
+            }
+            optionValue.setValue(STOCK_IKM_OPTIONS[optionName])
         }
     }
+    // An access point takes its LKM through setLKM and getLKMName. The XKM accessors read
+    // a separate extract reference, which is empty on an access point.
+    def assignAccessPointLkm = {
+        design.getAllAPNodes().each { MapPhysicalNode node ->
+            if (LKM_NAME != node.getLKMName()) {
+                node.setLKM(lkm)
+            }
+        }
+    }
+    // Re-reads the final design. Every check here must hold just before the commit.
+    def verifyPhysicalContract = {
+        MapPhysicalNode finalTarget = findTargetNode()
+        if (finalTarget == null || TARGET_IKM != finalTarget.getTargetComponentKMName()) {
+            throw new IllegalStateException("Fixed target IKM assignment mismatch")
+        }
+        STOCK_IKM_OPTIONS.each { String optionName, Boolean expected ->
+            def optionValue = finalTarget.getIKMOptionValue(optionName)
+            if (optionValue == null ||
+                    !String.valueOf(expected).equalsIgnoreCase(String.valueOf(optionValue.getOptionValue()))) {
+                throw new IllegalStateException("Fixed IKM option mismatch")
+            }
+        }
+        List<MapPhysicalNode> nodes = design.getAllAPNodes() as List<MapPhysicalNode>
+        if (nodes.any { LKM_NAME != it.getLKMName() }) {
+            throw new IllegalStateException("Fixed LKM assignment mismatch")
+        }
+        return nodes
+    }
+
+    writeIkmOptions(targetNode)
+    assignAccessPointLkm()
+    // This pass only lets the SDK settle the physical design: it can materialize an access
+    // point or reset an option. Its issues may describe a repairable state, so its result
+    // is not a gate. An exception still blocks, and the final pass below decides.
+    mapping.validate(new ArrayList<RootIssue>(), false)
+    targetNode = findTargetNode()
+    if (targetNode == null) {
+        throw new IllegalStateException("Fixed target node was lost after validation")
+    }
+    writeIkmOptions(targetNode)
+    assignAccessPointLkm()
+    List<MapPhysicalNode> accessPoints = verifyPhysicalContract()
 
     int mappedCount = targetComponent.getAttributes().count {
         it.getExpression() != null
@@ -251,8 +310,21 @@ try {
     if (targetComponent.getAttributes().size() != 26 || mappedCount != 26) {
         throw new IllegalStateException("Fixed target mapping coverage mismatch")
     }
-    mapping.validate()
+    // SDK 12.2.1.4: validate returns TRUE when it finds errors, and it can also return FALSE
+    // after adding a FATAL issue, so both signals block. TRUE with no issue also blocks.
+    // Issue text can hold expressions and repository detail and is never output.
+    List<RootIssue> finalIssues = new ArrayList<RootIssue>()
+    boolean validationFlagged = mapping.validate(finalIssues, false)
+    if (validationFlagged || RootIssue.isErrorOrFatal(finalIssues)) {
+        throw new IllegalStateException("Fixed mapping validation failed")
+    }
+    // Validation can change the design, so the contract is checked again after it.
+    if (verifyPhysicalContract().size() != accessPoints.size()) {
+        throw new IllegalStateException("Fixed access point count changed during validation")
+    }
+    commitAttempted = true
     txnMgr.commit(txnStatus)
+    commitAcknowledged = true
     txnStatus = null
 
     println JsonOutput.toJson([
@@ -276,22 +348,58 @@ try {
             commit_completed: true,
         ],
     ])
-} catch (Exception e) {
+} catch (Throwable e) {
+    boolean rollbackAttempted = false
+    boolean rollbackSucceeded = false
     if (txnStatus != null && txnMgr != null) {
-        try { txnMgr.rollback(txnStatus) } catch (Exception ignored) {}
+        rollbackAttempted = true
+        try {
+            txnMgr.rollback(txnStatus)
+            rollbackSucceeded = true
+        } catch (Throwable ignored) {}
+    }
+    // A commit that raised may still have applied, and a later rollback cannot undo or
+    // disprove it, so that outcome stays unknown whatever the rollback did. A failed
+    // rollback before any commit cannot claim a clean result either.
+    String repositoryOutcome = "no_transaction"
+    String reportStatus = "error"
+    Boolean sideEffects = false
+    if (commitAcknowledged) {
+        repositoryOutcome = "committed"
+        reportStatus = "committed_report_incomplete"
+        sideEffects = true
+    } else if (commitAttempted) {
+        repositoryOutcome = "commit_outcome_unknown"
+        reportStatus = "outcome_unknown"
+        sideEffects = null
+    } else if (rollbackAttempted && !rollbackSucceeded) {
+        repositoryOutcome = "rollback_failed"
+        reportStatus = "outcome_unknown"
+        sideEffects = null
+    } else if (rollbackAttempted) {
+        repositoryOutcome = "rolled_back"
     }
     println JsonOutput.toJson([
         tool: "odi.dim_product_scd2_mapping_create",
-        status: "error",
+        status: reportStatus,
         mode: "fixed_absent_only_scd2_mapping_creation",
-        side_effects: false,
+        side_effects: sideEffects,
         repository_connection_attempted: true,
         *: safeFlags(),
-        error_type: e.getClass().getSimpleName(),
+        error_type: e.getClass().getSimpleName() ?: "UnnamedError",
+        repository_outcome: repositoryOutcome,
+        commit_attempted: commitAttempted,
+        commit_acknowledged: commitAcknowledged,
+        rollback_attempted: rollbackAttempted,
+        rollback_succeeded: rollbackSucceeded,
+        manual_recovery_review_required: reportStatus != "error",
     ])
 } finally {
     if (standaloneMode && odi != null) {
-        odi.close()
+        // The report is already out. A close failure cannot change the repository outcome.
+        try {
+            odi.close()
+        } catch (Throwable ignored) {}
     }
 }
 
