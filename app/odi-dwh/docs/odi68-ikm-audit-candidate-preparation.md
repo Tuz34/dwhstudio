@@ -1,5 +1,10 @@
 # ODI68 Offline Audit Candidate (B1/B2)
 
+Pre-migration historical note (`pre_migration_yn_9999`). Staging audit population
+for the chosen stock path is described in
+`dim-product-scd2-stock-migration-runbook.md`. This candidate is not the
+migration and is not an adopted IKM.
+
 NOT DEPLOYABLE. No repository writer, XML exporter/importer, connection callback,
 mapping update, scenario generation, or runtime execution is provided.
 Main independently reviews this batch. No live retry is authorized.

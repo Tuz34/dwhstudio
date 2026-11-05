@@ -142,6 +142,12 @@ def test_candidate_preflight_reports_initial_load_counts_only():
     assert result["secret_printed"] is False
     assert factory.calls == 1
     assert connection.cursor_instance.statements[0][0] == "SET TRANSACTION READ ONLY"
+    combined = "\n".join(sql for sql, _params in connection.cursor_instance.statements)
+    assert '"CURRENT_FLAG" = \'1\'' in combined
+    assert "NOT IN ('1', '0')" in combined
+    assert "DATE '2400-01-01'" in combined
+    assert '"CURRENT_FLAG" = \'Y\'' not in combined
+    assert "DATE '9999-12-31'" in combined
     assert connection.rollbacks == 1
     assert connection.closed is True
 

@@ -18,6 +18,15 @@ from dim_product_scd2_candidate_preflight import (
     candidate_status,
     collect_dim_product_scd2_candidate_evidence,
 )
+from dim_product_scd2_stock_contract import (
+    SQL_INSERT_AUDIT,
+    SQL_SOURCE_SYSTEM,
+    SQL_UPDATE_AUDIT,
+    STOCK_CURRENT_FLAG,
+    STOCK_CURRENT_MATCH_SQL,
+    STOCK_HISTORICAL_FLAG,
+    STOCK_OPEN_ENDED_DATE_SQL,
+)
 
 SCD2_LOAD_APPROVAL_SCOPE = "odi68_dim_product_scd2_load_and_rerun_proof"
 
@@ -80,9 +89,9 @@ def build_expire_statement() -> str:
     target_reference = f'"{TARGET_TABLE}"'
     return f'''UPDATE "{TARGET_OWNER}"."{TARGET_TABLE}"
 SET "EFFECTIVE_TO" = :effective_at,
-    "CURRENT_FLAG" = 'N',
-    "UPDATE_DATE" = SYSTIMESTAMP
-WHERE "CURRENT_FLAG" = 'Y'
+    "CURRENT_FLAG" = '{STOCK_HISTORICAL_FLAG}',
+    "UPDATE_DATE" = {SQL_UPDATE_AUDIT}
+WHERE {STOCK_CURRENT_MATCH_SQL}
   AND EXISTS (
       SELECT 1
       FROM "{SOURCE_OWNER}"."{SOURCE_TABLE}" s
@@ -113,18 +122,18 @@ def build_insert_statement() -> str:
 SELECT "{TARGET_OWNER}"."{SEQUENCE_NAME}".NEXTVAL,
        {source_values},
        :effective_at,
-       DATE '9999-12-31',
-       'Y',
-       SYSTIMESTAMP,
-       NULL,
-       'SH',
+       {STOCK_OPEN_ENDED_DATE_SQL},
+       '{STOCK_CURRENT_FLAG}',
+       {SQL_INSERT_AUDIT},
+       {SQL_UPDATE_AUDIT},
+       {SQL_SOURCE_SYSTEM},
        :batch_id
 FROM "{SOURCE_OWNER}"."{SOURCE_TABLE}" s
 WHERE NOT EXISTS (
     SELECT 1
     FROM "{TARGET_OWNER}"."{TARGET_TABLE}" t
     WHERE t."PROD_ID" = s."PROD_ID"
-      AND t."CURRENT_FLAG" = 'Y'
+      AND t.{STOCK_CURRENT_MATCH_SQL}
 )'''
 
 

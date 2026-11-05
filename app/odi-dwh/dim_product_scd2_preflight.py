@@ -9,6 +9,11 @@ from typing import Any
 
 import oracledb
 
+from dim_product_scd2_stock_contract import (
+    STOCK_CURRENT_MATCH_SQL,
+    STOCK_INVALID_FLAG_SQL,
+    stock_invalid_effective_sql,
+)
 from scd2_manager import build_dim_product_scd2_plan
 
 _SOURCE = ("DWH", "ODS_SH_PRODUCTS")
@@ -83,17 +88,17 @@ def _target_dq_counts(cursor: Any) -> dict[str, int]:
     duplicate_product_sk = int(cursor.fetchone()[0])
     cursor.execute(
         'SELECT COUNT(*) FROM (SELECT "PROD_ID" FROM "DWH"."DIM_PRODUCT" '
-        'WHERE "CURRENT_FLAG" = \'Y\' GROUP BY "PROD_ID" HAVING COUNT(*) > 1)'
+        f'WHERE {STOCK_CURRENT_MATCH_SQL} GROUP BY "PROD_ID" HAVING COUNT(*) > 1)'
     )
     duplicate_current_natural_key = int(cursor.fetchone()[0])
     cursor.execute(
         'SELECT COUNT(*) FROM "DWH"."DIM_PRODUCT" '
-        'WHERE "CURRENT_FLAG" NOT IN (\'Y\', \'N\') OR "CURRENT_FLAG" IS NULL'
+        f'WHERE {STOCK_INVALID_FLAG_SQL}'
     )
     invalid_current_flag = int(cursor.fetchone()[0])
     cursor.execute(
         'SELECT COUNT(*) FROM "DWH"."DIM_PRODUCT" '
-        'WHERE "EFFECTIVE_FROM" > "EFFECTIVE_TO"'
+        f'WHERE {stock_invalid_effective_sql()}'
     )
     invalid_effective_date_order = int(cursor.fetchone()[0])
     return {

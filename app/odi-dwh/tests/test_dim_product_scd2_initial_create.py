@@ -74,6 +74,13 @@ def test_initial_create_contract_freezes_dim_and_sequence_metadata():
     columns = {column["name"]: column for column in plan["target_columns"]}
     assert columns["PRODUCT_SK"]["data_type"] == "NUMBER"
     assert columns["CURRENT_FLAG"]["data_type"] == "VARCHAR2(1)"
+    assert plan["current_row_contract"]["contract_era"] == "stock_ikm_1_0_2400"
+    assert plan["current_row_contract"]["current_value"] == "1"
+    assert plan["current_row_contract"]["historical_value"] == "0"
+    assert plan["current_row_contract"]["open_ended_effective_to"] == "2400-01-01"
+    assert plan["pre_migration_current_row_contract"]["contract_era"] == "pre_migration_yn_9999"
+    assert plan["pre_migration_current_row_contract"]["current_value"] == "Y"
+    assert plan["pre_migration_current_row_contract"]["accepted_by_load_preflight"] is False
     assert columns["ETL_BATCH_ID"]["data_type"] == "NUMBER"
     assert "ODS_CREATED_AT" not in columns
     assert "ODS_UPDATED_AT" not in columns
