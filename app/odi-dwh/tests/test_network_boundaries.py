@@ -5,7 +5,8 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from flask import Flask, request
+from flask import Flask, Response, request
+from werkzeug.test import EnvironBuilder
 
 import deployment_security as security
 
@@ -143,7 +144,14 @@ def test_local_http_legitimate_authorities(authority):
 @pytest.mark.parametrize("path", ["/api/status", "/api/auth/login", "/api/private", "/"])
 def test_invalid_host_rejected_before_any_auth_or_route(authority, path):
     app, events, _, _ = isolated_app(settings())
-    response = app.test_client().get(path, environ_overrides={"HTTP_HOST": authority})
+    # Supply raw Host at the WSGI boundary, before test-client URL normalization.
+    builder = EnvironBuilder(path=path, base_url="http://localhost:5000")
+    try:
+        environ = builder.get_environ()
+        environ["HTTP_HOST"] = authority
+        response = Response.from_app(app, environ)
+    finally:
+        builder.close()
     assert response.status_code == 400
     assert response.get_json() == {"error": "Invalid request authority."}
     assert events == []
