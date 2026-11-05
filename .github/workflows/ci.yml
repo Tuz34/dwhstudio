@@ -32,7 +32,7 @@ jobs:
       - name: Run Python quality gate
         working-directory: app/odi-dwh
         run: python python_quality_gate.py
-      - name: Run pytest without environment-dependent exclusions
+      - name: Run pytest with no deselections
         working-directory: app/odi-dwh
         shell: bash
         run: |
@@ -47,12 +47,8 @@ jobs:
             echo "Environment-dependent pytest exclusions must stay empty (ODI-86)."
             exit 1
           fi
-          echo "No environment-dependent tests deselected"
-          echo "3 developer-home Codex skill tests deselected; these personal skills are not in the repository"
-          python -m pytest -q \
-            --deselect tests/test_codex_workflow_safety.py::test_on_demand_skills_are_installed_and_explicit_only \
-            --deselect tests/test_codex_workflow_safety.py::test_review_skill_is_targeted_and_read_only \
-            --deselect tests/test_codex_workflow_safety.py::test_ui_skill_stops_when_app_is_down_and_forbids_persistent_actions
+          echo "No pytest deselections"
+          python -m pytest -q
       - name: Run application security gate
         run: python tools/workspace/appsec_gate.py --no-write
 
