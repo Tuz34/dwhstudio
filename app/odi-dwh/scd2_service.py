@@ -423,6 +423,8 @@ def run(
         spec["target_owner"], spec["target_table"], spec["natural_key"], services.catalog_connection, source=source
     )
     run_ok = run_step["status"] == "passed"
+    outcome_unknown = run_step.get("outcome_unknown") is True
+    may_have_started = run_step.get("side_effects") is True
     postflight_ok = (
         after.get("status") == "ok" and after.get("stock_contract_valid") is True
         and after.get("source_current_count_equal") is True
@@ -441,9 +443,9 @@ def run(
             "steps": steps,
             "preflight": before,
             "postflight": after,
-            "scenario_execution_completed": run_ok,
+            "scenario_execution_completed": None if outcome_unknown else run_ok,
             "postflight_checks_passed": postflight_ok,
-            "manual_review_required": run_ok and not postflight_ok,
+            "manual_review_required": outcome_unknown or (not run_ok and may_have_started) or (run_ok and not postflight_ok),
             "raw_rows_included": False,
             "pk_values_included": False,
             "secret_printed": False,

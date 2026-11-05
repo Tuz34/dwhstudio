@@ -30,3 +30,7 @@ does not require source/current counts to match before an update/insert load.
 Offline tests execute the actual aggregate SQL on SQLite-backed synthetic
 connections at the service boundary, plus existing mocked HTTP route and remote
 contract tests. This is not native Oracle or live ODI acceptance evidence.
+
+Unknown remote completion uses `scenario_execution_completed=null` and always
+requires manual review, even if the count snapshot looks valid. A known failed
+scenario that may have started also requires review for partial effects.

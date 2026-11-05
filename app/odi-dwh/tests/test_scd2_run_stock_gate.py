@@ -6,6 +6,7 @@ import pytest
 from dataclasses import replace
 
 import execution_identity
+import remote_run_contract
 import scd2_builder
 import scd2_service
 from tests.scd2_support import REQUEST, SOURCE_COLUMNS, probe_payload
@@ -152,3 +153,32 @@ def test_postflight_failure_after_native_done_cannot_be_green(monkeypatch, failu
     assert status == 502 and payload["postflight_checks_passed"] is False
     assert payload["postflight"]["status"] == "error"
     assert "SYNTHETIC_PRIVATE" not in str(payload)
+
+
+@pytest.mark.parametrize("invalid_postflight", [False, True])
+def test_unknown_remote_completion_remains_unknown_and_requires_review(monkeypatch, invalid_postflight):
+    after = [] if invalid_postflight else None
+    orchestrator, services, _, _, _ = setup(monkeypatch, after=after)
+    orchestrator.remote_result = remote_run_contract.transport_failure("run", "RemoteTimeout")
+    payload, status = scd2_service.run(REQUEST, services, approved=True)
+    assert status == 502 and payload["status"] == "run_unknown"
+    assert payload["scenario_execution_completed"] is None and payload["manual_review_required"] is True
+
+
+def test_failed_started_scenario_requires_manual_review_of_possible_partial_effects(monkeypatch):
+    orchestrator, services, _, _, _ = setup(monkeypatch)
+    orchestrator.remote_result = remote_run_contract.result(
+        "run", status="failed", stage="run", error_code="ScenarioRunFailed", agent=True,
+        repository=True, may_have_started=True, session_status="ERROR"
+    )
+    payload, status = scd2_service.run(REQUEST, services, approved=True)
+    assert status == 502 and payload["status"] == "run_failed"
+    assert payload["scenario_execution_completed"] is False and payload["manual_review_required"] is True
+
+
+@pytest.mark.parametrize("context", [True, 1, None, [], {}])
+def test_nonstring_context_never_reaches_external_callbacks(monkeypatch, context):
+    _, services, opened, _, _ = setup(monkeypatch)
+    services = replace(services, orchestrator_factory=lambda: pytest.fail("Invalid context reached callback"))
+    assert scd2_service.run({**REQUEST, "context": context}, services, approved=True)[1] == 400
+    assert opened == []
