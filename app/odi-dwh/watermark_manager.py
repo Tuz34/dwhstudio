@@ -253,6 +253,8 @@ def _run_one_incremental_strategy_preflight(
         recommended_next.append("Define source grain and a reliable watermark before live incremental load.")
 
     predicate_template = f"{_qident(watermark_column)} > :last_watermark" if watermark_column else None
+    if strategy == "incremental_append_with_watermark":
+        predicate_template += f" AND {_qident(watermark_column)} <= :window_end"
     dry_run_delta = {
         "predicate_template": predicate_template,
         "estimated_new_rows": estimated_new_rows,
