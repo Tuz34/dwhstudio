@@ -41,6 +41,20 @@ columns. That witness is still not a physical DML count.
 `physical_dml_count_proven` stays false. F2 is a full reload: business rows
 match, audit values may change, and the driver does not call that a no-op.
 
+## Same-schema audit expressions
+
+For an IU mapping whose source and target physical owners are the same Oracle
+schema and whose update key is validated, the mapping builder assigns CASE
+expressions before DDL. An existing key keeps `INSERT_DATE` and
+`SOURCE_SYSTEM`. `UPDATE_DATE` and the session batch change only when a
+non-audit business column changes. An unchanged row keeps every audit value,
+including null. A new key gets the creation default. More than one target row for the key
+fails that expression instead of keeping the first match. `CONTROL_APPEND`, a different
+owner, a non-Oracle source, or a join keeps the previous default expressions.
+The Groovy step applies those columns only after the SDK reports the same
+logical schema. Operator output records expression counts, not the SQL text.
+This is not a native ODI execution proof.
+
 A non-200 response, a skipped or blocked generation, a version or context
 mismatch, a bad truncate flag, or a failed verification stops every later
 step. Timeouts and malformed responses stay unknown and require manual review.

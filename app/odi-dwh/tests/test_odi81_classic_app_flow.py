@@ -10,6 +10,7 @@ import mapping_generator
 import odi81_app_acceptance as driver
 import odi81_isolated_fixtures as isolated
 from mapping_generator import MappingGenerator
+from tests.test_odi81_classic_audit_expressions import evaluate_audit_rows
 from mapping_run_service import MappingRunOutcome, validate_mapping_run_options
 from tests.test_odi81_app_acceptance import BINDINGS
 from tests.test_odi81_isolated_fixtures import Database
@@ -133,6 +134,10 @@ class ClassicClient:
     def _load(self, truncate: bool, run: int) -> None:
         source_name, target_name = isolated._FLOWS[self.flow]
         columns = isolated._BUSINESS + (isolated._EDW_EXTRA if self.flow == "F3" else isolated._ODS_EXTRA)
+        profile = self._preservation()
+        if profile["qualified"] is True and not truncate:
+            self._load_from_expressions(source_name, target_name, columns, profile["expressions"])
+            return
         source_rows = self.database.db.execute(
             f'SELECT "ENTITY_ID","ATTR_TEXT","VALUE_AMT" FROM "{source_name}" ORDER BY "ENTITY_ID"'
         ).fetchall()
@@ -148,6 +153,30 @@ class ClassicClient:
             unchanged = previous is not None and previous[1] == text and previous[2] == amount
             preserved = previous[3:] if unchanged and not truncate else None
             loaded.append((entity_id, text, amount, *_audit(self.flow, run, preserved)))
+        self._replace(target_name, columns, loaded)
+
+    def _preservation(self) -> dict:
+        generator = MappingGenerator()
+        generator._source_columns_for = lambda _params: [dict(column) for column in _SOURCE_COLUMNS]
+        validated = generator.validate_params(driver.classic_params(self.flow))
+        plan = generator._build_target_column_plan(validated)
+        return generator._prepare_audit_preservation(validated, plan)
+
+    def _load_from_expressions(self, source_name: str, target_name: str, columns: tuple[str, ...],
+                               expressions: dict[str, str]) -> None:
+        ordered = [name for name in columns if name in expressions]
+        rows = evaluate_audit_rows(
+            self.database.db, "DWH", source_name, target_name, {name: expressions[name] for name in ordered},
+            isolated._BUSINESS,
+        )
+        loaded = []
+        for row in rows:
+            business = row[:len(isolated._BUSINESS)]
+            audits = dict(zip(ordered, row[len(isolated._BUSINESS):]))
+            loaded.append(business + tuple(audits.get(name) for name in columns if name in expressions))
+        self._replace(target_name, columns, loaded)
+
+    def _replace(self, target_name: str, columns: tuple[str, ...], loaded: list[tuple]) -> None:
         self.database.db.execute(f'DELETE FROM "{target_name}"')
         quoted = ",".join(f'"{name}"' for name in columns)
         placeholders = ",".join("?" for _ in columns)
@@ -234,6 +263,16 @@ def test_classic_flow_reaches_run3_with_mode_specific_witness(db, flow):
     else:
         assert result["full_target_snapshot_equal"] is True
         assert result["rerun_semantics"] == "incremental"
+        table = driver.LEGACY[flow]["target_table"]
+        batches = {row[0] for row in db.db.execute(f'SELECT "ETL_BATCH_ID" FROM "{table}"')}
+        sources = {row[0] for row in db.db.execute(f'SELECT "SOURCE_SYSTEM" FROM "{table}"')}
+        assert batches == {'<%=odiRef.getSession("SESS_NO")%>'}
+        assert sources == {mapping_generator._SOURCE_SYSTEM_LITERAL}
+        if flow == "F3":
+            flags = {row[0] for row in db.db.execute(f'SELECT "CURRENT_FLAG" FROM "{table}"')}
+            ends = {row[0] for row in db.db.execute(f'SELECT "EFFECTIVE_TO" FROM "{table}"')}
+            assert flags == {"Y"}
+            assert ends == {"9999-12-31"}
     _redacted(result)
 
 

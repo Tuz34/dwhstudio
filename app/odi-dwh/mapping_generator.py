@@ -48,6 +48,15 @@ INTEGRATION_TYPES = frozenset({"IU", "CONTROL_APPEND"})
 MAX_UPDATE_KEY_COLUMNS = 8
 # SKEY lookup tables are always loaded with this merge KM (see _create_odi_mapping).
 SKEY_LOOKUP_IKM = "IKM Oracle Incremental Update (MERGE)"
+_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
+_AUDIT_PRESERVE_ON_MATCH = ("INSERT_DATE", "SOURCE_SYSTEM", "CURRENT_FLAG", "EFFECTIVE_FROM", "EFFECTIVE_TO")
+_AUDIT_REFRESH_ON_CHANGE = ("UPDATE_DATE", "ETL_BATCH_ID")
+_AUDIT_COLUMN_ORDER = (
+    "INSERT_DATE", "UPDATE_DATE", "CURRENT_FLAG", "EFFECTIVE_FROM", "EFFECTIVE_TO",
+    "SOURCE_SYSTEM", "ETL_BATCH_ID",
+)
+_SESSION_BATCH_SQL = "'<%=odiRef.getSession(\"SESS_NO\")%>'"
+_FORBIDDEN_EXPRESSION_RE = re.compile(r"ROWNUM|\bMAX\s*\(|\bROW_NUMBER\s*\(|\bTARGET\s*\.|/\*\+")
 
 
 class TargetTableBlockedError(RuntimeError):
@@ -57,6 +66,10 @@ class TargetTableBlockedError(RuntimeError):
         super().__init__(f"{code}: existing target does not satisfy the requested plan")
         self.error_code = code
         self.detail = detail
+
+
+class AuditPreservationRejected(ValueError):
+    """Same-schema audit SQL failed static validation before any DDL."""
 
 
 class UpdateKeyRequiredError(ValueError):
@@ -85,6 +98,152 @@ def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> s
 
 _SOURCE_SYSTEM_LITERAL = _sql_string_literal(SOURCE_SYSTEM_NAME, "ORACLE_SOURCE")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
+
+
+def _identifier_or_none(value: object) -> str | None:
+    text = str(value or "").strip().upper()
+    if _IDENTIFIER_RE.fullmatch(text):
+        return text
+    return None
+
+
+def _oracle_physical_model(model: object) -> bool:
+    text = str(model or "").strip().upper()
+    if any(token in text for token in ("MSSQL", "SQL_SERVER", "ADVENTUREWORK")):
+        return False
+    return text.startswith("ORACLE_") or text in {"DWH", "ODS", "TGT_DWH"}
+
+
+def _null_safe_equal(column: str) -> str:
+    quoted = f'"{column}"'
+    return f'(TGT_ROW.{quoted}=SRC.{quoted} OR (TGT_ROW.{quoted} IS NULL AND SRC.{quoted} IS NULL))'
+
+
+def _audit_case(table_sql: str, key_where: str, column: str, default_sql: str, change_where: str | None) -> str:
+    count_keys = f'(SELECT COUNT(*) FROM {table_sql} TGT_ROW WHERE {key_where})'
+    lookup = f'(SELECT TGT_ROW."{column}" FROM {table_sql} TGT_ROW WHERE {key_where})'
+    # A multi-row scalar is ORA-01427 on Oracle. TO_NUMBER forces the same branch to
+    # fail closed where a scalar subquery would otherwise return an arbitrary row.
+    fail = (
+        f'(SELECT TGT_ROW."{column}" FROM {table_sql} TGT_ROW WHERE {key_where} '
+        "AND TO_NUMBER('AMBIGUOUS') IS NOT NULL)"
+    )
+    lookup_fail = fail
+    if change_where is None:
+        return (
+            f'CASE WHEN {count_keys}>1 THEN {lookup_fail} WHEN {count_keys}=0 THEN {default_sql} '
+            f'ELSE {lookup} END'
+        )
+    count_changed = f'(SELECT COUNT(*) FROM {table_sql} TGT_ROW WHERE {change_where})'
+    return (
+        f'CASE WHEN {count_keys}>1 THEN {lookup_fail} WHEN {count_keys}=0 THEN {default_sql} '
+        f'WHEN {count_changed}=1 THEN {default_sql} ELSE {lookup} END'
+    )
+
+
+def build_same_schema_audit_expressions(
+    *,
+    integration_type: object,
+    src_owner: object,
+    tgt_owner: object,
+    src_model: object,
+    tgt_model: object,
+    tgt_table: object,
+    update_key_columns: list[str] | None,
+    source_columns: list[str],
+    target_columns: list[str],
+    source_system_literal: str,
+    join_table: object = None,
+) -> dict[str, object]:
+    """Build null-safe audit CASE expressions for one qualified same-schema IU mapping.
+
+    The returned expression text is for the mapping builder. Callers report counts only.
+    A different owner, a non-Oracle model, CONTROL_APPEND, a join, or a missing key stays
+    unqualified and keeps the existing default expressions.
+    """
+    keys: list[str] = []
+    for item in update_key_columns or []:
+        name = _identifier_or_none(item)
+        if name and name not in keys:
+            keys.append(name)
+    owner = _identifier_or_none(tgt_owner)
+    source_owner = _identifier_or_none(src_owner)
+    table = _identifier_or_none(tgt_table)
+    qualified = bool(
+        str(integration_type or "").strip().upper() == "IU"
+        and keys
+        and owner
+        and table
+        and source_owner == owner
+        and _oracle_physical_model(src_model)
+        and _oracle_physical_model(tgt_model)
+        and not str(join_table or "").strip()
+    )
+    public = {
+        "qualified": qualified,
+        "expressions": {},
+        "expression_count": 0,
+        "business_column_count": 0,
+        "key_count": len(keys) if qualified else 0,
+    }
+    if not qualified or owner is None or table is None:
+        return public
+    source_names: list[str] = []
+    for item in source_columns:
+        name = _identifier_or_none(item)
+        if name is None:
+            raise AuditPreservationRejected("Audit preservation source column is not an identifier.")
+        if name not in source_names:
+            source_names.append(name)
+    target_names: list[str] = []
+    for item in target_columns:
+        name = _identifier_or_none(item)
+        if name is None:
+            raise AuditPreservationRejected("Audit preservation target column is not an identifier.")
+        if name not in target_names:
+            target_names.append(name)
+    missing_keys = [name for name in keys if name not in target_names]
+    if missing_keys:
+        raise AuditPreservationRejected("Audit preservation update key is not on the target.")
+    audit_names = set(_AUDIT_PRESERVE_ON_MATCH) | set(_AUDIT_REFRESH_ON_CHANGE)
+    business = [
+        name for name in source_names
+        if name in target_names and name not in keys and name not in audit_names
+    ]
+    defaults = {
+        "INSERT_DATE": "CURRENT_TIMESTAMP",
+        "UPDATE_DATE": "CURRENT_TIMESTAMP",
+        "CURRENT_FLAG": "'Y'",
+        "EFFECTIVE_FROM": "TRUNC(CURRENT_TIMESTAMP)",
+        "EFFECTIVE_TO": "TO_DATE('9999-12-31','YYYY-MM-DD')",
+        "SOURCE_SYSTEM": f"'{source_system_literal}'",
+        "ETL_BATCH_ID": _SESSION_BATCH_SQL,
+    }
+    key_where = " AND ".join(_null_safe_equal(name) for name in keys)
+    change_where = None
+    if business:
+        differ = " OR ".join(
+            f'CASE WHEN {_null_safe_equal(name)} THEN 0 ELSE 1 END=1' for name in business
+        )
+        change_where = f"{key_where} AND ({differ})"
+    table_sql = f'"{owner}"."{table}"'
+    expressions: dict[str, str] = {}
+    for column in _AUDIT_COLUMN_ORDER:
+        if column not in target_names or column in keys:
+            continue
+        default_sql = defaults[column]
+        use_change = change_where if column in _AUDIT_REFRESH_ON_CHANGE else None
+        expressions[column] = _audit_case(table_sql, key_where, column, default_sql, use_change)
+    from odi_orchestrator import _EXPR_VAL_RE
+
+    if expressions:
+        transport = ";".join(f"{column}={expression}" for column, expression in expressions.items())
+        if _FORBIDDEN_EXPRESSION_RE.search(transport) or not _EXPR_VAL_RE.fullmatch(transport):
+            raise AuditPreservationRejected("Audit preservation expressions are not transport-safe.")
+    public["expressions"] = expressions
+    public["expression_count"] = len(expressions)
+    public["business_column_count"] = len(business)
+    return public
 _ERROR_TYPE_ASSIGN_RE = re.compile(r"\berror_type=([A-Za-z][A-Za-z0-9_$]{0,127})\b")
 
 
@@ -275,6 +434,10 @@ class MappingGenerator:
         self._batch_id = str(uuid.uuid4())[:8]
         self._log_entries = []
         self._odi_repo_reader = None
+        self._audit_preservation_expressions: dict[str, str] = {}
+        self._audit_preservation_public = {
+            "qualified": False, "expression_count": 0, "business_column_count": 0, "key_count": 0,
+        }
 
     def __enter__(self) -> "MappingGenerator":
         return self
@@ -798,6 +961,43 @@ class MappingGenerator:
             "primary_key": primary_key,
         }
 
+    def _prepare_audit_preservation(self, params: dict, plan: dict) -> dict[str, object]:
+        """Validate same-schema audit SQL before the target DDL step."""
+        source_columns = [
+            str(column.get("COLUMN_NAME") or "")
+            for column in plan.get("src_columns") or []
+            if isinstance(column, dict)
+        ]
+        target_columns = [name for name, _type_sql in plan.get("desired_col_defs") or []]
+        profile = build_same_schema_audit_expressions(
+            integration_type=params.get("integration_type"),
+            src_owner=params.get("src_owner"),
+            tgt_owner=params.get("tgt_owner"),
+            src_model=params.get("src_model"),
+            tgt_model=params.get("tgt_model"),
+            tgt_table=params.get("tgt_table"),
+            update_key_columns=list(params.get("update_key_columns") or []),
+            source_columns=source_columns,
+            target_columns=target_columns,
+            source_system_literal=_SOURCE_SYSTEM_LITERAL,
+            join_table=params.get("join_table"),
+        )
+        expressions = dict(profile["expressions"])
+        self._audit_preservation_expressions = expressions
+        self._audit_preservation_public = {
+            "qualified": profile["qualified"] is True,
+            "expression_count": profile["expression_count"],
+            "business_column_count": profile["business_column_count"],
+            "key_count": profile["key_count"],
+        }
+        state = "SUCCESS" if profile["qualified"] is True else "SKIPPED"
+        self._add_log(
+            "audit_preservation", state,
+            "qualified={qualified} expressions={expression_count} "
+            "business_columns={business_column_count} keys={key_count}".format(**self._audit_preservation_public),
+        )
+        return profile
+
     def target_table_preflight(self, params: dict) -> dict:
         """Read-only target table preflight for mapping creation."""
         validated = self.validate_params(params)
@@ -903,11 +1103,12 @@ class MappingGenerator:
         logger.info("Creating target table from validated mapping parameters")
         try:
             plan = self._build_target_column_plan(params)
+            self._prepare_audit_preservation(params, plan)
             outcome = execute_target_table_plan(self, params, plan, ORACLE_DDL_USER or "APP_USER")
             if outcome.get("status") == "BLOCKED":
                 raise TargetTableBlockedError(str(outcome["code"]), outcome)
             return outcome
-        except (MappingGenerationError, TargetTableBlockedError):
+        except (MappingGenerationError, TargetTableBlockedError, AuditPreservationRejected):
             raise
         except Exception as exc:
             self._add_log("create_target_table", "FAILED", type(exc).__name__)
@@ -1350,6 +1551,12 @@ class MappingGenerator:
                 expressions[f"NK_{params['tgt_table']}"] = nk_src
                 expressions[f"{params['tgt_table']}_NK"] = nk_src
 
+        audit_columns: list[str] = []
+        for column, expression in self._audit_preservation_expressions.items():
+            if column not in expressions:
+                expressions[column] = expression
+                audit_columns.append(column)
+
         integration_type = params.get("integration_type") or "IU"
         update_key_columns = (
             list(params.get("update_key_columns") or []) if integration_type == "IU" else []
@@ -1373,6 +1580,7 @@ class MappingGenerator:
             required_update_key_type=(
                 "PRIMARY_KEY" if params.get("update_key_kind") == "primary" else "ALTERNATE_KEY"
             ) if update_key_columns else None,
+            audit_preservation_columns=audit_columns or None,
         )
 
         # OdiOrchestrator returns "KOMUT HAZIRLANDI: ..." in stub mode.
@@ -1398,6 +1606,7 @@ class MappingGenerator:
             "replaced": state["replaced"] is True,
             "kept_existing_on_failure": False,
             "error_type": None,
+            "audit_preservation": dict(self._audit_preservation_public),
         }
 
     # ── Create SKEY ─────────────────────────────────────────────────────────

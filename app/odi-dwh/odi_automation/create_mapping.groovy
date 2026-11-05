@@ -478,7 +478,24 @@ try {
                 customExpressions[key] = val
             }
         }
-        println "CUSTOM EXPRESSIONS: ${customExpressions}"
+    }
+    List auditColumns = []
+    String auditColumnsStr = System.getProperty("odi.audit_preservation_columns")
+    if (auditColumnsStr != null && auditColumnsStr.trim().length() > 0) {
+        auditColumnsStr.split(",").each { rawName ->
+            String cleaned = rawName == null ? "" : rawName.trim().toUpperCase(Locale.ROOT)
+            if (cleaned.length() > 0 && !auditColumns.contains(cleaned)) auditColumns.add(cleaned)
+        }
+    }
+    boolean auditQualified = integrationTypeParam == "IU" && !ukColNames.isEmpty() && sameLogicalSchema(srcDS, tgtDS)
+    if (!auditColumns.isEmpty() && !auditQualified) {
+        auditColumns.each { auditName -> customExpressions.remove(auditName) }
+        println "AUDIT PRESERVATION: skipped count=${auditColumns.size()}"
+    } else if (!auditColumns.isEmpty()) {
+        println "AUDIT PRESERVATION: applied count=${auditColumns.size()}"
+    }
+    if (!customExpressions.isEmpty()) {
+        println "CUSTOM EXPRESSIONS: count=${customExpressions.size()}"
     }
 
     tgtComp.getAttributes().each { tAttr ->
