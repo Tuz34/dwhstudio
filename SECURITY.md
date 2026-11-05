@@ -87,5 +87,11 @@ sanitize historical logs. Review existing records separately without publishing 
 
 ## Secrets and data
 
+Generate signing keys with a cryptographically secure random source (at least 32 bytes of
+randomness). The application's minimum-length, placeholder and simple-pattern checks reject
+obvious weak values; they cannot prove a supplied key is unpredictable. Network profiles fail
+closed when screening fails. Local-only mode uses a fresh temporary runtime key instead, so
+sessions from the rejected value no longer validate; sessions also expire across those restarts.
+
 Never commit `.env*` files or `odi_connection.properties`. Only the `*.example` templates belong in
 the repository. Evidence and log output are designed to carry counts and status, not raw rows.

@@ -112,12 +112,20 @@ _WEAK_FLASK_SECRET_KEYS = {
 
 
 def _configure_flask_secret_key(flask_app: Flask, configured_key: str | None) -> bool:
-    """Use a configured signing key only when it is neither weak nor a placeholder."""
+    """Reject placeholders and obvious patterns; screening is not an entropy proof."""
     candidate = configured_key if isinstance(configured_key, str) else ""
     normalized = candidate.strip()
     normalized_key = normalized.casefold()
-    configured = len(normalized) >= 16 and not any(
+    sequences = ("abcdefghijklmnopqrstuvwxyz0123456789", "0123456789abcdefghijklmnopqrstuvwxyz")
+    configured = 32 <= len(normalized) <= 4096 and len(set(normalized_key)) >= 8 and not any(
         normalized_key.startswith(token) for token in _WEAK_FLASK_SECRET_KEYS
+    ) and not any(
+        normalized_key == (normalized_key[:size] * (len(normalized_key) // size + 1))[:len(normalized_key)]
+        for size in range(1, min(16, len(normalized_key) // 2) + 1)
+    ) and not any(
+        normalized_key in sequence * (len(normalized_key) // len(sequence) + 2)
+        or normalized_key in sequence[::-1] * (len(normalized_key) // len(sequence) + 2)
+        for sequence in sequences
     )
     if configured:
         flask_app.secret_key = candidate
