@@ -1,10 +1,10 @@
 """Offline, fixed-target migration of DWH.DIM_PRODUCT onto stock IKM literals.
 
 The column type is already VARCHAR2(1) for CURRENT_FLAG and DATE for
-EFFECTIVE_TO, so the cutover is one UPDATE. It does not alter types, touch
-the sequence, or write the ODS source. The migration backup is the fixed
-table DWH.ODI87_DIM_PRODUCT_MIG_BKP. It is created only when absent, checked
-with set differences rather than a row count, and left in place afterwards.
+EFFECTIVE_TO, so the cutover is one UPDATE. Final DML runs in READ COMMITTED
+after exclusive NOWAIT locks on the fixed target and migration backup. The
+backup is created only when absent, checked as a before-image, and left in
+place. This module does not prove a native ODI scenario or stock IKM run.
 """
 
 from __future__ import annotations
@@ -67,6 +67,8 @@ DATA_KEYS = (
     "current_legacy_open_mismatch_count",
     "current_stock_open_mismatch_count",
     "historical_open_sentinel_count",
+    "historical_effective_to_on_or_after_stock_open_count",
+    "current_effective_from_after_stock_open_count",
     "duplicate_product_sk_groups",
     "duplicate_legacy_current_groups",
     "duplicate_stock_current_groups",
@@ -187,6 +189,14 @@ _COUNT_SQL = {
         '"CURRENT_FLAG" IN (\'N\', \'0\') AND ("EFFECTIVE_TO" = DATE \'9999-12-31\' '
         'OR "EFFECTIVE_TO" = DATE \'2400-01-01\')',
     ),
+    "historical_effective_to_on_or_after_stock_open_count": _target_count(
+        "historical_effective_to_on_or_after_stock_open_count",
+        '"CURRENT_FLAG" IN (\'N\', \'0\') AND "EFFECTIVE_TO" >= DATE \'2400-01-01\'',
+    ),
+    "current_effective_from_after_stock_open_count": _target_count(
+        "current_effective_from_after_stock_open_count",
+        '"CURRENT_FLAG" IN (\'Y\', \'1\') AND "EFFECTIVE_FROM" > DATE \'2400-01-01\'',
+    ),
     "duplicate_product_sk_groups": _marked(
         "duplicate_product_sk_groups",
         'SELECT COUNT(*) FROM (SELECT "PRODUCT_SK" FROM "DWH"."DIM_PRODUCT" '
@@ -304,8 +314,91 @@ RESTORE_UPDATE_SQL = _marked(
     "WHERE EXISTS (SELECT 1 "
     f'FROM "DWH"."{BACKUP_TABLE}" b WHERE b."PRODUCT_SK" = t."PRODUCT_SK")',
 )
-_READ_ONLY_SQL = "SET TRANSACTION READ ONLY"
-_SERIALIZABLE_SQL = "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+_READ_COMMITTED_SQL = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+LOCK_TARGET_SQL = _marked(
+    "lock_target",
+    'LOCK TABLE "DWH"."DIM_PRODUCT" IN EXCLUSIVE MODE NOWAIT',
+)
+LOCK_BACKUP_SQL = _marked(
+    "lock_backup",
+    f'LOCK TABLE "DWH"."{BACKUP_TABLE}" IN EXCLUSIVE MODE NOWAIT',
+)
+_GUARD_SQL = {
+    "enabled_target_trigger_count": _marked(
+        "enabled_target_trigger_count",
+        "SELECT COUNT(*) FROM ALL_TRIGGERS "
+        "WHERE TABLE_OWNER = 'DWH' AND TABLE_NAME = 'DIM_PRODUCT' AND STATUS = 'ENABLED'",
+    ),
+    "enabled_backup_trigger_count": _marked(
+        "enabled_backup_trigger_count",
+        "SELECT COUNT(*) FROM ALL_TRIGGERS "
+        f"WHERE TABLE_OWNER = 'DWH' AND TABLE_NAME = '{BACKUP_TABLE}' AND STATUS = 'ENABLED'",
+    ),
+    "primary_key_count": _marked(
+        "primary_key_count",
+        "SELECT COUNT(*) FROM ALL_CONSTRAINTS "
+        "WHERE OWNER = 'DWH' AND TABLE_NAME = 'DIM_PRODUCT' "
+        "AND CONSTRAINT_TYPE = 'P' AND STATUS = 'ENABLED' AND VALIDATED = 'VALIDATED'",
+    ),
+    "primary_key_column_count": _marked(
+        "primary_key_column_count",
+        "SELECT COUNT(*) FROM ALL_CONS_COLUMNS cc "
+        "JOIN ALL_CONSTRAINTS c "
+        "ON c.OWNER = cc.OWNER AND c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME "
+        "WHERE c.OWNER = 'DWH' AND c.TABLE_NAME = 'DIM_PRODUCT' "
+        "AND c.CONSTRAINT_TYPE = 'P' AND c.STATUS = 'ENABLED'",
+    ),
+    "primary_key_product_sk_count": _marked(
+        "primary_key_product_sk_count",
+        "SELECT COUNT(*) FROM ALL_CONS_COLUMNS cc "
+        "JOIN ALL_CONSTRAINTS c "
+        "ON c.OWNER = cc.OWNER AND c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME "
+        "WHERE c.OWNER = 'DWH' AND c.TABLE_NAME = 'DIM_PRODUCT' "
+        "AND c.CONSTRAINT_TYPE = 'P' AND c.STATUS = 'ENABLED' "
+        "AND cc.COLUMN_NAME = 'PRODUCT_SK'",
+    ),
+    "disabled_constraint_count": _marked(
+        "disabled_constraint_count",
+        "SELECT COUNT(*) FROM ALL_CONSTRAINTS "
+        "WHERE OWNER = 'DWH' AND TABLE_NAME = 'DIM_PRODUCT' AND STATUS <> 'ENABLED'",
+    ),
+    "not_validated_constraint_count": _marked(
+        "not_validated_constraint_count",
+        "SELECT COUNT(*) FROM ALL_CONSTRAINTS "
+        "WHERE OWNER = 'DWH' AND TABLE_NAME = 'DIM_PRODUCT' "
+        "AND STATUS = 'ENABLED' AND VALIDATED <> 'VALIDATED'",
+    ),
+    "check_constraint_count": _marked(
+        "check_constraint_count",
+        "SELECT COUNT(*) FROM ALL_CONSTRAINTS "
+        "WHERE OWNER = 'DWH' AND TABLE_NAME = 'DIM_PRODUCT' AND CONSTRAINT_TYPE = 'C'",
+    ),
+    "other_constraint_count": _marked(
+        "other_constraint_count",
+        "SELECT COUNT(*) FROM ALL_CONSTRAINTS "
+        "WHERE OWNER = 'DWH' AND TABLE_NAME = 'DIM_PRODUCT' "
+        "AND CONSTRAINT_TYPE NOT IN ('P', 'C')",
+    ),
+    "not_null_column_count": _marked(
+        "not_null_column_count",
+        "SELECT COUNT(*) FROM ALL_TAB_COLUMNS "
+        "WHERE OWNER = 'DWH' AND TABLE_NAME = 'DIM_PRODUCT' AND NULLABLE = 'N'",
+    ),
+}
+GUARD_COUNT_NAMES = tuple(_GUARD_SQL)
+EXPECTED_NOT_NULL_COUNT = sum(not column["nullable"] for column in EXPECTED_COLUMNS)
+PASSING_GUARD_COUNTS = {
+    "enabled_target_trigger_count": 0,
+    "enabled_backup_trigger_count": 0,
+    "primary_key_count": 1,
+    "primary_key_column_count": 1,
+    "primary_key_product_sk_count": 1,
+    "disabled_constraint_count": 0,
+    "not_validated_constraint_count": 0,
+    "other_constraint_count": 0,
+    "check_constraint_count": EXPECTED_NOT_NULL_COUNT,
+    "not_null_column_count": EXPECTED_NOT_NULL_COUNT,
+}
 
 
 def _column_row(column: Mapping[str, object]) -> tuple[object, ...]:
@@ -491,6 +584,8 @@ def classify_dim_product_stock_migration(evidence: Mapping[str, int]) -> str:
             and parsed["historical_open_sentinel_count"] == 0
             and parsed["stock_open_ended_count"] == 0
             and parsed["legacy_open_ended_count"] == parsed["legacy_current_flag_count"]
+            and parsed["historical_effective_to_on_or_after_stock_open_count"] == 0
+            and parsed["current_effective_from_after_stock_open_count"] == 0
         )
         return "legacy_ready" if legacy_dates_ok else "blocked_invalid_dates"
     stock_dates_ok = (
@@ -498,6 +593,8 @@ def classify_dim_product_stock_migration(evidence: Mapping[str, int]) -> str:
         and parsed["historical_open_sentinel_count"] == 0
         and parsed["legacy_open_ended_count"] == 0
         and parsed["stock_open_ended_count"] == parsed["stock_current_flag_count"]
+        and parsed["historical_effective_to_on_or_after_stock_open_count"] == 0
+        and parsed["current_effective_from_after_stock_open_count"] == 0
     )
     return "already_stock" if stock_dates_ok else "blocked_invalid_dates"
 
@@ -570,7 +667,12 @@ def _report(
         "write_operations_attempted": list(writes or []),
         "committed": False,
         "rolled_back": False,
+        "backup_create_attempted": False,
+        "backup_may_exist": None,
+        "backup_verified": False,
         "migration_backup_retained": False,
+        "post_commit_verification": None,
+        "manual_recovery_review_required": False,
         "automatic_drop_performed": False,
         "ods_write_attempted": False,
         "sequence_write_attempted": False,
@@ -599,11 +701,12 @@ def _approval_status(
 
 
 def _close(resource: Any, label: str) -> None:
+    """Close a cursor or connection. Cleanup must not replace the outcome."""
     if resource is None:
         return
     try:
         resource.close()
-    except oracledb.Error as exc:
+    except Exception as exc:
         logger.warning("%s close failed: %s", label, type(exc).__name__)
 
 
@@ -616,12 +719,143 @@ def _rollback(connection: Any) -> bool:
         return False
 
 
-def _read(cursor: Any, connection: Any) -> dict[str, int]:
-    cursor.execute(_READ_ONLY_SQL)
-    evidence = collect_dim_product_stock_migration_evidence(cursor)
-    if not _rollback(connection):
-        raise StockMigrationVerificationError("Read-only rollback failed.")
-    return evidence
+def _autocommit_refused(connection: Any) -> bool:
+    """Refuse unless the supplied connection is explicitly not autocommit."""
+    try:
+        flag = connection.autocommit
+    except (oracledb.Error, AttributeError, TypeError):
+        return True
+    return flag is not False
+
+
+def _guard_counts(cursor: Any) -> dict[str, int]:
+    return {name: _count_sql(cursor, sql) for name, sql in _GUARD_SQL.items()}
+
+
+def _count_sql(cursor: Any, sql: str) -> int:
+    cursor.execute(sql)
+    value = cursor.fetchone()[0]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise StockMigrationVerificationError("Aggregate was not a count.")
+    return value
+
+
+def _guard_block(guards: Mapping[str, int]) -> str | None:
+    """Block enabled triggers and any constraint shape that is not PK plus NOT NULL.
+
+    CHECK condition text is not read. A business CHECK cannot be separated from
+    a NOT NULL check without that text, so any extra CHECK count blocks.
+    """
+    if guards["enabled_target_trigger_count"] or guards["enabled_backup_trigger_count"]:
+        return "blocked_enabled_triggers"
+    pk_ok = (
+        guards["primary_key_count"] == 1
+        and guards["primary_key_column_count"] == 1
+        and guards["primary_key_product_sk_count"] == 1
+    )
+    checks_ok = (
+        guards["disabled_constraint_count"] == 0
+        and guards["not_validated_constraint_count"] == 0
+        and guards["other_constraint_count"] == 0
+        and guards["check_constraint_count"] == guards["not_null_column_count"]
+        and guards["not_null_column_count"] == EXPECTED_NOT_NULL_COUNT
+    )
+    if not pk_ok or not checks_ok:
+        return "blocked_unreviewed_constraints"
+    return None
+
+
+def _backup_state(
+    evidence: Mapping[str, int] | None,
+    *,
+    attempted: bool,
+) -> dict[str, Any]:
+    """Report backup existence only from a live read in this call."""
+    if evidence is None:
+        return {
+            "backup_create_attempted": attempted,
+            "backup_may_exist": True if attempted else None,
+            "backup_verified": False,
+            "migration_backup_retained": False,
+        }
+    exists = evidence["backup_exists"] == 1
+    verified = exists and (_exact_before_image(evidence) or _legacy_preimage(evidence))
+    return {
+        "backup_create_attempted": attempted,
+        "backup_may_exist": exists,
+        "backup_verified": verified,
+        "migration_backup_retained": exists,
+    }
+
+
+def _unlocked_observation(cursor: Any) -> tuple[dict[str, int], dict[str, int]]:
+    cursor.execute(_READ_COMMITTED_SQL)
+    return _guard_counts(cursor), collect_dim_product_stock_migration_evidence(cursor)
+
+
+def _locked_observation(
+    cursor: Any,
+    progress: dict[str, str],
+    *,
+    backup_exists: int,
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Start READ COMMITTED, lock the fixed objects, then read again.
+
+    The lock is the first protection for the following DML. It is not taken
+    under SERIALIZABLE, and it is not held across CREATE TABLE.
+    """
+    cursor.execute(_READ_COMMITTED_SQL)
+    progress["stage"] = "lock_target"
+    cursor.execute(LOCK_TARGET_SQL)
+    if backup_exists == 1:
+        progress["stage"] = "lock_backup"
+        cursor.execute(LOCK_BACKUP_SQL)
+    elif backup_exists != 0:
+        raise StockMigrationVerificationError("Backup existence was not a single count.")
+    progress["stage"] = "reread_after_lock"
+    return _guard_counts(cursor), collect_dim_product_stock_migration_evidence(cursor)
+
+
+def _fresh_evidence(connection_factory: Callable[[], Any]) -> dict[str, int] | None:
+    """Read committed counts on a new connection without waiting for a lock."""
+    connection = None
+    cursor = None
+    try:
+        connection = connection_factory()
+        if _autocommit_refused(connection):
+            return None
+        cursor = connection.cursor()
+        cursor.execute(_READ_COMMITTED_SQL)
+        cursor.execute(LOCK_TARGET_SQL)
+        backup_exists = _count(cursor, "backup_exists")
+        if backup_exists == 1:
+            cursor.execute(LOCK_BACKUP_SQL)
+        elif backup_exists != 0:
+            return None
+        evidence = collect_dim_product_stock_migration_evidence(cursor)
+        if not _rollback(connection):
+            return None
+        return evidence
+    except (oracledb.Error, StockMigrationVerificationError, TypeError, ValueError, AttributeError):
+        return None
+    finally:
+        _close(cursor, "proof cursor")
+        _close(connection, "proof connection")
+
+
+def _verification_name(
+    evidence: Mapping[str, int] | None,
+    *,
+    post_ok: Callable[[Mapping[str, int]], bool],
+    pre_ok: Callable[[Mapping[str, int]], bool],
+) -> str:
+    if evidence is None:
+        return "unavailable"
+    if post_ok(evidence):
+        return "proven_post_state"
+    if pre_ok(evidence):
+        return "proven_pre_state"
+    return "differs"
 
 
 def _require_rowcount(cursor: Any) -> None:
@@ -682,6 +916,277 @@ def _restore_preview(reviewed: Mapping[str, int]) -> str | None:
     return None if _legacy_preimage(reviewed) else "blocked_backup_mismatch"
 
 
+def _is_migrated(after: Mapping[str, int], before: Mapping[str, int]) -> bool:
+    try:
+        _assert_migrated(after, before)
+    except StockMigrationVerificationError:
+        return False
+    return True
+
+
+def _is_restored(after: Mapping[str, int], before: Mapping[str, int]) -> bool:
+    try:
+        _assert_restored(after, before)
+    except StockMigrationVerificationError:
+        return False
+    return True
+
+
+def _still_preimage(evidence: Mapping[str, int], before: Mapping[str, int]) -> bool:
+    return _same(evidence, before, EVIDENCE_KEYS)
+
+
+def _open_or_refuse(
+    connection_factory: Callable[[], Any],
+    *,
+    mode: str,
+    scope: str,
+    approved: object,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Call the factory only after recording the attempt. Do not change autocommit."""
+    connection_attempted = True
+    try:
+        connection = connection_factory()
+    except (oracledb.Error, TypeError, ValueError, AttributeError) as exc:
+        return None, _report(
+            "failed",
+            mode=mode,
+            scope=scope,
+            approved=approved,
+            connection_attempted=connection_attempted,
+            stage="open_connection",
+            error_type=type(exc).__name__,
+            **_backup_state(None, attempted=False),
+        )
+    if _autocommit_refused(connection):
+        return connection, _report(
+            "blocked_autocommit",
+            mode=mode,
+            scope=scope,
+            approved=approved,
+            connection_attempted=connection_attempted,
+            **_backup_state(None, attempted=False),
+        )
+    return connection, None
+
+
+def _ctas_failure_report(
+    connection_factory: Callable[[], Any],
+    exc: BaseException,
+    *,
+    mode: str,
+    scope: str,
+    approved: object,
+    writes: list[str],
+) -> dict[str, Any]:
+    observation = _fresh_evidence(connection_factory)
+    return _report(
+        "failed",
+        mode=mode,
+        scope=scope,
+        approved=approved,
+        connection_attempted=True,
+        writes=writes,
+        committed=False,
+        rolled_back=False,
+        manual_recovery_review_required=True,
+        stage="create_migration_backup",
+        error_type=type(exc).__name__,
+        post_commit_verification=None,
+        **_backup_state(observation, attempted=True),
+    )
+
+
+def _unknown_commit_report(
+    connection_factory: Callable[[], Any],
+    *,
+    mode: str,
+    scope: str,
+    approved: object,
+    writes: list[str],
+    attempted: bool,
+    post_ok: Callable[[Mapping[str, int]], bool],
+    pre_ok: Callable[[Mapping[str, int]], bool],
+) -> dict[str, Any]:
+    observation = _fresh_evidence(connection_factory)
+    return _report(
+        "outcome_unknown",
+        mode=mode,
+        scope=scope,
+        approved=approved,
+        connection_attempted=True,
+        writes=writes,
+        committed=None,
+        rolled_back=None,
+        manual_recovery_review_required=True,
+        stage="commit",
+        post_commit_verification=_verification_name(observation, post_ok=post_ok, pre_ok=pre_ok),
+        **_backup_state(observation, attempted=attempted),
+    )
+
+
+def _proven_commit_report(
+    connection_factory: Callable[[], Any],
+    *,
+    mode: str,
+    scope: str,
+    approved: object,
+    writes: list[str],
+    attempted: bool,
+    post_ok: Callable[[Mapping[str, int]], bool],
+    pre_ok: Callable[[Mapping[str, int]], bool],
+    extra: Mapping[str, Any],
+) -> dict[str, Any]:
+    observation = _fresh_evidence(connection_factory)
+    verified = observation is not None and post_ok(observation)
+    return _report(
+        "passed" if verified else "committed_unverified",
+        mode=mode,
+        scope=scope,
+        approved=approved,
+        connection_attempted=True,
+        writes=writes,
+        will_execute=True,
+        committed=True,
+        rolled_back=False,
+        manual_recovery_review_required=not verified,
+        post_commit_verification="verified" if verified else _verification_name(
+            observation, post_ok=post_ok, pre_ok=pre_ok
+        ),
+        **_backup_state(observation, attempted=attempted),
+        **dict(extra),
+    )
+
+
+def _migration_ready(guards: Mapping[str, int], confirmed: Mapping[str, int], reviewed: Mapping[str, int]) -> str | None:
+    blocked = _guard_block(guards)
+    if blocked is not None:
+        return blocked
+    if not _same(confirmed, reviewed, DATA_KEYS):
+        return "blocked_stale_state"
+    if classify_dim_product_stock_migration(confirmed) != "legacy_ready":
+        return classify_dim_product_stock_migration(confirmed)
+    if not _exact_before_image(confirmed):
+        return "blocked_backup_mismatch"
+    return None
+
+
+def _noop_after_lock(
+    connection: Any,
+    guards: Mapping[str, int],
+    confirmed: Mapping[str, int],
+    reviewed: Mapping[str, int],
+    *,
+    mode: str,
+    scope: str,
+    approved: object,
+    expected_kind: str,
+    image_ok: Callable[[Mapping[str, int]], bool],
+) -> dict[str, Any]:
+    blocked = _guard_block(guards)
+    if blocked is None and not _same(confirmed, reviewed, EVIDENCE_KEYS):
+        blocked = "blocked_stale_state" if not _same(confirmed, reviewed, DATA_KEYS) else "blocked_backup_mismatch"
+    if blocked is None and classify_dim_product_stock_migration(confirmed) != expected_kind:
+        blocked = classify_dim_product_stock_migration(confirmed)
+    if blocked is None and not image_ok(confirmed):
+        blocked = "blocked_backup_mismatch"
+    rolled = _rollback(connection)
+    return _report(
+        "rerun_noop" if blocked is None else blocked,
+        mode=mode,
+        scope=scope,
+        approved=approved,
+        connection_attempted=True,
+        rolled_back=rolled,
+        **_backup_state(confirmed, attempted=False),
+    )
+
+
+def _exception_outcome(
+    exc: BaseException,
+    *,
+    connection: Any,
+    connection_factory: Callable[[], Any],
+    stage: str,
+    writes: list[str],
+    attempted: bool,
+    approved: object,
+    mode: str,
+    scope: str,
+    seen: Mapping[str, int] | None,
+    post_ok: Callable[[Mapping[str, int]], bool],
+    pre_ok: Callable[[Mapping[str, int]], bool],
+) -> dict[str, Any]:
+    common = {
+        "mode": mode,
+        "scope": scope,
+        "approved": approved,
+        "connection_attempted": True,
+        "writes": writes,
+        "stage": stage,
+        "error_type": type(exc).__name__,
+    }
+    if stage == "commit":
+        return _unknown_commit_report(
+            connection_factory,
+            mode=mode,
+            scope=scope,
+            approved=approved,
+            writes=writes,
+            attempted=attempted,
+            post_ok=post_ok,
+            pre_ok=pre_ok,
+        )
+    if stage == "fresh_proof":
+        return _report(
+            "committed_unverified",
+            mode=mode,
+            scope=scope,
+            approved=approved,
+            connection_attempted=True,
+            writes=writes,
+            committed=True,
+            rolled_back=False,
+            manual_recovery_review_required=True,
+            stage=stage,
+            post_commit_verification="unavailable",
+            **_backup_state(None, attempted=attempted),
+        )
+    if stage in {"lock_target", "lock_backup"} and isinstance(exc, oracledb.Error):
+        if connection is not None:
+            _rollback(connection)
+        observation = _fresh_evidence(connection_factory)
+        return _report(
+            "blocked_lock_contention",
+            committed=False,
+            rolled_back=False,
+            manual_recovery_review_required=attempted,
+            **common,
+            **_backup_state(observation, attempted=attempted),
+        )
+    if stage in {"create_migration_backup", "reread_after_lock"}:
+        if connection is not None and stage != "create_migration_backup":
+            _rollback(connection)
+        observation = _fresh_evidence(connection_factory)
+        return _report(
+            "failed",
+            committed=False,
+            rolled_back=False,
+            manual_recovery_review_required=True,
+            **common,
+            **_backup_state(observation, attempted=True if stage == "create_migration_backup" else attempted),
+        )
+    rolled = _rollback(connection) if connection is not None else False
+    return _report(
+        "failed",
+        committed=False,
+        rolled_back=rolled,
+        manual_recovery_review_required=attempted,
+        **common,
+        **_backup_state(seen, attempted=attempted),
+    )
+
+
 def execute_dim_product_stock_migration(
     reviewed_evidence: Mapping[str, int],
     *,
@@ -717,12 +1222,34 @@ def execute_dim_product_stock_migration(
     cursor = None
     writes: list[str] = []
     stage = "open_connection"
-    backup_created = False
+    attempted = False
+    live: dict[str, int] | None = None
+    confirmed: dict[str, int] | None = None
     try:
-        connection = connection_factory()
+        connection, refusal = _open_or_refuse(
+            connection_factory,
+            mode=mode,
+            scope=MIGRATION_APPROVAL_SCOPE,
+            approved=approved,
+        )
+        if refusal is not None:
+            return refusal
+        stage = "read_before_persistent_action"
         cursor = connection.cursor()
-        stage = "reread_before_write"
-        live = _read(cursor, connection)
+        guards, live = _unlocked_observation(cursor)
+        if not _rollback(connection):
+            raise StockMigrationVerificationError("Read rollback failed.")
+        blocked = _guard_block(guards)
+        if blocked is not None:
+            return _report(
+                blocked,
+                mode=mode,
+                scope=MIGRATION_APPROVAL_SCOPE,
+                approved=approved,
+                connection_attempted=True,
+                rolled_back=True,
+                **_backup_state(live, attempted=False),
+            )
         if not _same(live, reviewed, EVIDENCE_KEYS):
             return _report(
                 "blocked_stale_state",
@@ -731,64 +1258,82 @@ def execute_dim_product_stock_migration(
                 approved=approved,
                 connection_attempted=True,
                 rolled_back=True,
+                **_backup_state(live, attempted=False),
             )
-        if classify_dim_product_stock_migration(live) == "already_stock":
+        kind = classify_dim_product_stock_migration(live)
+        if kind == "already_stock":
+            progress = {"stage": stage}
+            try:
+                guards, confirmed = _locked_observation(
+                    cursor, progress, backup_exists=live["backup_exists"]
+                )
+            finally:
+                stage = progress["stage"]
+            return _noop_after_lock(
+                connection,
+                guards,
+                confirmed,
+                reviewed,
+                mode=mode,
+                scope=MIGRATION_APPROVAL_SCOPE,
+                approved=approved,
+                expected_kind="already_stock",
+                image_ok=lambda evidence: evidence["backup_exists"] == 0 or _legacy_preimage(evidence),
+            )
+        if kind != "legacy_ready":
             return _report(
-                "rerun_noop",
+                kind,
                 mode=mode,
                 scope=MIGRATION_APPROVAL_SCOPE,
                 approved=approved,
                 connection_attempted=True,
                 rolled_back=True,
-                migration_backup_retained=live["backup_exists"] == 1,
+                **_backup_state(live, attempted=False),
             )
-
         if live["backup_exists"] == 0:
             stage = "create_migration_backup"
             writes.append("create_migration_backup")
-            backup_created = True
-            cursor.execute(CREATE_MIGRATION_BACKUP_SQL)
-            stage = "verify_created_backup"
-            created = _read(cursor, connection)
-            if not _same(created, reviewed, DATA_KEYS) or not _exact_before_image(created):
-                status = "blocked_stale_state" if not _same(created, reviewed, DATA_KEYS) else "blocked_backup_mismatch"
-                return _report(
-                    status,
+            attempted = True
+            try:
+                cursor.execute(CREATE_MIGRATION_BACKUP_SQL)
+            except (oracledb.Error, TypeError, ValueError) as exc:
+                return _ctas_failure_report(
+                    connection_factory,
+                    exc,
                     mode=mode,
                     scope=MIGRATION_APPROVAL_SCOPE,
                     approved=approved,
-                    connection_attempted=True,
                     writes=writes,
-                    rolled_back=True,
-                    migration_backup_retained=True,
-                    manual_recovery_review_required=True,
                 )
-            confirmed_base = created
-        else:
-            confirmed_base = live
-
-        stage = "serializable_recheck"
-        cursor.execute(_SERIALIZABLE_SQL)
-        confirmed = collect_dim_product_stock_migration_evidence(cursor)
-        if not _same(confirmed, confirmed_base, EVIDENCE_KEYS) or not _exact_before_image(confirmed):
-            rolled = _rollback(connection)
-            status = (
-                "blocked_stale_state"
-                if not _same(confirmed, confirmed_base, DATA_KEYS)
-                else "blocked_backup_mismatch"
-            )
+        elif not _exact_before_image(live):
             return _report(
-                status,
+                "blocked_backup_mismatch",
+                mode=mode,
+                scope=MIGRATION_APPROVAL_SCOPE,
+                approved=approved,
+                connection_attempted=True,
+                rolled_back=True,
+                **_backup_state(live, attempted=False),
+            )
+        progress = {"stage": stage}
+        try:
+            guards, confirmed = _locked_observation(cursor, progress, backup_exists=1)
+        finally:
+            stage = progress["stage"]
+        ready = _migration_ready(guards, confirmed, reviewed)
+        if ready is not None:
+            rolled = _rollback(connection)
+            return _report(
+                ready,
                 mode=mode,
                 scope=MIGRATION_APPROVAL_SCOPE,
                 approved=approved,
                 connection_attempted=True,
                 writes=writes,
                 rolled_back=rolled,
-                migration_backup_retained=True,
-                manual_recovery_review_required=backup_created,
+                manual_recovery_review_required=attempted,
+                **_backup_state(confirmed, attempted=attempted),
             )
-
         stage = "migrate_update"
         writes.append("migrate_current_flags_and_open_ended_dates")
         cursor.execute(MIGRATE_UPDATE_SQL)
@@ -798,34 +1343,32 @@ def execute_dim_product_stock_migration(
         _assert_migrated(after, confirmed)
         stage = "commit"
         connection.commit()
-        return _report(
-            "passed",
+        stage = "fresh_proof"
+        return _proven_commit_report(
+            connection_factory,
             mode=mode,
             scope=MIGRATION_APPROVAL_SCOPE,
             approved=approved,
-            connection_attempted=True,
             writes=writes,
-            will_execute=True,
-            committed=True,
-            migration_backup_retained=True,
-            migrated_row_count=EXPECTED_ROW_COUNT,
+            attempted=attempted,
+            post_ok=lambda evidence, baseline=confirmed: _is_migrated(evidence, baseline),
+            pre_ok=lambda evidence, baseline=confirmed: _still_preimage(evidence, baseline),
+            extra={"migrated_row_count": EXPECTED_ROW_COUNT},
         )
-    except (oracledb.Error, StockMigrationVerificationError, TypeError, ValueError) as exc:
-        rolled = _rollback(connection) if connection is not None else False
-        return _report(
-            "failed",
+    except (oracledb.Error, StockMigrationVerificationError, TypeError, ValueError, AttributeError) as exc:
+        return _exception_outcome(
+            exc,
+            connection=connection,
+            connection_factory=connection_factory,
+            stage=stage,
+            writes=writes,
+            attempted=attempted,
+            approved=approved,
             mode=mode,
             scope=MIGRATION_APPROVAL_SCOPE,
-            approved=approved,
-            connection_attempted=connection is not None,
-            writes=writes,
-            rolled_back=rolled,
-            migration_backup_retained=backup_created or (
-                reviewed is not None and reviewed["backup_exists"] == 1
-            ),
-            manual_recovery_review_required=backup_created,
-            stage=stage,
-            error_type=type(exc).__name__,
+            seen=confirmed if confirmed is not None else live,
+            post_ok=lambda evidence, baseline=confirmed: baseline is not None and _is_migrated(evidence, baseline),
+            pre_ok=lambda evidence, baseline=confirmed: baseline is not None and _still_preimage(evidence, baseline),
         )
     finally:
         _close(cursor, "cursor")
@@ -867,11 +1410,33 @@ def execute_dim_product_stock_migration_restore(
     cursor = None
     writes: list[str] = []
     stage = "open_connection"
+    live = None
+    confirmed = None
     try:
-        connection = connection_factory()
+        connection, refusal = _open_or_refuse(
+            connection_factory,
+            mode=mode,
+            scope=RESTORE_APPROVAL_SCOPE,
+            approved=approved,
+        )
+        if refusal is not None:
+            return refusal
+        stage = "read_before_persistent_action"
         cursor = connection.cursor()
-        stage = "reread_before_restore"
-        live = _read(cursor, connection)
+        guards, live = _unlocked_observation(cursor)
+        if not _rollback(connection):
+            raise StockMigrationVerificationError("Read rollback failed.")
+        blocked = _guard_block(guards)
+        if blocked is not None:
+            return _report(
+                blocked,
+                mode=mode,
+                scope=RESTORE_APPROVAL_SCOPE,
+                approved=approved,
+                connection_attempted=True,
+                rolled_back=True,
+                **_backup_state(live, attempted=False),
+            )
         if not _same(live, reviewed, EVIDENCE_KEYS):
             return _report(
                 "blocked_stale_state",
@@ -880,32 +1445,87 @@ def execute_dim_product_stock_migration_restore(
                 approved=approved,
                 connection_attempted=True,
                 rolled_back=True,
-                migration_backup_retained=live["backup_exists"] == 1,
+                **_backup_state(live, attempted=False),
             )
-        if classify_dim_product_stock_migration(live) == "legacy_ready":
+        kind = classify_dim_product_stock_migration(live)
+        if kind == "legacy_ready" and not _exact_before_image(live):
             return _report(
-                "rerun_noop",
+                "blocked_backup_mismatch",
                 mode=mode,
                 scope=RESTORE_APPROVAL_SCOPE,
                 approved=approved,
                 connection_attempted=True,
                 rolled_back=True,
-                migration_backup_retained=True,
+                **_backup_state(live, attempted=False),
             )
-
-        stage = "serializable_recheck"
-        cursor.execute(_SERIALIZABLE_SQL)
-        confirmed = collect_dim_product_stock_migration_evidence(cursor)
-        if not _same(confirmed, live, EVIDENCE_KEYS) or not _legacy_preimage(confirmed):
+        if kind == "already_stock" and not _legacy_preimage(live):
+            return _report(
+                "blocked_backup_mismatch",
+                mode=mode,
+                scope=RESTORE_APPROVAL_SCOPE,
+                approved=approved,
+                connection_attempted=True,
+                rolled_back=True,
+                **_backup_state(live, attempted=False),
+            )
+        if kind not in {"legacy_ready", "already_stock"}:
+            return _report(
+                kind,
+                mode=mode,
+                scope=RESTORE_APPROVAL_SCOPE,
+                approved=approved,
+                connection_attempted=True,
+                rolled_back=True,
+                **_backup_state(live, attempted=False),
+            )
+        progress = {"stage": stage}
+        try:
+            guards, confirmed = _locked_observation(
+                cursor, progress, backup_exists=live["backup_exists"]
+            )
+        finally:
+            stage = progress["stage"]
+        if kind == "legacy_ready":
+            return _noop_after_lock(
+                connection,
+                guards,
+                confirmed,
+                reviewed,
+                mode=mode,
+                scope=RESTORE_APPROVAL_SCOPE,
+                approved=approved,
+                expected_kind="legacy_ready",
+                image_ok=_exact_before_image,
+            )
+        ready_guard = _guard_block(guards)
+        if ready_guard is not None:
             rolled = _rollback(connection)
             return _report(
-                "blocked_stale_state" if not _same(confirmed, live, DATA_KEYS) else "blocked_backup_mismatch",
+                ready_guard,
                 mode=mode,
                 scope=RESTORE_APPROVAL_SCOPE,
                 approved=approved,
                 connection_attempted=True,
                 rolled_back=rolled,
-                migration_backup_retained=True,
+                **_backup_state(confirmed, attempted=False),
+            )
+        if not _same(confirmed, reviewed, EVIDENCE_KEYS) or not _legacy_preimage(confirmed):
+            rolled = _rollback(connection)
+            status = "blocked_stale_state" if not _same(confirmed, reviewed, DATA_KEYS) else "blocked_backup_mismatch"
+            if _same(confirmed, reviewed, DATA_KEYS) and classify_dim_product_stock_migration(confirmed) not in {
+                "legacy_ready",
+                "already_stock",
+            }:
+                status = classify_dim_product_stock_migration(confirmed)
+            return _report(
+                status,
+                mode=mode,
+                scope=RESTORE_APPROVAL_SCOPE,
+                approved=approved,
+                connection_attempted=True,
+                writes=writes,
+                rolled_back=rolled,
+                **_backup_state(confirmed, attempted=False),
             )
         stage = "restore_update"
         writes.append("restore_flags_and_effective_to")
@@ -916,32 +1536,32 @@ def execute_dim_product_stock_migration_restore(
         _assert_restored(after, confirmed)
         stage = "commit"
         connection.commit()
-        return _report(
-            "passed",
+        stage = "fresh_proof"
+        return _proven_commit_report(
+            connection_factory,
             mode=mode,
             scope=RESTORE_APPROVAL_SCOPE,
             approved=approved,
-            connection_attempted=True,
             writes=writes,
-            will_execute=True,
-            committed=True,
-            rolled_back=False,
-            migration_backup_retained=True,
-            restored_row_count=EXPECTED_ROW_COUNT,
+            attempted=False,
+            post_ok=lambda evidence, baseline=confirmed: _is_restored(evidence, baseline),
+            pre_ok=lambda evidence, baseline=confirmed: _still_preimage(evidence, baseline),
+            extra={"restored_row_count": EXPECTED_ROW_COUNT},
         )
-    except (oracledb.Error, StockMigrationVerificationError, TypeError, ValueError) as exc:
-        rolled = _rollback(connection) if connection is not None else False
-        return _report(
-            "failed",
+    except (oracledb.Error, StockMigrationVerificationError, TypeError, ValueError, AttributeError) as exc:
+        return _exception_outcome(
+            exc,
+            connection=connection,
+            connection_factory=connection_factory,
+            stage=stage,
+            writes=writes,
+            attempted=False,
+            approved=approved,
             mode=mode,
             scope=RESTORE_APPROVAL_SCOPE,
-            approved=approved,
-            connection_attempted=connection is not None,
-            writes=writes,
-            rolled_back=rolled,
-            migration_backup_retained=True,
-            stage=stage,
-            error_type=type(exc).__name__,
+            seen=confirmed if confirmed is not None else live,
+            post_ok=lambda evidence, baseline=confirmed: baseline is not None and _is_restored(evidence, baseline),
+            pre_ok=lambda evidence, baseline=confirmed: baseline is not None and _still_preimage(evidence, baseline),
         )
     finally:
         _close(cursor, "cursor")

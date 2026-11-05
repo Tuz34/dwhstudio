@@ -10,8 +10,10 @@ import pytest
 
 from dim_product_scd2_stock_migration import (
     EVIDENCE_KEYS,
+    GUARD_COUNT_NAMES,
     MIGRATE_UPDATE_SQL,
     MIGRATION_APPROVAL_SCOPE,
+    PASSING_GUARD_COUNTS,
     RESTORE_APPROVAL_SCOPE,
     RESTORE_UPDATE_SQL,
     classify_dim_product_stock_migration,
@@ -48,6 +50,7 @@ class _Cursor:
         self.after_update = dict(options.get("after_update", {}))
         self.after_create = dict(options.get("after_create", {}))
         self.raise_secret = bool(options.get("raise_secret", False))
+        self.guard_overrides = dict(options.get("guard_overrides", {}))
         self.statements: list[str] = []
         self.rowcount = -1
         self._rows: list[tuple] = []
@@ -63,6 +66,13 @@ class _Cursor:
             raise oracledb.DatabaseError("SECRET_TOKEN password=hidden")
         if sql.startswith("SET TRANSACTION"):
             self._rows = []
+            return
+        if "odi87:lock_target" in sql or "odi87:lock_backup" in sql:
+            self._rows = []
+            return
+        guard_name = next((name for name in GUARD_COUNT_NAMES if f"odi87:{name}" in sql), None)
+        if guard_name is not None:
+            self._rows = [(self.guard_overrides.get(guard_name, PASSING_GUARD_COUNTS[guard_name]),)]
             return
         if "odi87:target_metadata" in sql:
             self._rows = list(self.metadata)
@@ -157,6 +167,7 @@ class _Cursor:
 class _Connection:
     def __init__(self, cursor: _Cursor):
         self.cursor_instance = cursor
+        self.autocommit = False
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
@@ -240,9 +251,19 @@ def test_legacy_population_migrates_in_one_transaction_and_keeps_backup():
         "create_migration_backup",
         "migrate_current_flags_and_open_ended_dates",
     ]
+    assert result["backup_create_attempted"] is True
+    assert result["backup_verified"] is True
+    assert result["post_commit_verification"] == "verified"
     assert connection.commits == 1
     assert connection.closed is True
-    assert factory.calls == 1
+    assert factory.calls == 2
+    assert "SERIALIZABLE" not in upper
+    assert "READ COMMITTED" in upper
+    assert "SEARCH_CONDITION" not in sql
+    assert sql.index("odi87:enabled_target_trigger_count") < sql.index("odi87:create_backup")
+    assert sql.index("odi87:create_backup") < sql.index("odi87:lock_target")
+    assert sql.index("odi87:lock_target") < sql.index("odi87:lock_backup")
+    assert sql.index("odi87:lock_backup") < sql.index("odi87:migrate_update")
     assert sql.index("odi87:create_backup") < sql.index("odi87:migrate_update")
     assert 'CREATE TABLE "DWH"."ODI87_DIM_PRODUCT_MIG_BKP"' in sql
     assert "WHEN 'Y' THEN '1'" in sql
@@ -343,7 +364,19 @@ def test_stock_rerun_keeps_a_verified_legacy_preimage():
         ({"historical_open_sentinel_count": 1, "legacy_historical_flag_count": 1, "legacy_current_flag_count": 71, "legacy_open_ended_count": 71}, "blocked_invalid_dates"),
         ({"duplicate_legacy_current_groups": 1}, "blocked_duplicate_current"),
         ({"duplicate_product_sk_groups": 1}, "blocked_duplicate_or_null_keys"),
+        ({"null_natural_key_count": 1}, "blocked_duplicate_or_null_keys"),
+        ({"null_effective_from_count": 1}, "blocked_duplicate_or_null_keys"),
         ({"target_row_count": 73}, "blocked_unexpected_row_count"),
+        (
+            {
+                "historical_effective_to_on_or_after_stock_open_count": 1,
+                "legacy_historical_flag_count": 1,
+                "legacy_current_flag_count": 71,
+                "legacy_open_ended_count": 71,
+            },
+            "blocked_invalid_dates",
+        ),
+        ({"current_effective_from_after_stock_open_count": 1}, "blocked_invalid_dates"),
     ],
 )
 def test_invalid_and_mixed_states_block_before_the_factory(counts, expected):
@@ -425,6 +458,7 @@ def test_created_backup_that_does_not_match_is_retained_and_not_followed_by_dml(
 
     assert result["status"] == "blocked_backup_mismatch"
     assert result["migration_backup_retained"] is True
+    assert result["backup_verified"] is False
     assert result["automatic_drop_performed"] is False
     assert result["manual_recovery_review_required"] is True
     assert "odi87:create_backup" in sql
@@ -518,7 +552,8 @@ def test_restore_rewrites_only_flag_and_end_date_and_keeps_backup():
     assert 'UPDATE "DWH"."ODS_SH_PRODUCTS"' not in upper
     assert '("CURRENT_FLAG", "EFFECTIVE_TO")' in RESTORE_UPDATE_SQL
     assert "INSERT_DATE" not in RESTORE_UPDATE_SQL
-    assert factory.calls == 1
+    assert "DELETE" not in RESTORE_UPDATE_SQL.upper()
+    assert factory.calls == 2
     assert connection.commits == 1
 
 
@@ -630,7 +665,9 @@ def test_stock_contract_agrees_across_sql_proof_and_mapping_expressions():
 
     for statement in (expire, insert, proof, candidate_sql):
         assert "'1'" in statement
-        assert "DATE '9999-12-31'" not in statement or "NOT IN" in statement or "<>" in statement
+        assert "DATE '9999-12-31'" not in statement or any(
+            token in statement for token in ("NOT IN", "<>", ">=")
+        )
         assert "'Y'" not in statement
     assert STOCK_OPEN_ENDED_DATE_SQL in insert
     assert STOCK_OPEN_ENDED_DATE_SQL in proof

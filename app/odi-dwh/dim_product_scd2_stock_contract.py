@@ -45,12 +45,19 @@ EFFECTIVE_TO_DATA_TYPE = "DATE"
 
 
 def stock_invalid_effective_sql() -> str:
-    """Stock DQ: 9999 is gone, current rows end at 2400, history is not open-ended."""
+    """Stock DQ rejects dates beyond the open bound, including a sentinel time part.
+
+    A historical end on or after 2400-01-01 is invalid. That includes midnight
+    2400-01-01, any later closed date, and 9999-12-31 with or without a time.
+    A current row whose start is after 2400-01-01 is invalid. A closed
+    historical end before 2400-01-01 stays valid.
+    """
     return (
         '"EFFECTIVE_FROM" > "EFFECTIVE_TO"'
-        f" OR \"EFFECTIVE_TO\" = {PRE_MIGRATION_OPEN_ENDED_DATE_SQL}"
+        f' OR "EFFECTIVE_TO" >= {PRE_MIGRATION_OPEN_ENDED_DATE_SQL}'
         f" OR ({STOCK_CURRENT_MATCH_SQL} AND \"EFFECTIVE_TO\" <> {STOCK_OPEN_ENDED_DATE_SQL})"
-        f" OR ({STOCK_HISTORICAL_MATCH_SQL} AND \"EFFECTIVE_TO\" = {STOCK_OPEN_ENDED_DATE_SQL})"
+        f" OR ({STOCK_CURRENT_MATCH_SQL} AND \"EFFECTIVE_FROM\" > {STOCK_OPEN_ENDED_DATE_SQL})"
+        f" OR ({STOCK_HISTORICAL_MATCH_SQL} AND \"EFFECTIVE_TO\" >= {STOCK_OPEN_ENDED_DATE_SQL})"
     )
 
 
