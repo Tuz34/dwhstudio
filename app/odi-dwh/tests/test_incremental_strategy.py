@@ -459,7 +459,8 @@ def test_execute_incremental_append_writes_server_side_and_advances_watermark_af
     assert 'INSERT INTO "DWH"."ODS_SH_SALES"' in sql
     assert 'SELECT "AMOUNT_SOLD", "CHANNEL_ID", "CUST_ID", "PROD_ID", "PROMO_ID", "TIME_ID" FROM "SH"."SALES"' in sql
     assert 'WHERE "TIME_ID" > :last_watermark' in sql
-    assert params == {"last_watermark": datetime(2026, 6, 19)}
+    assert 'AND "TIME_ID" <= :window_end' in sql
+    assert params == {"last_watermark": datetime(2026, 6, 19), "window_end": datetime(2026, 6, 20)}
     assert target_write_conn.commits == 1
     assert target_write_conn.rollbacks == 0
     assert watermark_writer.last_conn is target_write_conn
