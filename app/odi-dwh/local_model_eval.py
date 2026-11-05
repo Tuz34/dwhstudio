@@ -1652,8 +1652,9 @@ def _chat_payload(model: str, prompt: str, response_format: str | None = None) -
 def _extract_chat_content(response: Any) -> str:
     try:
         body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
-        return str(body["choices"][0]["message"]["content"])
-    except Exception:
+        content = body["choices"][0]["message"]["content"]
+        return content if isinstance(content, str) else ""
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         return ""
 
 
@@ -1666,7 +1667,7 @@ def _extract_chat_metadata(response: Any) -> dict[str, Any]:
             "finish_reason": choice.get("finish_reason"),
             "has_reasoning_content": bool(message.get("reasoning_content") or message.get("reasoning")),
         }
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         return {"finish_reason": None, "has_reasoning_content": False}
 
 
