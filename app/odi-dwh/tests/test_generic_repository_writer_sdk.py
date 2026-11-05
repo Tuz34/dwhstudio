@@ -25,6 +25,9 @@ SCENARIOS = {
     "begin_failed": {"begin_raises": True},
     "standalone_close": {"standalone": True, "close_raises": True},
     "bad_defaults": {"option_defaults": {"TRUNCATE": True, "DELETE_ALL": True, "CREATE_TARG_TABLE": True, "COMMIT": False}},
+    "final_ikm_reset": {"ikm_reset_on_final_validate": True},
+    "foreign_ikm": {"ikms": [{"name": fake.IKM_NAME, "project": "OTHER"}]},
+    "foreign_lkm": {"lkms": [{"name": fake.LKM_NAME, "project": "OTHER"}]},
 }
 
 
@@ -52,6 +55,10 @@ def mapped(tmp_path_factory):
     if java is None or not fake.GROOVY_JAR.is_file():
         pytest.skip("Local Groovy unavailable; nothing downloaded")
     classes = dict(fake._CLASSES)
+    design = "oracle.odi.domain.mapping.physical.MapPhysicalDesign"
+    classes[design] = classes[design].replace(
+        "if (call == 2 && World.spec.options_reset_on_final_validate)",
+        "if (call == 2 && World.spec.ikm_reset_on_final_validate) target.km = null\n        if (call == 2 && World.spec.options_reset_on_final_validate)")
     finder = "oracle.odi.domain.model.finder.IOdiDataStoreFinder"
     classes[finder] = classes[finder].replace(
         "INSERT_DATE: null, UPDATE_DATE: null, SOURCE_SYSTEM: null, ETL_BATCH_ID: null",
@@ -73,7 +80,8 @@ def fake_defaults():
                 DELETE_ALL=False, CREATE_TARG_TABLE=False, COMMIT=True)
 
 
-@pytest.mark.parametrize("case", ["final_reset", "final_new_ap", "ambiguous_ikm", "ambiguous_lkm", "final_error"])
+@pytest.mark.parametrize("case", ["final_reset", "final_new_ap", "ambiguous_ikm", "ambiguous_lkm", "final_error",
+    "final_ikm_reset", "foreign_ikm", "foreign_lkm"])
 def test_generic_mapping_never_commits_invalid_or_ambiguous_final_design(mapped, case):
     run = mapped[case]
     assert run["committed"] is False and "commit" not in run["trace"]

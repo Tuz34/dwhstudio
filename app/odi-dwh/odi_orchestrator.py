@@ -59,6 +59,7 @@ GROOVY_ACTION_REGISTRY = {
     "delete_mapping.groovy": _action("repository_write"),
     "diagnose_ikm.groovy": _action("read_only"),
     "execution_identity_probe.groovy": _action("read_only"),
+    "dim_product_audit_role_repair.groovy": _action("repository_write"),
     "dim_product_scd2_capability_probe.groovy": _action("read_only"),
     "dim_product_scd2_datastore_register.groovy": _action("repository_write"),
     "dim_product_scd2_ikm_import.groovy": _action("repository_write"),
@@ -2200,6 +2201,35 @@ class OdiOrchestrator:
                 "error": "ODI SCD2 mapping output parsing failed.",
                 "error_type": type(exc).__name__,
             }
+
+    def dim_product_audit_role_action(
+        self,
+        *,
+        action: object,
+        approved: object = False,
+        approval_scope: object = None,
+        implementation_review_status: object = None,
+        no_active_odi_session_writes_attested: object = False,
+        receipt_dir: object = None,
+    ) -> dict:
+        """Preflight, repair or restore the four fixed DIM_PRODUCT audit roles after all gates."""
+        from dim_product_audit_role_repair import SCRIPT_NAME, run_audit_role_action
+
+        def run_script(parameters: dict[str, str]) -> str:
+            with groovy_approval_context(approved):
+                return self.run_groovy(SCRIPT_NAME, parameters)
+
+        return run_audit_role_action(
+            action=action,
+            approved=approved,
+            approval_scope=approval_scope,
+            implementation_review_status=implementation_review_status,
+            no_active_odi_session_writes_attested=no_active_odi_session_writes_attested,
+            receipt_dir=receipt_dir,
+            project=ODI_PROJECT,
+            folder=ODI_FOLDER,
+            run_script=run_script,
+        )
 
     def dim_product_scd2_mapping_probe(self, *, approved: object = False) -> dict:
         """Inspect the fixed mapping with metadata-only ODI SDK finders."""
