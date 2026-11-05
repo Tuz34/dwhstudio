@@ -185,7 +185,7 @@ def test_other_mapping_full_path_is_unchanged(monkeypatch):
     batch_id = outcome.payload.pop("batch_id")
     assert batch_id.startswith("RUN-")
     assert outcome.payload == {"status": "SUCCESS", "scenario": scenario, "version": version,
-                               "truncate_target_table": True, "remote": done}
+                               "context": "DEVELOPMENT", "truncate_target_table": True, "remote": done}
     orchestrator.update_mapping.assert_called_once_with(
         mapping_name=name, operation="update_km", truncate_target_table=True)
     orchestrator.generate_scenario_metadata.assert_called_once_with(
