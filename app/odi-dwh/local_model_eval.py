@@ -1652,7 +1652,8 @@ def _chat_payload(model: str, prompt: str, response_format: str | None = None) -
 def _extract_chat_content(response: Any) -> str:
     try:
         body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
-        return str(body["choices"][0]["message"]["content"])
+        content = body["choices"][0]["message"]["content"]
+        return content if isinstance(content, str) else ""
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         return ""
 

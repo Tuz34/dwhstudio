@@ -837,6 +837,22 @@ def test_unexpected_json_callback_failure_is_redacted_by_capture_boundary(failur
     assert "synthetic private" not in json.dumps(report)
 
 
+@pytest.mark.parametrize("content", [None, 0, False, [], {}, {"text": "synthetic"}])
+def test_capture_null_or_nontext_content_is_not_a_model_answer(content):
+    class Response:
+        headers = {"content-type": "application/json"}
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+
+    report = evals.capture_predictions(prompt_pack={"prompts": evals.build_prompt_pack()["prompts"][:1]},
+        base_url="http://localhost:1234/v1", model="synthetic-model", http_post=lambda *args, **kwargs: Response())
+    assert report["captured"] == 0 and report["outputs"] == {}
+    assert report["failed"] == 1 and report["empty"] == 1
+    assert report["results"][0]["status"] == "empty_output"
+
+
 def test_capture_predictions_blocks_sensitive_model_output():
     prompt_pack = {
         "prompts": [evals.build_prompt_pack()["prompts"][0]],
