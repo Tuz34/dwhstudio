@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { FaBrain, FaUser, FaCopy, FaCheck, FaPlay, FaCircleInfo,
          FaTriangleExclamation, FaDiagramProject, FaMicrochip, FaRobot, FaCloud } from 'react-icons/fa6';
+import { isDmlAction } from './dmlActions';
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
@@ -29,14 +30,14 @@ function SqlBlock({ query, onRun }) {
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${isError ? 'bg-red-400' : 'bg-emerald-400'}`} />
           <span className="text-xs text-slate-300 font-medium">{query.label || 'SQL'}</span>
-          {query.action === 'dml' && (
+          {isDmlAction(query.action) && (
             <span className="badge-red text-[10px] px-1.5 py-0.5">DML</span>
           )}
         </div>
         {!query.auto_executed && (
           <div className="flex items-center gap-1">
             <CopyButton text={query.sql} />
-            {onRun && query.action !== 'dml' && (
+            {onRun && !isDmlAction(query.action) && (
               <button
                 onClick={() => onRun(query)}
                 className="flex items-center gap-1 px-2 py-1 rounded text-xs text-sky-400 hover:text-sky-300 hover:bg-white/10 transition-colors"

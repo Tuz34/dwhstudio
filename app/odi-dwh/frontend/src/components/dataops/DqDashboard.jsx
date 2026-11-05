@@ -6,17 +6,12 @@ import {
   buildAutofixColumnRequest,
   buildSyncMappingRequest,
 } from './dqActionRequests';
+import { dqScoreDisplay } from './dqScoreDisplay';
 
 function severityClass(severity) {
   if (severity === 'ERROR') return 'bg-rose-50/40 text-rose-600 border-rose-100';
   if (severity === 'WARNING') return 'bg-amber-50/40 text-amber-600 border-amber-100';
   return 'bg-blue-50/40 text-blue-600 border-blue-100';
-}
-
-function scoreColor(score) {
-  if (score > 90) return { bar: 'bg-emerald-500', text: 'text-emerald-600' };
-  if (score > 70) return { bar: 'bg-amber-400', text: 'text-amber-600' };
-  return { bar: 'bg-rose-500', text: 'text-rose-600' };
 }
 
 function needsOdiSync(finding) {
@@ -190,8 +185,7 @@ export function DqDashboard() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {scores.map((d, i) => {
-                  const score = d.score || 0;
-                  const colors = scoreColor(score);
+                  const display = dqScoreDisplay(d.score);
                   return (
                     <tr key={i} className="hover:bg-slate-50/60 transition-colors h-14">
                       <td className="px-5 py-3">
@@ -202,9 +196,9 @@ export function DqDashboard() {
                       <td className="px-4 py-3">
                         <div className="flex flex-col items-center gap-1">
                           <div className="w-24 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                            <div className={clsx('h-full transition-all duration-700', colors.bar)} style={{ width: `${score}%` }} />
+                            <div className={clsx('h-full transition-all duration-700', display.bar)} style={{ width: display.width }} />
                           </div>
-                          <span className={clsx('text-[11px] font-black', colors.text)}>%{score}</span>
+                          <span className={clsx('text-[11px] font-black', display.text)}>{display.label}</span>
                         </div>
                       </td>
                       <td className="px-5 py-3 text-right">

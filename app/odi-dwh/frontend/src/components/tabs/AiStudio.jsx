@@ -3,6 +3,7 @@ import { useApp, useDispatch } from '../../store/AppContext';
 import { ChatArea } from '../chat/ChatArea';
 import { InputArea } from '../chat/InputArea';
 import { DmlBanner } from '../chat/DmlBanner';
+import { findPendingDmlQuery } from '../chat/dmlActions';
 import { TableSidebar } from '../sidebars/TableSidebar';
 import { askAi, clearHistory, executeQuery, exportExcel } from '../../services/api';
 
@@ -74,7 +75,7 @@ export function AiStudio() {
       });
 
       // Handle pending DML
-      const dmlQuery = (data.queries || []).find(q => q.action === 'dml');
+      const dmlQuery = findPendingDmlQuery(data.queries);
       if (dmlQuery) {
         dispatch({ type: 'SET_PENDING_DML', payload: { sql: dmlQuery.sql, label: dmlQuery.label } });
       }
