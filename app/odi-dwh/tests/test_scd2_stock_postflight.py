@@ -207,6 +207,23 @@ def test_aggregate_row_width_is_pinned(row):
     assert result["status"] == "error" and result["counts"] == {}
 
 
+@pytest.mark.parametrize("aggregate", ["count", "date"])
+def test_only_one_aggregate_kind_is_widened(monkeypatch, aggregate):
+    original = Cursor.execute
+
+    def execute(cursor, sql):
+        original(cursor, sql)
+        if aggregate == "count" and "COUNT(*)" in sql:
+            cursor.rows = [(0, 99)]
+        elif aggregate == "date" and "TO_CHAR(MAX(" in sql:
+            cursor.rows = [("2026-01-01", "EXTRA")]
+
+    monkeypatch.setattr(Cursor, "execute", execute)
+    result = collect(Connection())
+    assert result["status"] == "error" and result["counts"] == {}
+    assert result["stock_contract_valid"] is False
+
+
 @pytest.mark.parametrize("stage", ["rollback", "cursor_close", "connection_close"])
 @pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
 def test_process_control_during_cleanup_still_attempts_all_resources(stage, error):
@@ -233,6 +250,7 @@ def test_source_count_is_metadata_not_a_business_parity_proof():
     assert result["status"] == "ok" and result["counts"]["source_count"] == 3
     assert result["source_current_count_equal"] is False
     assert result["business_parity_proven"] is False and result["physical_noop_proven"] is False
+    assert result["history_overlap_checked"] is False
 
 
 @pytest.mark.parametrize("source", [[], ["DWH", "SRC_TEST"], (), ("DWH",), ("DWH", None), ("SYS", "SRC_TEST"), ("DWH", "X;DELETE")])
@@ -252,4 +270,17 @@ def test_custom_python_types_cannot_supply_formatted_sql():
                                ("DWH", "DIM_TEST", [Label("NK")]), ("DWH", "DIM_TEST", Keys(["NK"]))]:
         calls = []
         result = postflight.collect_stock_postflight(owner, table, keys, lambda: calls.append(True))
+        assert result["status"] == "invalid_request" and calls == []
+
+
+def test_source_string_subclasses_are_rejected_before_connection():
+    class Label(str):
+        def __format__(self, spec):
+            return "MALFORMED_SQL_LABEL"
+
+    for source in [(Label("DWH"), "SRC_TEST"), ("DWH", Label("SRC_TEST"))]:
+        calls = []
+        result = postflight.collect_stock_postflight(
+            "DWH", "DIM_TEST", ["NK"], lambda: calls.append(True), source=source
+        )
         assert result["status"] == "invalid_request" and calls == []
