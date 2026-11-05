@@ -1,4 +1,4 @@
-# ODI-86: environment-dependent pytest exclusions are empty.
-# Three developer-home Codex skill tests stay deselected in
-# .github/workflows/ci.yml. Their SKILL.md files live under the developer
-# home directory and are not a tracked contract in this repository.
+# ODI-86: pytest exclusions stay empty.
+# A non-comment, non-blank line is a node id and fails CI.
+# Skill templates under app/odi-dwh/docs/agent-skills/ are source contracts.
+# CI does not install or activate them.

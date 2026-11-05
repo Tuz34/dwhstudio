@@ -1,0 +1,6 @@
+interface:
+  display_name: "ODI Review"
+  short_description: "Run targeted read-only ODI security reviews"
+  default_prompt: "Use $odi-review to review the named Linear issue and current files without modifying them."
+policy:
+  allow_implicit_invocation: false

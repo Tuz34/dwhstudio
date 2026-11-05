@@ -133,7 +133,7 @@ Examples from the code and tests (Oracle sample schemas `HR` and `SH` as sources
 
 ## Tests and quality gates
 
-GitHub Actions runs these gates, a frontend build, and a secret scan for every pull request and main push. Pytest no longer deselects environment-dependent cases. Three developer-home Codex skill checks remain deselected because their skill files are not in this repository.
+GitHub Actions runs these gates, a frontend build, and a secret scan for every pull request and main push. Pytest runs with no deselections. Skill templates in `app/odi-dwh/docs/agent-skills/` are tracked source contracts; CI does not install or activate them.
 
 From `app/odi-dwh`:
 
