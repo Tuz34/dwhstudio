@@ -110,6 +110,13 @@ try {
     if (targetIkm != TARGET_IKM) {
         throw new IllegalStateException("Fixed target IKM contract mismatch")
     }
+    [FLOW_CONTROL: false, STATIC_CONTROL: false, RECYCLE_ERRORS: false,
+     TRUNCATE: false, DELETE_ALL: false, CREATE_TARG_TABLE: false, COMMIT: true].each { optionName, expected ->
+        def option = targetNodes[0].getIKMOptionValue(optionName)
+        if (option == null || !String.valueOf(expected).equalsIgnoreCase(String.valueOf(option.getOptionValue()))) {
+            throw new IllegalStateException("Fixed stock IKM option contract mismatch")
+        }
+    }
     String integrationType = targetComponent.getIntegrationType()
     if (!(integrationType in ["SCD", "SLOWLY_CHANGING_DIMENSION"])) {
         throw new IllegalStateException("Fixed integration type contract mismatch")
