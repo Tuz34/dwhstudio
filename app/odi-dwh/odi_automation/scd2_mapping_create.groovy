@@ -58,7 +58,44 @@ def safeFlags = {
 
 // Fixed allowlisted reason codes or the exception class simple name; the exception
 // message is never returned (it could carry repository values).
-final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable", "ProjectFolderUnavailable", "MappingAlreadyExists", "ScenarioAlreadyExists", "SourceDatastoreUnavailable", "TargetDatastoreUnavailable", "SourceColumnsMissing", "ScdRoleContractMismatch", "IkmUnavailable", "LkmUnavailable", "IkmIntegrationTypeMismatch", "IntegrationTypeMismatch", "SourceAttributeUnavailable", "UnmappedTargetAttribute", "TargetPhysicalNodeUnavailable", "StagingLocationUnavailable", "TargetNodeLostAfterReset", "IkmAssignmentMismatch", "LkmAssignmentMismatch", "LkmDbLinkRemains", "MappingCoverageMismatch", "MappingValidationFailed", "IkmOptionMismatch"] as Set
+final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable", "ProjectFolderUnavailable", "MappingAlreadyExists", "ScenarioAlreadyExists", "SourceDatastoreUnavailable", "TargetDatastoreUnavailable", "SourceColumnsMissing", "ScdRoleContractMismatch", "IkmUnavailable", "LkmUnavailable", "IkmIntegrationTypeMismatch", "IntegrationTypeMismatch", "SourceAttributeUnavailable", "UnmappedTargetAttribute", "TargetPhysicalNodeUnavailable", "StagingLocationUnavailable", "TargetNodeLostAfterReset", "IkmAssignmentMismatch", "LkmAssignmentMismatch", "LkmDbLinkRemains", "MappingCoverageMismatch", "MappingValidationFailed", "IkmOptionMismatch", "SourceAliasInvalid", "MappingExpressionDrift"] as Set
+
+// ODI87-STABLE-AUDIT-BEGIN (kept byte-identical with scd2_probe.groovy; a test compares both blocks)
+// Stable audit creation expressions for the stock 1/0 + 2400 SCD2 profile. A source row that
+// matches exactly one current target version (all natural-key columns equal, every tracked
+// attribute equal null-safely) keeps that version's INSERT_DATE and SOURCE_SYSTEM. UPDATE_DATE
+// and ETL_BATCH_ID are kept only when the user overwrite attributes are unchanged as well; any
+// actual business delta refreshes them. New keys and new versions get the creation defaults.
+// Existing NULL audit values are preserved as NULL; no null-replacement function is applied.
+// More than one matching current version makes the scalar subquery fail natively; no row
+// limiting or tie-breaking hides it.
+final String STABLE_AUDIT_CURRENT_ALIAS = "SCD2_CUR"
+final Map<String, String> STABLE_AUDIT_DEFAULTS = [
+    INSERT_DATE: "CURRENT_TIMESTAMP",
+    UPDATE_DATE: "CURRENT_TIMESTAMP",
+    SOURCE_SYSTEM: "'ODI_SCD2'",
+    ETL_BATCH_ID: "<%=odiRef.getSession(\"SESS_NO\")%>",
+]
+final List<String> STABLE_AUDIT_VERSION_COLUMNS = ["INSERT_DATE", "SOURCE_SYSTEM"]
+def stableAuditText = { String column, String table, String alias, List<String> keys, List<String> tracked, List<String> overwrite ->
+    final java.util.regex.Pattern NAME = ~/^[A-Z0-9_#]{1,30}$/
+    String cur = STABLE_AUDIT_CURRENT_ALIAS
+    List<String> parts = table.tokenize(".")
+    if (!STABLE_AUDIT_DEFAULTS.containsKey(column) || parts.size() != 2 || !parts.every { it ==~ NAME }
+            || alias == null || !(alias ==~ NAME) || alias == cur || keys.isEmpty()
+            || !(keys + tracked + overwrite).every { it ==~ NAME }) {
+        throw new IllegalStateException("SourceAliasInvalid")
+    }
+    List<String> compared = STABLE_AUDIT_VERSION_COLUMNS.contains(column) ? tracked : tracked + overwrite
+    List<String> predicate = keys.toSorted().collect { "${cur}.${it} = ${alias}.${it}".toString() }
+    predicate.add("${cur}.CURRENT_FLAG = '1'".toString())
+    compared.toSorted().each { predicate.add("DECODE(${cur}.${it}, ${alias}.${it}, 0, 1) = 0".toString()) }
+    String where = predicate.join(" AND ")
+    ("CASE WHEN EXISTS (SELECT 1 FROM ${table} ${cur} WHERE ${where}) " +
+        "THEN (SELECT ${cur}.${column} FROM ${table} ${cur} WHERE ${where}) " +
+        "ELSE ${STABLE_AUDIT_DEFAULTS[column]} END").toString()
+}
+// ODI87-STABLE-AUDIT-END
 def reasonCode = { Throwable e ->
     String message = e.getMessage()
     if (e instanceof IllegalStateException && message != null && REASON_CODES.contains(message)) {
@@ -130,11 +167,11 @@ try {
         EFFECTIVE_FROM: "CURRENT_DATE",
         EFFECTIVE_TO: "TO_DATE('24000101','YYYYMMDD')",
         CURRENT_FLAG: "1",
-        INSERT_DATE: "CURRENT_TIMESTAMP",
-        UPDATE_DATE: "CURRENT_TIMESTAMP",
-        SOURCE_SYSTEM: "'ODI_SCD2'",
-        ETL_BATCH_ID: "<%=odiRef.getSession(\"SESS_NO\")%>",
     ]
+    if (!(naturalKey + tracked + overwrite).every { it ==~ ID } || naturalKey.isEmpty()
+            || (directColumns as List).any { AUDIT_OVERWRITE_COLUMNS.contains(it) || fixedExpressions.containsKey(it) }) {
+        throw new IllegalStateException("InvalidParameter")
+    }
 
     txnMgr = odi.getTransactionManager()
     txnStatus = txnMgr.getTransaction(new DefaultTransactionDefinition())
@@ -214,20 +251,35 @@ try {
         throw new IllegalStateException("IntegrationTypeMismatch")
     }
     sourceComponent.connectTo(targetComponent)
+    String sourceAlias = sourceComponent.getName()
+    if (sourceAlias == null || !(sourceAlias ==~ ID) || sourceAlias == STABLE_AUDIT_CURRENT_ALIAS) {
+        throw new IllegalStateException("SourceAliasInvalid")
+    }
+    String targetReference = targetOwner + "." + targetTable
+    Map<String, String> auditExpressions = AUDIT_OVERWRITE_COLUMNS.collectEntries { String column ->
+        [(column): stableAuditText(column, targetReference, sourceAlias, naturalKey, tracked, overwrite)]
+    }
+    // Every expression this builder sets is recorded and re-read after the final validation.
+    Map<String, String> expectedTexts = [:]
 
     targetComponent.getAttributes().each { targetAttribute ->
         String name = targetAttribute.getName().toUpperCase()
+        String text
         if (directColumns.contains(name)) {
             def sourceAttribute = sourceComponent.getAttributes().find { it.getName()?.equalsIgnoreCase(name) }
             if (sourceAttribute == null) {
                 throw new IllegalStateException("SourceAttributeUnavailable")
             }
-            targetAttribute.setExpressionText(sourceComponent.getName() + "." + sourceAttribute.getName())
+            text = sourceAlias + "." + sourceAttribute.getName()
         } else if (fixedExpressions.containsKey(name)) {
-            targetAttribute.setExpressionText(fixedExpressions[name])
+            text = fixedExpressions[name]
+        } else if (auditExpressions.containsKey(name)) {
+            text = auditExpressions[name]
         } else {
             throw new IllegalStateException("UnmappedTargetAttribute")
         }
+        targetAttribute.setExpressionText(text)
+        expectedTexts[targetAttribute.getName()] = text
         if (name == skName) {
             targetAttribute.setExecuteOnHint(MapExpression.ExecuteOnLocation.TARGET)
             targetAttribute.setCheckNotNullIndicator(false)
@@ -325,6 +377,25 @@ try {
     if (finalAccessPoints.size() != accessPoints.size() || finalAccessPoints.any { !lkmOk(it) }) {
         throw new IllegalStateException("LkmAssignmentMismatch")
     }
+    // The final validation must not silently change any expression, including the stable audit
+    // profile, and audit expressions must not be forced onto the target. Texts are never output.
+    List finalAttributes = targetComponent.getAttributes()
+    if (finalAttributes.size() != expectedTexts.size() || finalAttributes.any { finalAttribute ->
+            expectedTexts[finalAttribute.getName()] != finalAttribute.getExpression()?.getText() }) {
+        throw new IllegalStateException("MappingExpressionDrift")
+    }
+    if (finalAttributes.any { finalAttribute ->
+            AUDIT_OVERWRITE_COLUMNS.contains(finalAttribute.getName()?.toUpperCase()) &&
+                finalAttribute.getExecuteOnHint()?.name() == "TARGET" }) {
+        throw new IllegalStateException("MappingExpressionDrift")
+    }
+    int stableAuditCount = finalAttributes.count { finalAttribute ->
+        String name = finalAttribute.getName()?.toUpperCase()
+        auditExpressions.containsKey(name) && auditExpressions[name] == finalAttribute.getExpression()?.getText()
+    }
+    if (stableAuditCount != AUDIT_OVERWRITE_COLUMNS.size()) {
+        throw new IllegalStateException("MappingExpressionDrift")
+    }
     commitAttempted = true
     txnMgr.commit(txnStatus)
     commitAcknowledged = true
@@ -347,6 +418,7 @@ try {
             target_ikm: TARGET_IKM,
             access_point_count: accessPoints.size(),
             lkm_assigned_count: accessPoints.size(),
+            stable_audit_expression_count: stableAuditCount,
             commit_completed: true,
         ],
     ])

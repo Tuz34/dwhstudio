@@ -129,9 +129,15 @@ def mapping = new FakeMapping(events: events, results: {json.dumps(results)}, no
     materialize: {str(materialize).lower()}, explode: {str(explode).lower()},
     issuesByCall: {json.dumps(list(issues))})
 def design = new Expando(getAllAPNodes: {{ apNodes }})
-def attribute = new Expando(getExpression: {{ "EXPR" }})
-def targetComponent = new Expando(getAttributes: {{ [attribute] }})
-def target = new Expando(getColumns: {{ ["COL"] }})
+def AUDIT_OVERWRITE_COLUMNS = ["INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"]
+// The fragment rechecks every expression after the final validation; texts stay in the harness.
+def auditExpressions = AUDIT_OVERWRITE_COLUMNS.collectEntries {{ [(it): "STABLE_" + it] }}
+def expectedTexts = [COL: "EXPR"] + auditExpressions
+def attributes = expectedTexts.keySet().collect {{ n ->
+    new Expando(getName: {{ n }}, getExpression: {{ new Expando(getText: {{ expectedTexts[n] }}) }}, getExecuteOnHint: {{ null }})
+}}
+def targetComponent = new Expando(getAttributes: {{ attributes }})
+def target = new Expando(getColumns: {{ attributes }})
 boolean commitAttempted = false
 boolean commitAcknowledged = false
 def lockedOptions = [FLOW_CONTROL:false, STATIC_CONTROL:false, RECYCLE_ERRORS:false,
