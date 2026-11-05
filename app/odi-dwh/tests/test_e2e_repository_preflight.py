@@ -158,7 +158,7 @@ def test_verified_source_identity_is_transported_to_actual_binding(monkeypatch):
 
 
 @pytest.mark.parametrize("output", [
-    json.dumps({"tool": "odi.mapping_preflight", "status": "blocked", "side_effects": False, "code": "ikm_missing"}),
+    json.dumps({"tool": "odi.mapping_preflight", "status": "blocked", "side_effects": False, "code": "ikm_not_imported"}),
     json.dumps({"tool": "odi.mapping_preflight", "status": "blocked", "side_effects": False, "code": "ikm_ambiguous"}),
     "invalid response",
 ])
@@ -177,7 +177,7 @@ def test_real_wrapper_blocks_target_connection_drop_grants_and_audit(output, mon
         monkeypatch.setattr(module, name, guard)
         guards.append(guard)
     result = generator.generate_from_params(dict(BASE, drop_target_if_exists=True, replace_existing_mapping=True))
-    assert result["error_code"] == "repository_preflight_failed"
+    assert result["error_code"] in {"ikm_not_imported", "repository_preflight_failed"}
     assert run.call_args.args[0] == "mapping_preflight.groovy"
     assert run.call_count == 1
     for guard in guards:

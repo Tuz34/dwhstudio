@@ -99,6 +99,8 @@ class MappingState(TypedDict, total=False):
     approval_status: str           # "pending" / "approved" / "rejected"
     overall_status: str            # "running" / "success" / "failed"
     error: str | None              # Last error message
+    error_code: str | None         # Stable safe failure code; survives response redaction
+    repository_preflight: dict     # Blocked preflight metadata: status and code only
     log: list[dict]                # All step logs
     completed_steps: list[str]     # Completed step names
 
@@ -276,6 +278,8 @@ def node_create_table(state: MappingState) -> dict:
             return {
                 "current_step": "create_table",
                 "overall_status": "failed",
+                "error_code": blocked.error_code,
+                "repository_preflight": {**blocked.detail, "status": "BLOCKED"},
                 "error": f"Repository preflight blocked: {code or 'repository_preflight_failed'}",
                 "log": _add_log(state, "repository_preflight", "FAILED", str(code or "blocked")),
             }
@@ -464,13 +468,15 @@ def node_finalize(state: MappingState) -> dict:
     else:
         final_status = "success"
 
-    # Save to MAPPING_LOG
-    try:
-        mg = MappingGenerator()
-        mg._batch_id = state.get("batch_id", "unknown")
-        mg._log_to_mapping_log(params, final_status.upper(), state.get("error"))
-    except Exception as e:
-        logger.warning("Could not write MAPPING_LOG: %s", e)
+    # Save to MAPPING_LOG. A blocked repository preflight precedes every persistent step, as in the
+    # classic engine, so it writes nothing.
+    if state.get("repository_preflight", {}).get("status") != "BLOCKED":
+        try:
+            mg = MappingGenerator()
+            mg._batch_id = state.get("batch_id", "unknown")
+            mg._log_to_mapping_log(params, final_status.upper(), state.get("error"))
+        except Exception as e:
+            logger.warning("Could not write MAPPING_LOG: %s", e)
 
     logger.info("[%s] Pipeline completed: %s", state.get("batch_id"), final_status)
 

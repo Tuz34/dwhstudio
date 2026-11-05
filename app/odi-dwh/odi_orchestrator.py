@@ -2279,6 +2279,9 @@ class OdiOrchestrator:
             return blocked
         try:
             exact = resolve_approved_ikm(ikm_name, "IU", ODI_APPROVED_IKMS, ODI_IKM_PRIORITY)
+        except ValueError:
+            return {**blocked, "code": "ikm_not_approved"}
+        try:
             if exact != ikm_name or bool(src_owner) != bool(src_table):
                 raise ValueError("Invalid preflight request")
             for identifier in (context, src_owner, src_table):

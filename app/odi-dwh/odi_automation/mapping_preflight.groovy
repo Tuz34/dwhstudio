@@ -12,7 +12,7 @@ import oracle.odi.domain.topology.OdiContext
 def inspectIkm = { ikms, String requested ->
     def matches = ikms.findAll { it.getName().equalsIgnoreCase(requested) }
     if (matches.size() != 1) {
-        return [status: "blocked", code: matches.isEmpty() ? "ikm_missing" : "ikm_ambiguous"]
+        return [status: "blocked", code: matches.isEmpty() ? "ikm_not_imported" : "ikm_ambiguous"]
     }
     String identifier = matches[0].getInternalId()?.toString()
     if (!(identifier ==~ /[0-9]+/)) throw new IllegalStateException("RepositoryIdentityUnavailable")
