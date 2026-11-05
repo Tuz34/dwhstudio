@@ -123,3 +123,20 @@ def test_real_transport_preserves_reviewed_failure_envelope(monkeypatch, script)
     _prepare_runtime(monkeypatch, _Completed(stdout=output))
     with odi_orchestrator.groovy_approval_context(True):
         assert odi_orchestrator.OdiOrchestrator().run_groovy(script, {}) == output
+
+
+@pytest.mark.parametrize("state", [failure(), failure(outcome="committed"), failure(outcome="rolled_back")])
+def test_generation_surfaces_step_recovery_flags_at_top_level(state):
+    import scd2_service
+    report, _ = scd2_service._generate_response("partial_failure_mapping_create", None, [state], 502)
+    expected_unknown = state["side_effects"] is None
+    assert report["outcome_unknown"] is expected_unknown
+    assert report["manual_review_required"] is (expected_unknown or state["side_effects"] is True)
+
+
+def test_clean_generation_has_no_manual_flag_and_partial_ddl_has_one():
+    import scd2_service
+    clean, _ = scd2_service._generate_response("generated", None, [], 200)
+    assert clean["manual_review_required"] is False and clean["outcome_unknown"] is False
+    failed, _ = scd2_service._generate_response("partial_failure_target_ddl", None, [{"sequence_created": True}], 502)
+    assert failed["manual_review_required"] is True and failed["known_side_effects"] is True

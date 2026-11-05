@@ -131,12 +131,22 @@ def _generate_response(
     http_status: int,
     **extra: Any,
 ) -> tuple[dict[str, Any], int]:
+    unknown = any(step.get("outcome_unknown") is True or step.get("repository_outcome") in {
+        "unverified", "commit_outcome_unknown", "rollback_failed"
+    } or ("side_effects" in step and step["side_effects"] is None) for step in steps)
+    known_effects = any(step.get(key) is True for step in steps
+                        for key in ("side_effects", "target_created", "sequence_created"))
+    manual = unknown or (http_status >= 400 and known_effects) or any(
+        step.get("manual_review_required") is True or step.get("manual_recovery_review_required") is True for step in steps)
     return (
         {
             "status": status,
             "mapping_name": plan["mapping_name"] if plan else None,
             "scenario_name": plan["scenario_name"] if plan else None,
             "steps": steps,
+            "outcome_unknown": unknown,
+            "known_side_effects": known_effects,
+            "manual_review_required": manual,
             "raw_rows_included": False,
             "pk_values_included": False,
             "secret_printed": False,
