@@ -4,6 +4,8 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_NAME = "dim_product_scd2_mapping_probe.groovy"
@@ -56,6 +58,33 @@ def test_mapping_probe_normalizer_rejects_expression_or_repository_metadata():
 
     assert result["status"] == "blocked_invalid_mapping_probe_output"
     assert "not-allowed" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("name", ["source_component_count", "target_component_count", "target_attribute_count", "mapped_attribute_count"])
+@pytest.mark.parametrize("bad", [True, False, "1", 1.0, 26.0, None])
+def test_mapping_probe_requires_integer_component_counts(name, bad):
+    from dim_product_odi_scd2_mapping_probe import normalize_dim_product_odi_scd2_mapping_probe
+
+    payload = _raw()
+    payload["mapping"][name] = bad
+    assert normalize_dim_product_odi_scd2_mapping_probe(payload)["status"] == "blocked_invalid_mapping_probe_output"
+
+
+@pytest.mark.parametrize("access_points,assigned", [(2, 1), (1, 0), (0, 1)])
+def test_normalizer_requires_every_access_point_to_have_the_reviewed_lkm(access_points, assigned):
+    from dim_product_odi_scd2_mapping_probe import normalize_dim_product_odi_scd2_mapping_probe
+
+    payload = _raw()
+    payload["mapping"].update(access_point_count=access_points, lkm_assigned_count=assigned)
+    assert normalize_dim_product_odi_scd2_mapping_probe(payload)["status"] == "blocked_invalid_mapping_probe_output"
+
+
+def test_normalizer_rejects_an_unreviewed_target_ikm():
+    from dim_product_odi_scd2_mapping_probe import normalize_dim_product_odi_scd2_mapping_probe
+
+    payload = _raw()
+    payload["mapping"]["target_ikm"] = "IKM OTHER"
+    assert normalize_dim_product_odi_scd2_mapping_probe(payload)["status"] == "blocked_invalid_mapping_probe_output"
 
 
 def test_mapping_probe_script_is_finder_only_and_registered_read_only():

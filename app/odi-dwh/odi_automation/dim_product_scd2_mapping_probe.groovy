@@ -19,6 +19,7 @@ final String MAPPING_NAME = "MAP_ODS_PRODUCTS_TO_DIM_PRODUCT"
 final String SOURCE_TABLE = "ODS_SH_PRODUCTS"
 final String TARGET_TABLE = "DIM_PRODUCT"
 final String TARGET_IKM = "IKM Oracle Slowly Changing Dimension"
+final String TARGET_LKM = "LKM SQL to Oracle (Built-In)"
 
 def odi = null
 boolean standaloneMode = false
@@ -92,6 +93,9 @@ try {
     int mappedAttributeCount = targetComponent.getAttributes().count {
         it.getExpression() != null
     }
+    if (targetAttributeCount != 26 || mappedAttributeCount != 26) {
+        throw new IllegalStateException("Fixed mapping attribute contract mismatch")
+    }
 
     MapPhysicalDesign design = mapping.getPhysicalDesign(0)
     List<MapPhysicalNode> targetNodes = design.getPhysicalNodes().findAll {
@@ -103,16 +107,19 @@ try {
         throw new IllegalStateException("Fixed target node contract mismatch")
     }
     String targetIkm = targetNodes[0].getTargetComponentKMName()
+    if (targetIkm != TARGET_IKM) {
+        throw new IllegalStateException("Fixed target IKM contract mismatch")
+    }
     String integrationType = targetComponent.getIntegrationType()
     if (!(integrationType in ["SCD", "SLOWLY_CHANGING_DIMENSION"])) {
         throw new IllegalStateException("Fixed integration type contract mismatch")
     }
-    List<MapPhysicalNode> accessPoints = design.getPhysicalNodes().findAll {
-        it.isAPNode()
-    }
+    List<MapPhysicalNode> accessPoints = design.getAllAPNodes() as List<MapPhysicalNode>
     int assignedLkmCount = accessPoints.count {
-        String name = it.getXKMName()
-        name != null && !name.trim().isEmpty()
+        it.getLKMName() == TARGET_LKM
+    }
+    if (assignedLkmCount != accessPoints.size()) {
+        throw new IllegalStateException("Fixed access-point LKM contract mismatch")
     }
 
     println JsonOutput.toJson([
