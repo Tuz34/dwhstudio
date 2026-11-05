@@ -44,6 +44,9 @@ def _report(action: str) -> dict[str, Any]:
         "rollback_failed": False, "cursor_close_failed": False, "connection_close_failed": False,
         "automatic_ddl_rollback_performed": False, "target_mutation_performed": False,
         "raw_rows_included": False, "pk_values_included": False, "secret_printed": False,
+        "full_target_snapshot_equal": False,
+        "rerun_semantics": None,
+        "physical_dml_count_proven": False,
     }
 
 
@@ -91,24 +94,45 @@ def _open(factory: Factory, report: dict, resources: list, *, readonly: bool) ->
     return cursor
 
 
+def _release(resource: Any, method: str, flag: str, report: dict) -> None:
+    if resource is None:
+        return
+    try:
+        getattr(resource, method)()
+    except Exception:
+        # User-supplied resources can raise arbitrary ordinary exceptions.
+        # Never expose their text or skip the remaining cleanup attempts.
+        report[flag] = True
+
+
+def _release_one(connection: Any, cursor: Any, report: dict) -> None:
+    # Nested finally still runs the later releases when an earlier one raises
+    # KeyboardInterrupt, SystemExit, or GeneratorExit.
+    try:
+        try:
+            _release(connection, "rollback", "rollback_failed", report)
+        finally:
+            _release(cursor, "close", "cursor_close_failed", report)
+    finally:
+        _release(connection, "close", "connection_close_failed", report)
+
+
 def _cleanup(resources: list, report: dict) -> None:
+    pending: BaseException | None = None
     for connection, cursor in reversed(resources):
-        for resource, method, flag in ((connection, "rollback", "rollback_failed"),
-                                       (cursor, "close", "cursor_close_failed"),
-                                       (connection, "close", "connection_close_failed")):
-            if resource is None:
-                continue
-            try:
-                getattr(resource, method)()
-            except Exception:
-                # User-supplied resources can raise arbitrary ordinary exceptions.
-                # Never expose their text or skip the remaining cleanup attempts.
-                report[flag] = True
+        try:
+            _release_one(connection, cursor, report)
+        except BaseException as exc:
+            if pending is not None:
+                exc.__context__ = pending
+            pending = exc
     resources.clear()
     if any(report[key] for key in ("rollback_failed", "cursor_close_failed", "connection_close_failed")):
         report.update(status="failed", error_code="CleanupFailed", manual_review_required=True)
         if report["dml_attempted"] and not report["commit_completed"] and report["rollback_failed"]:
             report["outcome_unknown"] = True
+    if pending is not None:
+        raise pending
 
 
 def _fail(report: dict, exc: Exception) -> None:
@@ -191,11 +215,15 @@ def _state(cursor: Any, name: str, state: str) -> dict[str, int]:
     return {"rows": total, "null_business_rows": nulls, "duplicate_key_groups": duplicates}
 
 
-def _equal(cursor: Any, left: str, right: str, columns: tuple[str, ...]) -> None:
+def _equal(cursor: Any, left: str, right: str, columns: tuple[str, ...], *, require_match: bool = True) -> bool:
     projection = _columns(columns)
+    equal = True
     for a, b in ((left, right), (right, left)):
-        _need(_count(cursor, f"SELECT COUNT(*) FROM (SELECT {projection} FROM {_table(a)} "
-                     f"MINUS SELECT {projection} FROM {_table(b)})") == 0, "SnapshotMismatch")
+        equal = (_count(cursor, f"SELECT COUNT(*) FROM (SELECT {projection} FROM {_table(a)} "
+                        f"MINUS SELECT {projection} FROM {_table(b)})") == 0) and equal
+    if require_match:
+        _need(equal, "SnapshotMismatch")
+    return equal
 
 
 def _permanent_table(cursor: Any, name: str) -> None:
@@ -378,6 +406,26 @@ def verify_flow(flow: str, run: int, phase: str, reader_factory: Factory, source
                                   f'(SELECT 1 FROM {_table(backup)} b WHERE b.ENTITY_ID=t.ENTITY_ID)')
                 _need((changed, unchanged, inserted) == ((1, 2, 1) if run == 2 else (0, 4, 0)), "DeltaMismatch")
                 report["counts"].update(changed_existing=changed, unchanged_existing=unchanged, inserted=inserted)
-        report.update(status="passed", stage="completed", error_code=None, run=run, phase=phase,
-                      logical_business_comparison_only=True, physical_dml_count_proven=False)
+            if run == 3:
+                columns = _BUSINESS + (_EDW_EXTRA if flow == "F3" else _ODS_EXTRA)
+                report["full_target_snapshot_equal"] = _equal(
+                    cursor, target, backup, columns, require_match=flow != "F2"
+                )
+        passed_update: dict[str, Any] = {
+            "status": "passed",
+            "stage": "completed",
+            "error_code": None,
+            "run": run,
+            "phase": phase,
+            "logical_business_comparison_only": not report["full_target_snapshot_equal"],
+            "physical_dml_count_proven": False,
+        }
+        # Only a finished after_run of run 3 has rerun evidence. Earlier passes do not.
+        if phase == "after_run" and run == 3:
+            passed_update["rerun_semantics"] = "full_reload" if flow == "F2" else "incremental"
+        report.update(passed_update)
+    if report["status"] != "passed":
+        report["full_target_snapshot_equal"] = False
+        report["logical_business_comparison_only"] = False
+        report["rerun_semantics"] = None
     return report
