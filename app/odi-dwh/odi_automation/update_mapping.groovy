@@ -61,6 +61,13 @@ class IkmOptionUnsupported extends RuntimeException {
     }
 }
 
+// Raised when the SDK reports validation errors on a changed mapping. The class name is the only output.
+class MappingValidationFailed extends RuntimeException {
+    MappingValidationFailed() {
+        super("Mapping validation failed")
+    }
+}
+
 // ── CONNECTION ──────────────────────────────────────────────────────────────
 def odi = null
 boolean standaloneMode = false
@@ -660,7 +667,10 @@ try {
 
     // ── COMMIT ──────────────────────────────────────────────────────────────
     if (changed) {
-        mapping.validate()
+        // SDK 12.2.1.4: validate() returns TRUE when errors were found. The issue details are never output.
+        if (mapping.validate(new ArrayList(), false)) {
+            throw new MappingValidationFailed()
+        }
         txnMgr.commit(txnStatus)
         println "SUCCESS: Mapping '${mName}' updated (operation=${operation})."
     } else {

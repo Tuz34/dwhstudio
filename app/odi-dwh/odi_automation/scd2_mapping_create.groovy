@@ -55,7 +55,7 @@ def safeFlags = {
 
 // Fixed allowlisted reason codes or the exception class simple name; the exception
 // message is never returned (it could carry repository values).
-final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable", "ProjectFolderUnavailable", "MappingAlreadyExists", "ScenarioAlreadyExists", "SourceDatastoreUnavailable", "TargetDatastoreUnavailable", "SourceColumnsMissing", "ScdRoleContractMismatch", "IkmUnavailable", "LkmUnavailable", "IkmIntegrationTypeMismatch", "IntegrationTypeMismatch", "SourceAttributeUnavailable", "UnmappedTargetAttribute", "TargetPhysicalNodeUnavailable", "StagingLocationUnavailable", "TargetNodeLostAfterReset", "IkmAssignmentMismatch", "LkmAssignmentMismatch", "LkmDbLinkRemains", "MappingCoverageMismatch", "IkmOptionMismatch"] as Set
+final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable", "ProjectFolderUnavailable", "MappingAlreadyExists", "ScenarioAlreadyExists", "SourceDatastoreUnavailable", "TargetDatastoreUnavailable", "SourceColumnsMissing", "ScdRoleContractMismatch", "IkmUnavailable", "LkmUnavailable", "IkmIntegrationTypeMismatch", "IntegrationTypeMismatch", "SourceAttributeUnavailable", "UnmappedTargetAttribute", "TargetPhysicalNodeUnavailable", "StagingLocationUnavailable", "TargetNodeLostAfterReset", "IkmAssignmentMismatch", "LkmAssignmentMismatch", "LkmDbLinkRemains", "MappingCoverageMismatch", "MappingValidationFailed", "IkmOptionMismatch"] as Set
 def reasonCode = { Exception e ->
     String message = e.getMessage()
     if (e instanceof IllegalStateException && message != null && REASON_CODES.contains(message)) {
@@ -269,6 +269,8 @@ try {
     def readAccessPoints = { design.getAllAPNodes() as List<MapPhysicalNode> }
     def lkmOk = { MapPhysicalNode n -> LKM_NAME.equalsIgnoreCase(n.getLKMName()) }
     readAccessPoints().each { node -> node.setLKM(lkm) }
+    // This call only materializes access points for the repair below: an error here may describe a
+    // repairable intermediate state, so its result is deliberately not a gate. The final call decides.
     mapping.validate()
     List<MapPhysicalNode> accessPoints = readAccessPoints()
     if (accessPoints.any { !lkmOk(it) }) {
@@ -288,7 +290,10 @@ try {
     if (attributeCount != target.getColumns().size() || mappedCount != attributeCount) {
         throw new IllegalStateException("MappingCoverageMismatch")
     }
-    mapping.validate()
+    // SDK 12.2.1.4: validate() returns TRUE when errors were found. The issue details are never output.
+    if (mapping.validate(new ArrayList(), false)) {
+        throw new IllegalStateException("MappingValidationFailed")
+    }
     txnMgr.commit(txnStatus)
     txnStatus = null
 
