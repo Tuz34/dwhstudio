@@ -1,7 +1,4 @@
-tests/test_ai_orchestrator.py::test_orchestrate_outputs_odi_dry_run_contract
-tests/test_api_endpoints.py::TestAlertEndpoints::test_alerts_returns_200
-tests/test_api_endpoints.py::TestAlertEndpoints::test_alerts_returns_list
-tests/test_api_endpoints.py::TestAlertEndpoints::test_alerts_history_returns_200
-tests/test_api_endpoints.py::TestTablesEndpoint::test_tables_returns_200
-tests/test_api_endpoints.py::TestTablesEndpoint::test_tables_returns_list
-tests/test_api_endpoints.py::TestMonitoringEndpoints::test_freshness_returns_200
+# ODI-86: environment-dependent pytest exclusions are empty.
+# Three developer-home Codex skill tests stay deselected in
+# .github/workflows/ci.yml. Their SKILL.md files live under the developer
+# home directory and are not a tracked contract in this repository.

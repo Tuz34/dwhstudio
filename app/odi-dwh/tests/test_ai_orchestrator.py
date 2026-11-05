@@ -121,10 +121,27 @@ def test_odi_dry_run_mapping_fails_missing_columns_and_bad_target():
     assert checks["load_strategy_selected"]["status"] == "fail"
 
 
-def test_orchestrate_outputs_odi_dry_run_contract():
+def test_orchestrate_outputs_odi_dry_run_contract(monkeypatch):
+    import ai_orchestrator
+
+    def summarize_catalog(table: str):
+        assert table == "HR.EMPLOYEES"
+        return (
+            [
+                {"name": "EMPLOYEE_ID", "type": "NUMBER", "nullable": "N", "comment": ""},
+                {"name": "HIRE_DATE", "type": "DATE", "nullable": "Y", "comment": ""},
+            ],
+            ["EMPLOYEE_ID"],
+            [],
+        )
+
+    monkeypatch.setattr(ai_orchestrator, "_summarize_columns", summarize_catalog)
+
     result = orchestrate("HR.EMPLOYEES tablosunu ODS katmanina dry-run modelle")
     checks = {item["check"]: item["ok"] for item in result["test_plan"] if "check" in item}
     gates = {item["gate"]: item for item in result["quality_gates"]}
+    column_names = [column["name"] for column in result["evidence_pack"]["columns"]]
+    assert column_names[:2] == ["EMPLOYEE_ID", "HIRE_DATE"]
 
     assert result["odi_dry_run"]["tool"] == "odi.dry_run_mapping"
     assert result["odi_dry_run"]["side_effects"] is False

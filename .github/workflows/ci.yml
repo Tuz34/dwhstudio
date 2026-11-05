@@ -32,27 +32,27 @@ jobs:
       - name: Run Python quality gate
         working-directory: app/odi-dwh
         run: python python_quality_gate.py
-      - name: Run pytest with tracked environment-dependent tests deselected
+      - name: Run pytest without environment-dependent exclusions
         working-directory: app/odi-dwh
         shell: bash
         run: |
-          mapfile -t known_failures < "$GITHUB_WORKSPACE/.github/known_failures.txt"
-          if [[ ${#known_failures[@]} -ne 7 ]]; then
-            echo "Expected 7 known environment-dependent tests in .github/known_failures.txt"
+          known_failures=()
+          while IFS= read -r node_id || [[ -n "$node_id" ]]; do
+            if [[ -z "${node_id//[[:space:]]/}" || "$node_id" =~ ^[[:space:]]*# ]]; then
+              continue
+            fi
+            known_failures+=("$node_id")
+          done < "$GITHUB_WORKSPACE/.github/known_failures.txt"
+          if [[ ${#known_failures[@]} -ne 0 ]]; then
+            echo "Environment-dependent pytest exclusions must stay empty (ODI-86)."
             exit 1
           fi
-          echo "7 known environment-dependent tests deselected, tracked in ODI-80"
-          deselect_args=()
-          for node_id in "${known_failures[@]}"; do
-            deselect_args+=(--deselect "$node_id")
-          done
+          echo "No environment-dependent tests deselected"
           echo "3 developer-home Codex skill tests deselected; these personal skills are not in the repository"
-          deselect_args+=(
-            --deselect tests/test_codex_workflow_safety.py::test_on_demand_skills_are_installed_and_explicit_only
-            --deselect tests/test_codex_workflow_safety.py::test_review_skill_is_targeted_and_read_only
+          python -m pytest -q \
+            --deselect tests/test_codex_workflow_safety.py::test_on_demand_skills_are_installed_and_explicit_only \
+            --deselect tests/test_codex_workflow_safety.py::test_review_skill_is_targeted_and_read_only \
             --deselect tests/test_codex_workflow_safety.py::test_ui_skill_stops_when_app_is_down_and_forbids_persistent_actions
-          )
-          python -m pytest -q "${deselect_args[@]}"
       - name: Run application security gate
         run: python tools/workspace/appsec_gate.py --no-write
 
