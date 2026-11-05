@@ -44,6 +44,16 @@ class MappingRunOutcome:
     status_code: int
 
 
+# ODI-87: temporary gate on this generic entry only. Low-level runners are not covered.
+# Remove or replace it only after a separately reviewed stock cutover proof.
+_CUTOVER_GATED_MAPPING = "MAP_ODS_PRODUCTS_TO_DIM_PRODUCT"
+_CUTOVER_GATE_STATUS = "blocked_fixed_mapping_cutover_pending"
+_CUTOVER_GATE_ERROR = (
+    "The fixed DIM_PRODUCT mapping cannot run through the generic mapping run path "
+    "until a separately reviewed cutover proof replaces this gate."
+)
+
+
 def parse_required_bool(value: object) -> tuple[bool | None, str | None]:
     if isinstance(value, bool):
         return value, None
@@ -251,6 +261,10 @@ def _unsupported_option_outcome(
 
 
 def execute_mapping_run(app_module: Any, options: MappingRunOptions) -> MappingRunOutcome:
+    # Same normalization as the route. Runs before any import, construction or state write.
+    if str(options.mapping_name).strip().upper() == _CUTOVER_GATED_MAPPING:
+        return MappingRunOutcome({"status": _CUTOVER_GATE_STATUS, "error": _CUTOVER_GATE_ERROR}, 409)
+
     from odi_orchestrator import OdiOrchestrator, groovy_is_approved
 
     batch_id = f"RUN-{uuid.uuid4().hex[:12].upper()}"
