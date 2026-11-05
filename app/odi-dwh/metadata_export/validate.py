@@ -249,16 +249,18 @@ def _reject_non_json_numbers(instance: Any, path: str, issues: list[ValidationIs
     Free-form ``attributes`` values stay out of diagnostic paths. The contract
     field name is kept; keys and indexes inside that object are not.
     A container already present on the active ancestor chain is a cycle.
-    The same container reached again after that chain has moved on is acyclic
-    and is walked again.
+    Completed containers are not revisited: shared acyclic object graphs must
+    not multiply the work. A rejected shared container keeps its first diagnostic.
     """
-    # Each frame is ("visit", value, path, inside_attributes) or ("leave", identity, "", False).
+    # Leave frames retain the container so memoized ids cannot be reused mid-walk.
     frames: list[tuple[str, Any, str, bool]] = [("visit", instance, path, False)]
     ancestors: set[int] = set()
+    completed: dict[int, Any] = {}
     while frames:
         kind, current, current_path, inside_flag = frames.pop()
         if kind == "leave":
-            ancestors.discard(current)
+            ancestors.discard(id(current))
+            completed[id(current)] = current
             continue
         inside_attributes = inside_flag or _attributes_boundary(current_path)
         if isinstance(current, bool):
@@ -272,8 +274,10 @@ def _reject_non_json_numbers(instance: Any, path: str, issues: list[ValidationIs
         if identity in ancestors:
             issues.append(ValidationIssue(current_path or "/", _CYCLE_MESSAGE))
             continue
+        if identity in completed:
+            continue
         ancestors.add(identity)
-        frames.append(("leave", identity, "", False))
+        frames.append(("leave", current, "", False))
         children: list[tuple[Any, str, bool]] = []
         if isinstance(current, Mapping):
             for name, value in current.items():
@@ -520,7 +524,7 @@ def _check_status_links(
                     issues.append(
                         ValidationIssue(
                             f"{path}/{link_index}",
-                            f"conflict_id {conflict_id!r} does not match a conflict.",
+                            "conflict_id does not match a conflict.",
                         )
                     )
         elif linked:
@@ -534,6 +538,11 @@ def _check_redaction(document: Mapping[str, Any], nodes: list[Any], issues: list
     handling = policy.get("hidden_object_handling")
     placeholder_label = policy.get("placeholder_label")
     placeholder_type = policy.get("placeholder_type")
+    # A caller may supply a permissive schema; integrity checks must still reject
+    # malformed policy fields without comparing arbitrary containers recursively.
+    if not isinstance(placeholder_label, str) or not isinstance(placeholder_type, str):
+        issues.append(ValidationIssue("/redaction_policy", "Placeholder label and type must be strings."))
+        return
     strip_attributes = policy.get("strip_attributes") is True
     for index, node in enumerate(nodes):
         if not isinstance(node, Mapping):

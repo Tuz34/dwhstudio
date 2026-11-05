@@ -6,6 +6,18 @@ import scd2_builder
 from scd2_builder import Scd2PlanError, build_scd2_plan
 from scd2_manager import PRODUCTS_SOURCE_METADATA, build_dim_product_scd2_plan
 
+@pytest.fixture(autouse=True)
+def default_grant_config(monkeypatch):
+    """Pin the shipped grant defaults so a local runtime setting cannot leak into these tests.
+
+    Tests that exercise another setting override it with the same function-scoped monkeypatch.
+    """
+    import config
+
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", True)
+    monkeypatch.setattr(config, "ODI_EXEC_USER", "ODI_EXEC")
+
+
 TRACKED_17 = [
     "PROD_NAME", "PROD_DESC", "PROD_SUBCATEGORY", "PROD_SUBCATEGORY_ID",
     "PROD_SUBCATEGORY_DESC", "PROD_CATEGORY", "PROD_CATEGORY_ID", "PROD_CATEGORY_DESC",

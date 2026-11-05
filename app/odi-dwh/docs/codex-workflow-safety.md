@@ -8,9 +8,11 @@
 
 ## On-demand skills
 
-- `~/.codex/skills/<skill-name>` (the `odi-review` skill) is an explicit-invocation, read-only review workflow.
-- `~/.codex/skills/<skill-name>` (the `odi-readonly-ui-smoke` skill) checks an already-running UI without persistent actions.
-- Both skills set `allow_implicit_invocation: false`; they do not consume context unless selected.
+Tracked templates in `app/odi-dwh/docs/agent-skills/` are the source contract for `odi-review` and `odi-readonly-ui-smoke`. Checkout, CI, and these tests do not install or activate them. Copying a template into a local skill directory is optional and stays outside this repository.
+
+- `app/odi-dwh/docs/agent-skills/odi-review/SKILL.md` is an explicit-invocation, read-only review workflow.
+- `app/odi-dwh/docs/agent-skills/odi-readonly-ui-smoke/SKILL.md` checks an already-running UI without persistent actions.
+- Both templates set `allow_implicit_invocation: false` in `agents/openai.yaml`. They do not run unless a person explicitly selects an installed copy.
 
 ## Command safety
 
