@@ -40,6 +40,8 @@ def odi = null
 boolean standaloneMode = false
 ITransactionManager txnMgr = null
 ITransactionStatus txnStatus = null
+boolean commitAttempted = false
+boolean commitAcknowledged = false
 
 def safeFlags = {
     [
@@ -52,7 +54,7 @@ def safeFlags = {
 // Fixed allowlisted reason codes or the exception class simple name; the exception
 // message is never returned (it could carry repository values).
 final Set<String> REASON_CODES = ["InvalidParameter", "InvalidColumnType", "TargetModelUnavailable", "TargetModelNotOracle", "TargetDatastoreAlreadyExists", "ColumnContractMismatch", "ColumnOrderMismatch", "ColumnMetadataMismatch", "PrimaryKeyMismatch", "NaturalKeyMismatch"] as Set
-def reasonCode = { Exception e ->
+def reasonCode = { Throwable e ->
     String message = e.getMessage()
     if (e instanceof IllegalStateException && message != null && REASON_CODES.contains(message)) {
         return message
@@ -128,7 +130,6 @@ try {
 
     txnMgr = odi.getTransactionManager()
     txnStatus = txnMgr.getTransaction(new DefaultTransactionDefinition())
-    try {
         def em = odi.getTransactionalEntityManager()
         IOdiModelFinder modelFinder = (IOdiModelFinder) em.getFinder(OdiModel.class)
         OdiModel model = modelFinder.findByCode(targetModel)
@@ -257,7 +258,9 @@ try {
             throw new IllegalStateException("NaturalKeyMismatch")
         }
 
+        commitAttempted = true
         txnMgr.commit(txnStatus)
+        commitAcknowledged = true
         txnStatus = null
 
         def count = { String role -> ordered.count { it.getScdType()?.name() == role } }
@@ -285,25 +288,34 @@ try {
                 commit_completed: true,
             ],
         ])
-    } catch (Exception inner) {
-        if (txnStatus != null) {
-            try { txnMgr.rollback(txnStatus) } catch (Exception ignored) {}
-            txnStatus = null
-        }
-        throw inner
+} catch (Throwable e) {
+    boolean rollbackAttempted = false
+    boolean rollbackSucceeded = false
+    if (txnStatus != null && txnMgr != null) {
+        rollbackAttempted = true
+        try { txnMgr.rollback(txnStatus); rollbackSucceeded = true } catch (Throwable ignored) {}
     }
-} catch (Exception e) {
+    String repositoryOutcome = commitAcknowledged ? "committed" : commitAttempted ? "commit_outcome_unknown" :
+        rollbackAttempted ? (rollbackSucceeded ? "rolled_back" : "rollback_failed") : "no_transaction"
+    String reportStatus = commitAcknowledged ? "committed_report_incomplete" :
+        (commitAttempted || (rollbackAttempted && !rollbackSucceeded)) ? "outcome_unknown" : "error"
     println JsonOutput.toJson([
         tool: TOOL,
-        status: "error",
+        status: reportStatus,
         mode: MODE,
-        side_effects: false,
+        side_effects: commitAcknowledged ? true : reportStatus == "outcome_unknown" ? null : false,
         repository_connection_attempted: true,
         *: safeFlags(),
         error_type: reasonCode(e),
+        repository_outcome: repositoryOutcome,
+        commit_attempted: commitAttempted,
+        commit_acknowledged: commitAcknowledged,
+        rollback_attempted: rollbackAttempted,
+        rollback_succeeded: rollbackSucceeded,
+        manual_recovery_review_required: reportStatus != "error",
     ])
 } finally {
     if (standaloneMode && odi != null) {
-        odi.close()
+        try { odi.close() } catch (Throwable ignored) {}
     }
 }

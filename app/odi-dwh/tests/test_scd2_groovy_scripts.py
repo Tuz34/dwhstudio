@@ -118,7 +118,7 @@ def test_scripts_emit_structured_value_free_json(name):
     assert "error_type: reasonCode(e)" in text
     assert text.count("getMessage()") == 1  # only inside reasonCode, never echoed raw
     # No row access and no destructive repository calls.
-    for forbidden in ("executeQuery", "SELECT ", ".remove(", "delete", "em.remove", "DROP ", "TRUNCATE"):
+    for forbidden in ("executeQuery", "SELECT ", ".remove(", "delete", "em.remove", "DROP ", '"TRUNCATE TABLE'):
         assert forbidden not in text, forbidden
 
 
@@ -261,10 +261,10 @@ def test_register_script_gives_audit_columns_overwrite_behaviour():
 
 def test_mapping_script_turns_flow_and_static_control_off_and_reads_back():
     text = read("scd2_mapping_create.groovy")
-    assert '"FLOW_CONTROL", "STATIC_CONTROL"' in text
-    assert "getIKMOptionValue(optionName)?.setValue(false)" in text
+    assert 'FLOW_CONTROL: false, STATIC_CONTROL: false' in text
+    assert "optionValue.setValue(expected)" in text
     assert "IkmOptionMismatch" in text
-    assert text.index("setValue(false)") < text.rindex("IkmOptionMismatch") < text.index("txnMgr.commit(txnStatus)")
+    assert text.index("optionValue.setValue(expected)") < text.rindex("IkmOptionMismatch") < text.index("txnMgr.commit(txnStatus)")
 
 
 def test_round2_groovy_review_fixes():

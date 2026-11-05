@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import remote_run_contract
+import repository_write_contract as write_contract
 from config import (
     GROOVY_JAR_NAME,
     JAVA_FALLBACK_PATHS,
@@ -154,6 +155,11 @@ _CREATE_MAPPING_ERROR_KEYS = frozenset(
     }
 )
 _STRICT_STRUCTURED_ERROR_CONTRACTS = {
+    "generate_scenario_metadata.groovy": {
+        "tool": "odi.generate_scenario_metadata",
+        "mode": "scenario_metadata_generation",
+        "keys": (write_contract.FAILURE_KEYS - write_contract.SAFETY_KEYS) | {"checks"},
+    },
     "scd2_probe.groovy": {
         "tool": "odi.scd2_probe",
         "mode": "generic_scd2_readiness_probe",
@@ -162,12 +168,17 @@ _STRICT_STRUCTURED_ERROR_CONTRACTS = {
     "scd2_datastore_register.groovy": {
         "tool": "odi.scd2_datastore_register",
         "mode": "generic_absent_only_scd2_datastore_registration",
-        "keys": _SCD2_ERROR_KEYS,
+        "keys": write_contract.FAILURE_KEYS,
     },
     "scd2_mapping_create.groovy": {
         "tool": "odi.scd2_mapping_create",
         "mode": "generic_absent_only_scd2_mapping_creation",
-        "keys": _SCD2_ERROR_KEYS,
+        "keys": write_contract.FAILURE_KEYS,
+    },
+    "dim_product_scd2_datastore_register.groovy": {
+        "tool": "odi.dim_product_scd2_datastore_registration",
+        "mode": "fixed_absent_only_odi_datastore_registration",
+        "keys": write_contract.FAILURE_KEYS,
     },
     "dim_product_scd2_scenario_run.groovy": {
         "tool": "odi.dim_product_scd2_scenario_run",
@@ -394,9 +405,14 @@ def _strict_structured_error_output(script_name: str, text: str) -> bool:
     if contract is None:
         return False
     try:
-        payload = json.loads(str(text or "").strip())
+        payload = write_contract.parse_json(text)
     except (TypeError, ValueError):
         return False
+    if script_name == "generate_scenario_metadata.groovy":
+        return write_contract.failure(payload, contract["tool"], contract["mode"], generator=True) is not None
+    if script_name in {"scd2_datastore_register.groovy", "scd2_mapping_create.groovy",
+                       "dim_product_scd2_mapping_create.groovy", "dim_product_scd2_datastore_register.groovy"}:
+        return write_contract.failure(payload, contract["tool"], contract["mode"]) is not None
     if (
         not isinstance(payload, dict)
         or set(payload) != contract["keys"]
@@ -946,7 +962,7 @@ class OdiOrchestrator:
                                    project: str = None,
                                    folder: str = None) -> dict:
         """Generate one ODI scenario metadata object without deleting existing scenarios."""
-        if not approved:
+        if approved is not True:
             return {
                 "tool": "odi.generate_scenario_metadata",
                 "status": "blocked_until_approval",
@@ -976,17 +992,17 @@ class OdiOrchestrator:
         with groovy_approval_context(approved):
             output = self.run_groovy("generate_scenario_metadata.groovy", params)
         try:
-            start = output.find("{")
-            if start > 0:
-                output = output[start:]
-            parsed = json.loads(output)
-            parsed.setdefault("side_effects", True)
-            parsed.setdefault("repository_connection_attempted", True)
+            from repository_write_contract import parse_json
+            parsed = parse_json(output)
+            if not isinstance(parsed, dict):
+                raise ValueError("Invalid generation output")
             return parsed
         except Exception as exc:
             return {
-                "status": "error",
-                "side_effects": True,
+                "status": "outcome_unknown",
+                "side_effects": None,
+                "repository_outcome": "unverified",
+                "manual_recovery_review_required": True,
                 "repository_connection_attempted": True,
                 "checks": [
                     {
@@ -2062,14 +2078,15 @@ class OdiOrchestrator:
         with groovy_approval_context(approved):
             output = self.run_groovy(SCRIPT_NAME, {})
         try:
-            parsed = json.loads(output)
-            return normalize_dim_product_odi_scd2_datastore_registration(parsed)
+            return normalize_dim_product_odi_scd2_datastore_registration(write_contract.parse_json(output))
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
             return {
                 "tool": "odi.dim_product_scd2_datastore_registration",
                 "status": "error",
                 "mode": "normalized_fixed_absent_only_odi_datastore_registration",
-                "side_effects": False,
+                "side_effects": None,
+                "repository_outcome": "unverified",
+                "manual_recovery_review_required": True,
                 "repository_connection_attempted": True,
                 "raw_rows_included": False,
                 "pk_values_included": False,
@@ -2117,13 +2134,15 @@ class OdiOrchestrator:
                 },
             )
         try:
-            return normalize_dim_product_odi_scd2_ikm_import(json.loads(output))
+            return normalize_dim_product_odi_scd2_ikm_import(write_contract.parse_json(output))
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
             return {
                 "tool": "odi.dim_product_scd2_ikm_import",
                 "status": "error",
                 "mode": "normalized_fixed_sdk_reference_absent_only_ikm_import",
-                "side_effects": False,
+                "side_effects": None,
+                "repository_outcome": "unverified",
+                "manual_recovery_review_required": True,
                 "repository_connection_attempted": True,
                 "raw_rows_included": False,
                 "pk_values_included": False,
@@ -2164,13 +2183,16 @@ class OdiOrchestrator:
         with groovy_approval_context(approved):
             output = self.run_groovy(SCRIPT_NAME, params)
         try:
-            return normalize_dim_product_odi_scd2_mapping(json.loads(output))
+            from repository_write_contract import parse_json
+            return normalize_dim_product_odi_scd2_mapping(parse_json(output))
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
             return {
                 "tool": "odi.dim_product_scd2_mapping_create",
                 "status": "error",
                 "mode": "normalized_fixed_absent_only_scd2_mapping_creation",
-                "side_effects": False,
+                "side_effects": None,
+                "repository_outcome": "unverified",
+                "manual_recovery_review_required": True,
                 "repository_connection_attempted": True,
                 "raw_rows_included": False,
                 "pk_values_included": False,
@@ -2256,13 +2278,16 @@ class OdiOrchestrator:
         with groovy_approval_context(approved):
             output = self.run_groovy("generate_scenario_metadata.groovy", params)
         try:
-            return normalize_dim_product_scd2_scenario_generation(json.loads(output))
+            from repository_write_contract import parse_json
+            return normalize_dim_product_scd2_scenario_generation(parse_json(output))
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
             return {
                 "tool": "odi.dim_product_scd2_scenario_generation",
                 "status": "error",
                 "mode": "normalized_fixed_absent_only_scenario_generation",
-                "side_effects": False,
+                "side_effects": None,
+                "repository_outcome": "unverified",
+                "manual_recovery_review_required": True,
                 "repository_connection_attempted": True,
                 "raw_rows_included": False,
                 "pk_values_included": False,

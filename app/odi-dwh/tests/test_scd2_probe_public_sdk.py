@@ -122,9 +122,11 @@ def test_probe_never_certifies_wrong_or_incomplete_physical_contract(probe_resul
 
 def test_generic_option_check_executes_public_accessor(java, tmp_path):
     source = GENERIC.read_text(encoding="utf-8")
-    start = source.index('    ["FLOW_CONTROL", "STATIC_CONTROL"].each')
+    start = source.index('    final Map<String, Boolean> lockedOptions =')
     end = source.index('    // Access-point nodes', start)
     block = source[start:end]
+    final_checks = source.index('    lockedOptions.each', source.index('// Validation can materialize'))
+    block += '\n' + source[final_checks:source.index('    List<MapPhysicalNode> finalAccessPoints', final_checks)].replace('finalTarget.', 'targetNode.')
     driver = tmp_path / "option_driver.groovy"
     driver.write_text('''
 import groovy.json.JsonOutput
@@ -140,7 +142,8 @@ class Node {
 }
 def results = [:]
 ["good", "missing", "sticky"].each { mode ->
-    def node = new Node(values: [FLOW_CONTROL: new Option(sticky: mode == "sticky"), STATIC_CONTROL: new Option()])
+    def node = new Node(values: ["FLOW_CONTROL", "STATIC_CONTROL", "RECYCLE_ERRORS", "TRUNCATE",
+        "DELETE_ALL", "CREATE_TARG_TABLE", "COMMIT"].collectEntries { n -> [(n): new Option(sticky: mode == "sticky" && n == "FLOW_CONTROL")] })
     if (mode == "missing") node.values.remove("FLOW_CONTROL")
     try {
         new GroovyShell(new Binding(targetNode: node)).evaluate(''' + json.dumps(block) + ''')
