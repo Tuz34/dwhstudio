@@ -133,7 +133,7 @@ Examples from the code and tests (Oracle sample schemas `HR` and `SH` as sources
 
 ## Tests and quality gates
 
-GitHub Actions runs these gates, a frontend build, and a secret scan for every pull request and main push; its pytest step deselects the 13 environment-dependent cases tracked in ODI-80 and three developer-home skill checks that cannot run on hosted runners.
+GitHub Actions runs these gates, a frontend build, and a secret scan for every pull request and main push. Pytest no longer deselects environment-dependent cases. Three developer-home Codex skill checks remain deselected because their skill files are not in this repository.
 
 From `app/odi-dwh`:
 

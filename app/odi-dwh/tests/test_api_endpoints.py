@@ -3127,21 +3127,64 @@ class TestStatusEndpoint:
         assert "llm_provider" in data
 
 
+class _HermeticAlertManager:
+    """In-memory alert source for read routes. It never opens a database connection."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    def get_unacknowledged(self, limit=50):
+        return [{"alert_id": 7, "severity": "WARNING", "message": "synthetic freshness gap"}]
+
+    def get_history(self, limit=50):
+        return [{"alert_id": 7, "acknowledged": True}]
+
+
+def _hermetic_catalog_frame(sql, params=None):
+    if "ALL_TAB_COMMENTS" in sql:
+        return pd.DataFrame([{"FULL_NAME": "HR.EMPLOYEES", "COMMENTS": "Synthetic catalog"}])
+    if "ALL_TABLES" in sql:
+        return pd.DataFrame([{"OWNER": "HR", "TABLE_NAME": "EMPLOYEES"}])
+    raise AssertionError("tables endpoint issued an unexpected catalog query")
+
+
+def _install_hermetic_catalog(monkeypatch):
+    import app as app_module
+
+    monkeypatch.setattr(app_module.config, "PROJECT_SCHEMAS", ["HR", "DWH"])
+    monkeypatch.setattr(app_module.config, "SOURCE_ORACLE_SCHEMAS", ["HR"])
+    monkeypatch.setattr(app_module, "execute_select", _hermetic_catalog_frame)
+
+
 class TestAlertEndpoints:
     """Alert API tests."""
 
-    def test_alerts_returns_200(self, app_client):
+    def test_alerts_returns_200(self, app_client, monkeypatch):
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "AlertManager", _HermeticAlertManager)
         resp = app_client.get("/api/alerts")
         assert resp.status_code == 200
 
-    def test_alerts_returns_list(self, app_client):
+    def test_alerts_returns_list(self, app_client, monkeypatch):
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "AlertManager", _HermeticAlertManager)
         resp = app_client.get("/api/alerts")
         data = resp.get_json()
         assert isinstance(data, list)
+        assert data == [{"alert_id": 7, "severity": "WARNING", "message": "synthetic freshness gap"}]
 
-    def test_alerts_history_returns_200(self, app_client):
+    def test_alerts_history_returns_200(self, app_client, monkeypatch):
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "AlertManager", _HermeticAlertManager)
         resp = app_client.get("/api/alerts/history")
         assert resp.status_code == 200
+        assert resp.get_json() == [{"alert_id": 7, "acknowledged": True}]
 
 
 class TestAlertWriteEndpoints:
@@ -3508,22 +3551,38 @@ class TestLegacyAirflowWriteEndpoints:
 class TestTablesEndpoint:
     """GET /api/tables tests."""
 
-    def test_tables_returns_200(self, app_client):
-        resp = app_client.get("/api/tables")
+    def test_tables_returns_200(self, app_client, monkeypatch):
+        _install_hermetic_catalog(monkeypatch)
+        resp = app_client.get("/api/tables?schema=HR")
         assert resp.status_code == 200
 
-    def test_tables_returns_list(self, app_client):
-        resp = app_client.get("/api/tables")
+    def test_tables_returns_list(self, app_client, monkeypatch):
+        _install_hermetic_catalog(monkeypatch)
+        resp = app_client.get("/api/tables?schema=HR")
         data = resp.get_json()
         assert isinstance(data, list)
+        assert data == [
+            {
+                "name": "SOURCE: HR.EMPLOYEES",
+                "original": "HR.EMPLOYEES",
+                "platform": "SOURCE",
+                "schema": "HR",
+                "comment": "Synthetic catalog",
+            }
+        ]
 
 
 class TestMonitoringEndpoints:
     """Monitoring API tests."""
 
-    def test_freshness_returns_200(self, app_client):
+    def test_freshness_returns_200(self, app_client, monkeypatch):
+        import app as app_module
+
+        payload = [{"TABLE_OWNER": "DWH", "TABLE_NAME": "ODS_STATUS", "DAYS_SINCE": 1.0}]
+        monkeypatch.setattr(app_module, "mon_data_freshness", lambda: json.dumps(payload))
         resp = app_client.get("/api/monitoring/freshness")
         assert resp.status_code == 200
+        assert resp.get_json() == payload
 
     def test_dq_scores_returns_200(self, app_client):
         resp = app_client.get("/api/monitoring/dq-scores?owner=DWH")
