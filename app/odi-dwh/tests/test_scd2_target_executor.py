@@ -73,6 +73,26 @@ def proven(plan, username="ODI_EXEC"):
     return proof
 
 
+@pytest.mark.parametrize("stage,existing", [("CREATE SEQUENCE", False), ("CREATE TABLE", False), ("CREATE SEQUENCE", True)])
+def test_applied_ddl_with_lost_ack_requires_unknown_manual_state(plan, stage, existing):
+    log, applied = [], []
+    base = handler_for(plan, table_exists=int(existing), sequence_exists=int(stage == "CREATE TABLE"))
+
+    def handler(sql, params):
+        if sql.startswith(stage):
+            applied.append(stage)
+            return oracle_error("SYNTHETIC_LOST_ACK")
+        return base(sql, params)
+
+    report = executor.execute_target_ddl(plan, approved=True,
+        connection_factory=connection_factory(log, handler), ddl_user="APP_USER", identity_proof=proven(plan))
+    assert applied == [stage]
+    assert report["outcome_unknown"] is True and report["manual_review_required"] is True
+    assert report["cleanup_requires_separate_approval"] is True
+    assert report["target_created"] is False and report["sequence_created"] is False
+    assert not any(sql.startswith(("DROP ", "DELETE ", "TRUNCATE ")) for sql in log)
+
+
 def execute(plan, *, username="ODI_EXEC", **kwargs):
     if "identity_proof" not in kwargs:
         kwargs["identity_proof"] = proven(plan, username)
