@@ -894,8 +894,9 @@ def test_generate_scenario_metadata_invalid_json_returns_structured_error(monkey
     )
 
     checks = {item["name"]: item for item in result["checks"]}
-    assert result["status"] == "error"
-    assert result["side_effects"] is True
+    assert result["status"] == "outcome_unknown"
+    assert result["side_effects"] is None
+    assert result["manual_recovery_review_required"] is True
     assert checks["generate_scenario_metadata_json"]["status"] == "fail"
 
 

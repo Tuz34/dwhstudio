@@ -41,8 +41,11 @@ import groovy.json.JsonOutput
 import oracle.odi.domain.root.RootIssue
 class MapPhysicalNode {
     String name; String lkmName; List events
+    Map options=[:]
     void setLKM(km) { lkmName = km.name; events << ("setLKM:" + name) }
     String getLKMName() { lkmName }
+    String getTargetComponentKMName() { 'IKM Oracle Slowly Changing Dimension' }
+    def getIKMOptionValue(String n) { options[n] }
 }
 class FakeMapping {
     List events; List results; List nodes; boolean materialize; boolean explode; int calls = 0
@@ -129,6 +132,20 @@ def design = new Expando(getAllAPNodes: {{ apNodes }})
 def attribute = new Expando(getExpression: {{ "EXPR" }})
 def targetComponent = new Expando(getAttributes: {{ [attribute] }})
 def target = new Expando(getColumns: {{ ["COL"] }})
+boolean commitAttempted = false
+boolean commitAcknowledged = false
+def lockedOptions = [FLOW_CONTROL:false, STATIC_CONTROL:false, RECYCLE_ERRORS:false,
+    TRUNCATE:false, DELETE_ALL:false, CREATE_TARG_TABLE:false, COMMIT:true]
+def optionValues = lockedOptions.collectEntries {{ n, expected ->
+    def value = new Expando()
+    value.setValue = {{ v -> value.current = v }}
+    value.getOptionValue = {{ -> value.current }}
+    value.current = expected
+    [(n): value]
+}}
+def targetNode = new MapPhysicalNode(name:'TARGET', events:events, options:optionValues)
+def findTargetNode = {{ -> targetNode }}
+def writeOptions = {{ node -> lockedOptions.each {{ n, v -> node.getIKMOptionValue(n).setValue(v) }} }}
 '''
     return _run(tmp_path, header + setup + "try {\n" + body + "}\n")
 
