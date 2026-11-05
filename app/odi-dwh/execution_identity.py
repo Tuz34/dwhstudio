@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 TOOL = "odi.execution_identity"
@@ -82,7 +82,7 @@ class ExecutionIdentityError(ValueError):
 class ExecutionIdentityProof:
     """Internal proof. Do not place this object on an API response."""
 
-    username: str
+    username: str = field(repr=False)
     model_code: str
     context_code: str
     schema_name: str

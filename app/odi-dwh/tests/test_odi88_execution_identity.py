@@ -258,6 +258,50 @@ def test_normalizer_rejects_malformed_ambiguous_and_secret_payloads(plan):
     assert str(excinfo.value) == "execution_identity_invalid" and "bad user" not in str(excinfo.value)
 
 
+@pytest.mark.parametrize("field,value", [
+    ("model_code", "OTHER_MODEL"), ("context_code", "DEV"), ("schema_name", "OTHER_OWNER"),
+    ("data_server_technology", "PostgreSQL"), ("side_effects", True),
+    ("raw_rows_included", True), ("pk_values_included", True), ("secret_printed", True),
+])
+def test_normalizer_rejects_payload_for_a_different_requested_topology(plan, field, value):
+    payload = identity_payload(plan, "SYNTHETIC_RUNNER", **{field: value})
+    public, proof = execution_identity.interpret_execution_identity(
+        payload, model_code=plan["models"]["target"], context_code="GLOBAL", schema_name=plan["target"]["owner"]
+    )
+    assert proof is None and public["status"] == "blocked"
+    assert public["code"] == "execution_identity_unverified"
+    assert "SYNTHETIC_RUNNER" not in str(public) and "username" not in public
+
+
+def test_duplicate_username_cannot_be_hidden_by_last_value_wins_json(plan):
+    payload = identity_payload(plan, "SYNTHETIC_RUNNER")
+    duplicate = payload[:-1] + ', "username": "OTHER_RUNNER"}'
+    public, proof = execution_identity.interpret_execution_identity(
+        duplicate, model_code=plan["models"]["target"], context_code="GLOBAL", schema_name=plan["target"]["owner"]
+    )
+    assert proof is None and public["code"] == "execution_identity_unverified"
+    assert "SYNTHETIC_RUNNER" not in str(public) and "OTHER_RUNNER" not in str(public)
+
+
+def test_executor_rejects_an_internal_proof_for_another_context_before_factory(plan):
+    proof = execution_identity.ExecutionIdentityProof(
+        "SYNTHETIC_RUNNER", plan["models"]["target"], "DEV", plan["target"]["owner"]
+    )
+    calls = []
+    result = executor.execute_target_ddl(
+        plan, approved=True, connection_factory=lambda: calls.append(True), identity_proof=proof
+    )
+    assert calls == [] and result["connection_attempted"] is False
+    assert result["status"] == "blocked_execution_identity"
+    assert "SYNTHETIC_RUNNER" not in str(result)
+
+
+def test_internal_proof_repr_omits_execution_username(plan):
+    proof = _proof(plan, "SYNTHETIC_RUNNER")
+    assert proof.username == "SYNTHETIC_RUNNER"
+    assert "SYNTHETIC_RUNNER" not in repr(proof)
+
+
 def test_request_field_cannot_choose_the_account_and_preview_stays_connectionless(plan):
     catalog_log = []
     services = make_services(FakeOrchestrator(plan), catalog_log=catalog_log)
@@ -411,7 +455,10 @@ def results = []
 def namedTech = { String name -> new Expando(getName: { name }) }
 def dataServer = { List forbidden, String username, String technologyName ->
     new Expando(
-        getUsername: { username },
+        getUsername: {
+            if (username == "RAISE_GETTER") throw new IllegalStateException("LEAKED_GETTER")
+            username
+        },
         getName: { forbidden.add("getName"); "NOT_THE_USER" },
         getTechnology: { namedTech(technologyName) },
         getPassword: { forbidden.add("getPassword"); throw new IllegalStateException("getPassword") },
@@ -467,6 +514,14 @@ def arrangement = { List forbidden, Map spec ->
         )
     }
     def mappings = spec.extraMapping ? [makeMapping(), makeMapping()] : [makeMapping()]
+    if (spec.otherMappings) {
+        def otherLogical = new Expando(getInternalId: { "OTHER_LOGICAL" })
+        def otherContext = new Expando(getCode: { "DEV" })
+        mappings += [
+            new Expando(getContext: { context }, getLogicalSchema: { otherLogical }, getPhysicalSchema: { physical }),
+            new Expando(getContext: { otherContext }, getLogicalSchema: { logical }, getPhysicalSchema: { physical }),
+        ]
+    }
     [models: models, contexts: contexts, mappings: mappings]
 }
 def runCase = { String name, String modelCode, String contextCode, String schemaName, Map spec ->
@@ -506,6 +561,8 @@ def runCase = { String name, String modelCode, String contextCode, String schema
 }
 runCase("proven", "TGT_DM", "GLOBAL", "DM", [username: "ETL_RUNNER"])
 runCase("same_internal_id", "TGT_DM", "GLOBAL", "DM", [username: "ETL_RUNNER", sameIdCopy: true])
+runCase("unrelated_mappings", "TGT_DM", "GLOBAL", "DM", [username: "ETL_RUNNER", otherMappings: true])
+runCase("getter_raises", "TGT_DM", "GLOBAL", "DM", [username: "RAISE_GETTER"])
 runCase("duplicate_model", "TGT_DM", "GLOBAL", "DM", [extraModel: true, username: "LEAKED_MODEL"])
 runCase("missing_model", "TGT_DM", "GLOBAL", "DM", [modelCode: "OTHER_MODEL", username: "LEAKED_MODEL"])
 runCase("duplicate_context", "TGT_DM", "GLOBAL", "DM", [extraContext: true, username: "LEAKED_CONTEXT"])
@@ -545,6 +602,8 @@ def test_real_probe_against_fake_sdk(tmp_path):
     expected = {
         "proven": ("passed", "ETL_RUNNER", 3),
         "same_internal_id": ("passed", "ETL_RUNNER", 3),
+        "unrelated_mappings": ("passed", "ETL_RUNNER", 3),
+        "getter_raises": ("execution_identity_unverified", None, 3),
         "duplicate_model": ("execution_identity_ambiguous", None, 3),
         "missing_model": ("execution_identity_missing", None, 3),
         "duplicate_context": ("execution_identity_ambiguous", None, 3),
