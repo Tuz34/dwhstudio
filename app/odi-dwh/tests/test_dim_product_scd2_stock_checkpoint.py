@@ -272,3 +272,17 @@ def test_remaining_stock_and_backup_guards_block_before_ddl(world, change):
     report = create(world)
     assert report["status"] != "passed" and report["ddl_attempted"] is False
     assert not any(sql.startswith("CREATE TABLE") for sql in world.log)
+
+
+@pytest.mark.parametrize("change", ["open_end", "duplicate_current_key", "reversed_dates"])
+def test_stock_zero_checks_block_even_when_all_72_counts_are_unchanged(world, change):
+    if change == "open_end":
+        world.db.execute("UPDATE DIM_PRODUCT SET EFFECTIVE_TO='9999-12-31' WHERE PRODUCT_SK=0")
+    elif change == "duplicate_current_key":
+        world.db.execute("UPDATE DIM_PRODUCT SET PROD_ID=1 WHERE PRODUCT_SK=0")
+    else:
+        world.db.execute("UPDATE DIM_PRODUCT SET EFFECTIVE_FROM='2500-01-01' WHERE PRODUCT_SK=0")
+    world.db.commit()
+    report = create(world)
+    assert report["status"] != "passed" and report["ddl_attempted"] is False
+    assert not any(sql.startswith("CREATE TABLE") for sql in world.log)
