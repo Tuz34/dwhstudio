@@ -19,12 +19,21 @@ def inspectIkm = { ikms, String requested ->
     return [status: "passed", ikm_name: requested, ikm_id: identifier, ikm_match_count: 1]
 }
 
-def inspectSource = { models, String owner, String table, context, String contextCode ->
+def inspectSource = { models, String owner, String table, context, String contextCode, String expectedModel = null ->
     if (context == null) return [status: "blocked", code: "source_identity_unverified"]
+    def considered = models
+    if (expectedModel != null) {
+        // Other owners of the same schema are ignored only after one exact code match.
+        def named = models.findAll { it.getCode() == expectedModel }
+        if (named.size() != 1) {
+            return [status: "blocked", code: named.isEmpty() ? "source_identity_missing" : "source_identity_ambiguous"]
+        }
+        considered = named
+    }
     def ownerModels = []
     def matches = []
     boolean unresolved = false
-    models.each { model ->
+    considered.each { model ->
         def datastores = model.getDataStores().findAll { ds ->
             String resource = ds.getResourceName()?.toUpperCase(Locale.ROOT)
             resource == table || resource == owner + "." + table
@@ -47,7 +56,9 @@ def inspectSource = { models, String owner, String table, context, String contex
         return [status: "blocked", code: "source_identity_ambiguous"]
     }
     if (matches.isEmpty() && ownerModels.isEmpty()) {
-        return [status: "blocked", code: "source_identity_missing"]
+        // A configured model that fails the physical proof must not fall back to another model.
+        String code = expectedModel != null ? "source_identity_unverified" : "source_identity_missing"
+        return [status: "blocked", code: code]
     }
     def model = matches ? matches[0].model : ownerModels[0]
     def ds = matches ? matches[0].datastore : null
@@ -66,8 +77,11 @@ try {
     String owner = System.getProperty("odi.src_owner")
     String table = System.getProperty("odi.src_table")
     String contextCode = System.getProperty("odi.context", "GLOBAL")
+    String expectedModel = System.getProperty("odi.source_model_code")
+    if (expectedModel == "") expectedModel = null
     if (!(requested ==~ /[A-Za-z0-9][A-Za-z0-9 ()._-]{0,127}/) ||
         !(contextCode ==~ /[A-Z][A-Z0-9_]{0,127}/) ||
+        (expectedModel != null && !(expectedModel ==~ /[A-Z][A-Z0-9_]{0,127}/)) ||
         ((owner == null) != (table == null)) ||
         (owner != null && (!(owner ==~ /[A-Z][A-Z0-9_]{0,127}/) || !(table ==~ /[A-Z][A-Z0-9_]{0,127}/)))) {
         throw new IllegalArgumentException("InvalidRequest")
@@ -93,7 +107,8 @@ try {
     payload = inspectIkm(em.getFinder(OdiIKM.class).findAll(), requested)
     if (payload.status == "passed" && owner != null) {
         def context = em.getFinder(OdiContext.class).findByCode(contextCode)
-        def sourceResult = inspectSource(em.getFinder(OdiModel.class).findAll(), owner, table, context, contextCode)
+        def sourceResult = inspectSource(
+            em.getFinder(OdiModel.class).findAll(), owner, table, context, contextCode, expectedModel)
         payload = sourceResult.status == "passed" ? payload + sourceResult : sourceResult
     } else if (payload.status == "passed") {
         payload.source = null

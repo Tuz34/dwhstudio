@@ -2281,6 +2281,12 @@ class OdiOrchestrator:
             exact = resolve_approved_ikm(ikm_name, "IU", ODI_APPROVED_IKMS, ODI_IKM_PRIORITY)
         except ValueError:
             return {**blocked, "code": "ikm_not_approved"}
+        from config import ODI_SOURCE_MODEL_BINDINGS
+        from source_model_policy import SourceModelConfigError, trusted_source_model_code
+        try:
+            expected = trusted_source_model_code(context, src_owner, ODI_SOURCE_MODEL_BINDINGS)
+        except SourceModelConfigError:
+            return {**blocked, "code": "source_model_config_invalid"}
         try:
             if exact != ikm_name or bool(src_owner) != bool(src_table):
                 raise ValueError("Invalid preflight request")
@@ -2290,9 +2296,13 @@ class OdiOrchestrator:
             params = {"odi.ikm_name": exact, "odi.context": context}
             if src_owner:
                 params.update({"odi.src_owner": src_owner, "odi.src_table": src_table})
+            if expected:
+                params["odi.source_model_code"] = expected
             with groovy_approval_context(True):
                 output = self.run_groovy("mapping_preflight.groovy", params)
-            return normalize_repository_preflight(json.loads(output), exact, src_owner, src_table, context)
+            return normalize_repository_preflight(
+                json.loads(output), exact, src_owner, src_table, context, expected_model_code=expected,
+            )
         except (ValueError, TypeError, RuntimeError, OSError):
             return {**blocked, "code": "repository_lookup_failed", "repository_connection_attempted": True}
 
