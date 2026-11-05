@@ -55,6 +55,44 @@ def safeFlags = {
 // Fixed allowlisted reason codes or the exception class simple name; the exception
 // message is never returned (it could carry repository values).
 final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable"] as Set
+final List<String> AUDIT_OVERWRITE_COLUMNS = ["INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"]
+
+// ODI87-STABLE-AUDIT-BEGIN (kept byte-identical with scd2_probe.groovy; a test compares both blocks)
+// Stable audit creation expressions for the stock 1/0 + 2400 SCD2 profile. A source row that
+// matches exactly one current target version (all natural-key columns equal, every tracked
+// attribute equal null-safely) keeps that version's INSERT_DATE and SOURCE_SYSTEM. UPDATE_DATE
+// and ETL_BATCH_ID are kept only when the user overwrite attributes are unchanged as well; any
+// actual business delta refreshes them. New keys and new versions get the creation defaults.
+// Existing NULL audit values are preserved as NULL; no null-replacement function is applied.
+// More than one matching current version makes the scalar subquery fail natively; no row
+// limiting or tie-breaking hides it.
+final String STABLE_AUDIT_CURRENT_ALIAS = "SCD2_CUR"
+final Map<String, String> STABLE_AUDIT_DEFAULTS = [
+    INSERT_DATE: "CURRENT_TIMESTAMP",
+    UPDATE_DATE: "CURRENT_TIMESTAMP",
+    SOURCE_SYSTEM: "'ODI_SCD2'",
+    ETL_BATCH_ID: "<%=odiRef.getSession(\"SESS_NO\")%>",
+]
+final List<String> STABLE_AUDIT_VERSION_COLUMNS = ["INSERT_DATE", "SOURCE_SYSTEM"]
+def stableAuditText = { String column, String table, String alias, List<String> keys, List<String> tracked, List<String> overwrite ->
+    final java.util.regex.Pattern NAME = ~/^[A-Z0-9_#]{1,30}$/
+    String cur = STABLE_AUDIT_CURRENT_ALIAS
+    List<String> parts = table.tokenize(".")
+    if (!STABLE_AUDIT_DEFAULTS.containsKey(column) || parts.size() != 2 || !parts.every { it ==~ NAME }
+            || alias == null || !(alias ==~ NAME) || alias == cur || keys.isEmpty()
+            || !(keys + tracked + overwrite).every { it ==~ NAME }) {
+        throw new IllegalStateException("SourceAliasInvalid")
+    }
+    List<String> compared = STABLE_AUDIT_VERSION_COLUMNS.contains(column) ? tracked : tracked + overwrite
+    List<String> predicate = keys.toSorted().collect { "${cur}.${it} = ${alias}.${it}".toString() }
+    predicate.add("${cur}.CURRENT_FLAG = '1'".toString())
+    compared.toSorted().each { predicate.add("DECODE(${cur}.${it}, ${alias}.${it}, 0, 1) = 0".toString()) }
+    String where = predicate.join(" AND ")
+    ("CASE WHEN EXISTS (SELECT 1 FROM ${table} ${cur} WHERE ${where}) " +
+        "THEN (SELECT ${cur}.${column} FROM ${table} ${cur} WHERE ${where}) " +
+        "ELSE ${STABLE_AUDIT_DEFAULTS[column]} END").toString()
+}
+// ODI87-STABLE-AUDIT-END
 def reasonCode = { Exception e ->
     String message = e.getMessage()
     if (e instanceof IllegalStateException && message != null && REASON_CODES.contains(message)) {
@@ -103,6 +141,7 @@ try {
     String sourceTable = requireProp("odi.scd2.source_table", ID)
     String targetModel = requireProp("odi.scd2.target_model", ID)
     String targetTable = requireProp("odi.scd2.target_table", ID)
+    String targetOwner = requireProp("odi.scd2.target_owner", ID)
     String mappingName = requireProp("odi.scd2.mapping", MAPPING_ID)
     String scenarioName = mappingName + "_SCN"
     String scenarioVersion = System.getProperty("odi.scd2.scenario_version")
@@ -211,6 +250,48 @@ try {
             } catch (Exception ignoredPhysical) {
                 ikmName = null
             }
+            // Stable audit profile, re-derived from the target datastore roles and the mapping's
+            // single source alias. Only booleans and counts are reported, never expression text.
+            Map auditProfile = [stable: false, role_contract_valid: false, source_alias_valid: false,
+                                audit_attribute_count: 0, stable_expression_count: 0, audit_target_hint_count: 0]
+            try {
+                if (targets.size() == 1 && sources.size() == 1 && tgtStore != null) {
+                    List storeColumns = tgtStore.getColumns().toList()
+                    def named = { String role -> storeColumns.findAll { it.getScdType()?.name() == role }.collect { it.getName() } }
+                    List<String> keys = named("NATURAL_KEY")
+                    List<String> trackedColumns = named("ADD_ROW_ON_CHANGE")
+                    List<String> overwriteRole = named("OVERWRITE_ON_CHANGE")
+                    List<String> userOverwrite = overwriteRole.findAll { !AUDIT_OVERWRITE_COLUMNS.contains(it) }
+                    boolean roles = !keys.isEmpty() && overwriteRole.containsAll(AUDIT_OVERWRITE_COLUMNS) &&
+                        named("CURRENT_RECORD_FLAG") == ["CURRENT_FLAG"]
+                    String alias = sources[0].getName()
+                    boolean aliasValid = alias != null && alias ==~ ID && alias != STABLE_AUDIT_CURRENT_ALIAS
+                    List auditAttributes = targets[0].getAttributes().findAll {
+                        AUDIT_OVERWRITE_COLUMNS.contains(it.getName()?.toUpperCase())
+                    }
+                    int matching = 0
+                    if (roles && aliasValid) {
+                        String reference = targetOwner + "." + targetTable
+                        matching = auditAttributes.count { attribute ->
+                            String column = attribute.getName().toUpperCase()
+                            attribute.getExpression()?.getText() ==
+                                stableAuditText(column, reference, alias, keys, trackedColumns, userOverwrite)
+                        }
+                    }
+                    int targetHints = auditAttributes.count { it.getExecuteOnHint()?.name() == "TARGET" }
+                    auditProfile = [
+                        stable: roles && aliasValid && auditAttributes.size() == AUDIT_OVERWRITE_COLUMNS.size() &&
+                            matching == AUDIT_OVERWRITE_COLUMNS.size() && targetHints == 0,
+                        role_contract_valid: roles,
+                        source_alias_valid: aliasValid,
+                        audit_attribute_count: auditAttributes.size(),
+                        stable_expression_count: matching,
+                        audit_target_hint_count: targetHints,
+                    ]
+                }
+            } catch (Exception ignoredProfile) {
+                // An unreadable profile is reported as not stable; reuse then fails closed.
+            }
             mappingInfo = [
                 target_count: targets.size(),
                 target_table: targets.size() == 1 ? targets[0].getBoundDataStore()?.getName() : null,
@@ -225,6 +306,7 @@ try {
                 target_attribute_count: targets.size() == 1 ? targets[0].getAttributes().size() : 0,
                 mapped_attribute_count: targets.size() == 1 ?
                     targets[0].getAttributes().count { it.getExpression() != null } : 0,
+                audit_profile: auditProfile,
             ]
         }
 

@@ -117,9 +117,39 @@ def test_scripts_emit_structured_value_free_json(name):
     assert "secret_printed: false" in text
     assert "error_type: reasonCode(e)" in text
     assert text.count("getMessage()") == 1  # only inside reasonCode, never echoed raw
-    # No row access and no destructive repository calls.
+    # No row access and no destructive repository calls. The marked stable-audit block builds
+    # ODI mapping expression text (evaluated later by the scenario), so it is checked separately.
+    outside = _without_stable_audit_block(text)
     for forbidden in ("executeQuery", "SELECT ", ".remove(", "delete", "em.remove", "DROP ", '"TRUNCATE TABLE'):
-        assert forbidden not in text, forbidden
+        assert forbidden not in outside, forbidden
+    for forbidden in ("executeQuery", ".remove(", "delete", "em.remove", "DROP ", "TRUNCATE", "ROWNUM", "MAX(", "COALESCE", "NVL("):
+        assert forbidden not in _stable_audit_block(text), forbidden
+
+
+STABLE_BEGIN, STABLE_END = "// ODI87-STABLE-AUDIT-BEGIN", "// ODI87-STABLE-AUDIT-END"
+
+
+def _stable_audit_block(text):
+    if STABLE_BEGIN not in text:
+        return ""
+    assert text.count(STABLE_BEGIN) == 1 and text.count(STABLE_END) == 1
+    return text[text.index(STABLE_BEGIN):text.index(STABLE_END) + len(STABLE_END)]
+
+
+def _without_stable_audit_block(text):
+    block = _stable_audit_block(text)
+    return text.replace(block, "") if block else text
+
+
+def test_builder_and_probe_share_one_byte_identical_stable_audit_block():
+    builder = _stable_audit_block(read("scd2_mapping_create.groovy"))
+    probe = _stable_audit_block(read("scd2_probe.groovy"))
+    assert builder and builder == probe
+    # Expression text is compared inside the scripts only and never placed in the JSON output.
+    for name in ("scd2_mapping_create.groovy", "scd2_probe.groovy"):
+        body = _without_stable_audit_block(read(name))
+        output = body[body.index("JsonOutput.toJson"):]
+        assert "getText()" not in output.split("} catch")[0].split("println JsonOutput.toJson(")[-1]
 
 
 @pytest.mark.parametrize("name", ("scd2_datastore_register.groovy", "scd2_mapping_create.groovy"))
@@ -274,5 +304,5 @@ def test_round2_groovy_review_fixes():
     assert "actualLength ?: 0" in reg and "wantedLength ?: 0" in reg  # bare NUMBER sentinel
     mapping = read("scd2_mapping_create.groovy")
     assert "overwrite + AUDIT_OVERWRITE_COLUMNS" in mapping
-    assert '"IkmOptionMismatch"]' in mapping  # structured-error allowlist
+    assert '"IkmOptionMismatch", "SourceAliasInvalid", "MappingExpressionDrift"]' in mapping  # structured-error allowlist
     assert "actualLength != 6" in read("dim_product_scd2_datastore_register.groovy")
