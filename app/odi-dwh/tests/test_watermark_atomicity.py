@@ -1,5 +1,6 @@
 """Finding #8: append and watermark advance share one transaction."""
 
+import sqlite3
 import threading
 from datetime import datetime
 
@@ -26,6 +27,9 @@ class TxnCursor(FakeIncrementalCursor):
                 raise RuntimeError("simulated insert failure")
             last = params["last_watermark"].strftime("%Y-%m-%d")
             new = [dict(r) for r in SOURCE_ROWS if r["TIME_ID"] > last]
+            if ':window_end' in sql:
+                end = params["window_end"].strftime("%Y-%m-%d")
+                new = [r for r in new if r["TIME_ID"] <= end]
             self.connection.pending_rows.extend(new)
             self.rowcount = len(new)
             return
@@ -180,6 +184,76 @@ def test_rerun_after_success_appends_nothing_and_keeps_watermark():
     assert target.committed_watermark == watermark_after_first
     assert target.commits == 1
     assert writer.calls == 1
+
+
+def test_source_growth_stays_outside_reviewed_window_and_loads_on_next_run(monkeypatch):
+    import tests.test_watermark_atomicity as this_module
+
+    rows = [dict(row) for row in SOURCE_ROWS]
+    monkeypatch.setattr(this_module, "SOURCE_ROWS", rows)
+    target = TxnTargetConnection()
+    writer = TxnWatermarkWriter()
+    reviewed = _preflight(target)
+    rows.append({"PROD_ID": 3, "TIME_ID": "2026-06-21"})
+
+    first = _run(target, writer, preflight=reviewed)
+
+    assert first["status"] == "executed"
+    assert first["rows_appended"] == 1
+    assert max(row["TIME_ID"] for row in target.tables["DWH.ODS_SH_SALES"]) == "2026-06-20"
+    assert target.committed_watermark[2] == "2026-06-20"
+    assert _run(target, writer, preflight=reviewed)["status"] == "blocked_by_rerun_guard"
+
+    second = _run(target, writer)
+    assert second["status"] == "executed"
+    assert second["rows_appended"] == 1
+    assert target.committed_watermark[2] == "2026-06-21"
+    assert len(target.tables["DWH.ODS_SH_SALES"]) == 3
+    assert target.commits == 2
+    assert _run(target, writer)["status"] == "blocked_by_rerun_guard"
+
+
+@pytest.mark.parametrize("end", [None, "invalid-date", "2026-06-18", "2026-06-19"])
+def test_invalid_reviewed_end_never_opens_executor_cursor(end):
+    target = TxnTargetConnection()
+    reviewed = _preflight(target)
+    reviewed["dry_run_delta"]["window_end_inclusive"] = end
+
+    class ForbiddenConnection:
+        def cursor(self):
+            raise AssertionError("Invalid window reached executor")
+
+    writer = TxnWatermarkWriter()
+    result = _run(ForbiddenConnection(), writer, preflight=reviewed)
+    assert result["status"] == "blocked_invalid_append_window"
+    assert result["write_operations_attempted"] == []
+    assert writer.calls == 0
+
+
+def test_rendered_insert_executes_exclusive_start_inclusive_end_in_sqlite():
+    # Exercise the generated predicate, not the fake cursor's interpretation.
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("ATTACH DATABASE ':memory:' AS SH")
+        conn.execute("ATTACH DATABASE ':memory:' AS DWH")
+        conn.execute("CREATE TABLE SH.SALES (TIME_ID TEXT)")
+        conn.execute("CREATE TABLE DWH.ODS_SH_SALES (TIME_ID TEXT)")
+        start = "2026-06-19 00:00:00.000000"
+        inside = "2026-06-20 12:00:00.123455"
+        end = "2026-06-20 12:00:00.123456"
+        later = "2026-06-20 12:00:00.123457"
+        conn.executemany("INSERT INTO SH.SALES VALUES (?)", [(start,), (inside,), (end,), (later,), (None,)])
+        sql = watermark_manager._append_insert_select_sql(
+            source_table="SH.SALES", target_table="DWH.ODS_SH_SALES",
+            append_columns=["TIME_ID"], watermark_column="TIME_ID",
+        )
+        cursor = conn.execute(sql, {"last_watermark": start, "window_end": end})
+        assert cursor.rowcount == 2
+        assert conn.execute("SELECT MIN(TIME_ID), MAX(TIME_ID), COUNT(*) FROM DWH.ODS_SH_SALES").fetchone() == (
+            inside, end, 2,
+        )
+    finally:
+        conn.close()
 
 
 def test_update_watermark_with_caller_connection_does_not_commit():

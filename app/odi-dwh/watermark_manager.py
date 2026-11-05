@@ -253,6 +253,8 @@ def _run_one_incremental_strategy_preflight(
         recommended_next.append("Define source grain and a reliable watermark before live incremental load.")
 
     predicate_template = f"{_qident(watermark_column)} > :last_watermark" if watermark_column else None
+    if strategy == "incremental_append_with_watermark":
+        predicate_template += f" AND {_qident(watermark_column)} <= :window_end"
     dry_run_delta = {
         "predicate_template": predicate_template,
         "estimated_new_rows": estimated_new_rows,
@@ -577,6 +579,17 @@ def execute_incremental_append(
     dry_run_delta = preflight_result.get("dry_run_delta") or {}
     last_watermark = _watermark_bind_value(dry_run_delta.get("window_start_exclusive"))
     candidate_watermark = dry_run_delta.get("window_end_inclusive")
+    window_end = _watermark_bind_value(candidate_watermark)
+    try:
+        valid_window = last_watermark is not None and window_end is not None and window_end > last_watermark
+    except TypeError:
+        valid_window = False
+    if not valid_window:
+        return {
+            **request,
+            "status": "blocked_invalid_append_window",
+            "reason": "a valid increasing reviewed append window is required",
+        }
     append_columns = [str(column).upper() for column in preflight_result.get("append_columns") or []]
     if not append_columns:
         return {
@@ -611,7 +624,7 @@ def execute_incremental_append(
             append_columns=append_columns,
             watermark_column=watermark_column,
         )
-        cursor.execute(sql, {"last_watermark": last_watermark})
+        cursor.execute(sql, {"last_watermark": last_watermark, "window_end": window_end})
         row_count = int(getattr(cursor, "rowcount", 0) or 0)
 
         gates = _compute_post_load_gates(
@@ -701,7 +714,8 @@ def _append_insert_select_sql(
     return (
         f"INSERT INTO {_qname(target_owner, target_name)} ({columns}) "
         f"SELECT {columns} FROM {_qname(source_owner, source_name)} "
-        f"WHERE {_qident(watermark_column)} > :last_watermark"
+        f"WHERE {_qident(watermark_column)} > :last_watermark "
+        f"AND {_qident(watermark_column)} <= :window_end"
     )
 
 
