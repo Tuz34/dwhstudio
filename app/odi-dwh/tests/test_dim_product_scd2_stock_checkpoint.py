@@ -36,6 +36,7 @@ class World:
         self.fail = None
         self.drift = False
         self.write_after_create = False
+        self.nullability_drift = False
 
     def exists(self, table):
         return self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','view') AND name=?", (table,)).fetchone()[0]
@@ -98,6 +99,8 @@ class Cursor:
                     self.rows.append((ordinal, name, kind, None, length, precision, scale, used, chars, nullable))
                 if world.drift and table == checkpoint.BACKUP_TABLE:
                     self.rows[0] = (*self.rows[0][:4], 99, *self.rows[0][5:])
+                if world.nullability_drift and table == "DIM_PRODUCT":
+                    self.rows[0] = (*self.rows[0][:-1], "Y")
         else:
             actual = sql.replace('"DWH".', '').replace("MINUS", "EXCEPT")
             actual = actual.replace("DATE '2400-01-01'", "'2400-01-01'")
@@ -152,6 +155,8 @@ def test_create_then_retained_verify_full_snapshot(world):
     result = create(world)
     assert result["status"] == "passed" and result["created_absent_only"] is True
     assert result["side_effects"] is True and result["full_snapshot_equal"] is True
+    create_at = next(index for index, sql in enumerate(world.log) if sql.startswith("CREATE TABLE"))
+    assert world.log[create_at + 1] == "SET TRANSACTION READ ONLY"
     world.log.clear()
     report = checkpoint.verify_stock_checkpoint(world.factory)
     assert world.log[0] == "SET TRANSACTION READ ONLY"
@@ -198,6 +203,7 @@ def test_failures_never_return_a_success_proof_or_exception_text(world, failure)
         assert world.exists(checkpoint.BACKUP_TABLE)
         assert report["side_effects"] is None and report["backup_may_exist"] is True
         assert report["outcome_unknown"] is True
+        assert report["manual_review_required"] is True
     if failure.endswith("close") or failure == "rollback":
         assert world.connections[-1].events == ["rollback", "cursor_close", "connection_close"]
 
@@ -251,3 +257,18 @@ def test_a_namespace_collision_is_not_overwritten(world):
     world.db.commit()
     assert create(world)["status"] == "blocked"
     assert not any(sql.startswith("CREATE") for sql in world.log)
+
+
+@pytest.mark.parametrize("change", ["history", "ods_backup_rows", "nullability"])
+def test_remaining_stock_and_backup_guards_block_before_ddl(world, change):
+    if change == "history":
+        world.db.execute("UPDATE DIM_PRODUCT SET CURRENT_FLAG='0',EFFECTIVE_TO='2026-06-01' WHERE PRODUCT_SK=0")
+        world.db.commit()
+    elif change == "ods_backup_rows":
+        world.db.execute("INSERT INTO ODI68_ODS_PRODUCTS_BKP DEFAULT VALUES")
+        world.db.commit()
+    else:
+        world.nullability_drift = True
+    report = create(world)
+    assert report["status"] != "passed" and report["ddl_attempted"] is False
+    assert not any(sql.startswith("CREATE TABLE") for sql in world.log)
