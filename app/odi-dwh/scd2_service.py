@@ -14,6 +14,7 @@ from typing import Any
 
 import oracledb
 
+import execution_identity
 import remote_run_contract
 import scd2_builder
 import scd2_odi
@@ -216,8 +217,26 @@ def generate(
             **_km_extra(probe_step["mapping"], mismatches),
         )
 
+    identity_proof = None
+    if scd2_builder.grants_enabled():
+        public, identity_proof = orchestrator.prove_execution_identity(
+            model_code=plan["models"]["target"],
+            context_code=execution_identity.EXECUTION_CONTEXT,
+            schema_name=plan["target"]["owner"],
+        )
+        requested = plan["options"].get("exec_user") if plan["options"].get("exec_user_requested") else None
+        if identity_proof is not None and requested is not None and requested != identity_proof.username:
+            public = execution_identity.public_blocked("execution_identity_rejected", connected=True)
+            identity_proof = None
+        steps.append({"step": "execution_identity", **public})
+        if identity_proof is None:
+            return _generate_response("blocked_execution_identity", plan, steps, 409)
     ddl = scd2_target_executor.execute_target_ddl(
-        plan, approved=True, connection_factory=services.ddl_connection, ddl_user=services.ddl_user
+        plan,
+        approved=True,
+        connection_factory=services.ddl_connection,
+        ddl_user=services.ddl_user,
+        identity_proof=identity_proof,
     )
     steps.append({"step": "target_ddl", **ddl})
     if ddl["status"] not in {"created", "already_exists_matching", "repaired_incomplete_target"}:
@@ -277,8 +296,11 @@ def validate_run_request(body: Mapping[str, Any]) -> dict[str, Any]:
     )
     natural_key = scd2_builder.identifier_list(body.get("natural_key"), "invalid_natural_key")
     version = str(body.get("scenario_version") or "").strip()
-    context = str(body.get("context") or "GLOBAL").strip().upper()
-    if not scd2_builder.IDENTIFIER_RE.fullmatch(context):
+    raw_context = body.get("context", execution_identity.EXECUTION_CONTEXT)
+    if type(raw_context) is not str:
+        raise scd2_builder.Scd2PlanError("invalid_context")
+    context = raw_context.strip().upper()
+    if context != execution_identity.EXECUTION_CONTEXT:
         raise scd2_builder.Scd2PlanError("invalid_context")
     if version and (len(version) > 12 or not all(ch.isalnum() or ch in "._-" for ch in version)):
         raise scd2_builder.Scd2PlanError("invalid_scenario_version")
@@ -373,21 +395,43 @@ def run(
         }, 409
     spec["scenario_version"] = version
 
+    if scd2_builder.grants_enabled():
+        public, proof = orchestrator.prove_execution_identity(
+            model_code=spec["target_model"], context_code=spec["context"], schema_name=spec["target_owner"]
+        )
+        verified = (
+            isinstance(proof, execution_identity.ExecutionIdentityProof)
+            and proof.model_code == spec["target_model"]
+            and proof.context_code == spec["context"]
+            and proof.schema_name == spec["target_owner"]
+        )
+        steps.append({"step": "execution_identity", **public})
+        if not verified:
+            return {"status": "blocked_execution_identity", "steps": steps}, 409
+
     source = (spec["source_owner"], spec["source_table"])
-    before = scd2_postflight.collect_postflight(
+    before = scd2_postflight.collect_stock_postflight(
         spec["target_owner"], spec["target_table"], spec["natural_key"], services.catalog_connection, source=source
     )
-    if before.get("status") != "ok":
+    if before.get("status") != "ok" or before.get("stock_contract_valid") is not True:
         return {"status": "blocked_count_preflight", "steps": steps, "preflight": before}, 503
     run_step = scd2_odi.run_scenario(
         orchestrator, spec["scenario_name"], spec["scenario_version"], spec["context"], True
     )
     steps.append(run_step)
-    after = scd2_postflight.collect_postflight(
+    after = scd2_postflight.collect_stock_postflight(
         spec["target_owner"], spec["target_table"], spec["natural_key"], services.catalog_connection, source=source
     )
     run_ok = run_step["status"] == "passed"
+    outcome_unknown = run_step.get("outcome_unknown") is True
+    may_have_started = run_step.get("side_effects") is True
+    postflight_ok = (
+        after.get("status") == "ok" and after.get("stock_contract_valid") is True
+        and after.get("source_current_count_equal") is True
+    )
     status = "run_completed" if run_ok else "run_unknown" if run_step.get("outcome_unknown") else "run_failed"
+    if run_ok and not postflight_ok:
+        status = "run_completed_postflight_failed"
     return (
         {
             "status": status,
@@ -399,11 +443,14 @@ def run(
             "steps": steps,
             "preflight": before,
             "postflight": after,
+            "scenario_execution_completed": None if outcome_unknown else run_ok,
+            "postflight_checks_passed": postflight_ok,
+            "manual_review_required": outcome_unknown or (not run_ok and may_have_started) or (run_ok and not postflight_ok),
             "raw_rows_included": False,
             "pk_values_included": False,
             "secret_printed": False,
         },
-        200 if run_ok else 502,
+        200 if run_ok and postflight_ok else 502,
     )
 
 
@@ -416,9 +463,11 @@ def postflight(args: Mapping[str, str], services: Scd2Services) -> tuple[dict[st
     source = None
     source_owner = str(args.get("source_owner") or "").strip().upper()
     source_table = str(args.get("source_table") or "").strip().upper()
+    if bool(source_owner) != bool(source_table):
+        return {"status": "invalid_request", "error_code": "invalid_source"}, 400
     if source_owner and source_table:
         source = (source_owner, source_table)
-    result = scd2_postflight.collect_postflight(
+    result = scd2_postflight.collect_stock_postflight(
         owner, table, natural_key, services.catalog_connection, source=source
     )
     if result["status"] == "invalid_request":

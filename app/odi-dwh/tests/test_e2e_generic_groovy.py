@@ -115,7 +115,7 @@ def test_existing_scenario_version_short_circuits_before_generation():
     text = _text("generate_scenario_metadata.groovy")
 
     exact_at = text.index("if (existingExact != null) {")
-    generate_at = text.index("ScenarioUtils.generateNewScen")
+    generate_at = text.index("generator.generateScenario(")
     assert exact_at < generate_at
     assert 'status: "already_ready"' in text[exact_at:generate_at]
 

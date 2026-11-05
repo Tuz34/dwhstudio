@@ -14,27 +14,24 @@ import oracle.odi.core.persistence.transaction.ITransactionDefinition
 import oracle.odi.core.persistence.transaction.ITransactionManager
 import oracle.odi.core.persistence.transaction.ITransactionStatus
 import oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition
-import oracle.odi.core.persistence.dwgobject.IWorkRepositoryDwgObjectCallback
-import oracle.odi.core.persistence.dwgobject.TransactionalDwgObjectTemplate
-import oracle.odi.core.persistence.dwgobject.bridge.DwgObjectBridgeRegistry
 import oracle.odi.core.security.Authentication
 import oracle.odi.domain.mapping.Mapping
-import oracle.odi.domain.mapping.MappingCompatibilityHelper
+import oracle.odi.domain.root.RootIssue
 import oracle.odi.domain.project.OdiFolder
 import oracle.odi.domain.project.OdiProject
 import oracle.odi.domain.project.finder.IOdiProjectFinder
 import oracle.odi.domain.runtime.scenario.OdiScenario
 import oracle.odi.domain.runtime.scenario.finder.IOdiScenarioFinder
 import oracle.odi.domain.mapping.physical.MapPhysicalDesign
-import oracle.odi.generation.support.ScenarioUtils
-import com.sunopsis.dwg.dbobj.DwgMapDeploySpec
-import com.sunopsis.dwg.dbobj.SnpDeploySpec
-import com.sunopsis.dwg.dbobj.SnpMapping
+import oracle.odi.generation.IOdiScenarioGenerator
+import oracle.odi.generation.support.OdiScenarioGeneratorImpl
 
 def checks = []
 def odi = null
 boolean standaloneMode = false
 ITransactionStatus txnStatus = null
+boolean commitAttempted = false
+boolean commitAcknowledged = false
 
 def addCheck = { String name, String status, String detail, Map metadata = [:] ->
     def check = [name: name, status: status, detail: detail]
@@ -50,22 +47,26 @@ def scenariosByName = { IOdiScenarioFinder finder, String scenarioName ->
     try {
         def found = finder.findByName(scenarioName)
         if (found != null) {
-            return found.findAll { it != null }.toList()
+            return found.findAll { it != null && scenarioName.equalsIgnoreCase(it.getName()) }.toList()
         }
     } catch (Throwable ignored) {
         // fall through to the full scan
     }
     try {
         return finder.findAll().findAll { it != null && scenarioName.equalsIgnoreCase(it.getName()) }.toList()
-    } catch (Throwable ignored) {
-        return []
+    } catch (Throwable failure) {
+        throw new IllegalStateException("Scenario lookup could not establish absence")
     }
 }
 
 def scenarioByNameVersion = { IOdiScenarioFinder finder, String scenarioName, String version ->
-    return scenariosByName(finder, scenarioName).find {
+    def exact = scenariosByName(finder, scenarioName).findAll {
         it.getVersion()?.equalsIgnoreCase(version)
     }
+    if (exact.size() > 1) {
+        throw new IllegalStateException("Ambiguous scenario version")
+    }
+    return exact.isEmpty() ? null : exact[0]
 }
 
 try {
@@ -168,7 +169,11 @@ try {
 
     IOdiScenarioFinder scenFinder = (IOdiScenarioFinder) em.getFinder(OdiScenario.class)
     def allVersions = scenariosByName(scenFinder, scenarioName)
-    def existingExact = allVersions.find { it.getVersion()?.equalsIgnoreCase(scenarioVersion) }
+    def exactVersions = allVersions.findAll { it.getVersion()?.equalsIgnoreCase(scenarioVersion) }
+    if (exactVersions.size() > 1) {
+        throw new IllegalStateException("Ambiguous scenario version")
+    }
+    def existingExact = exactVersions.isEmpty() ? null : exactVersions[0]
     def existingLatest = scenFinder.findLatestByName(scenarioName)
     String latestVersion = existingLatest?.getVersion()
     // Ownership must be checked on the requested version, not the latest one.
@@ -221,44 +226,29 @@ try {
     ITransactionDefinition outerTxnDef = new DefaultTransactionDefinition()
     txnStatus = txnMgr.getTransaction(outerTxnDef)
 
-    DwgObjectBridgeRegistry bridgeRegistry = DwgObjectBridgeRegistry.getInstance()
-    MapPhysicalDesign design = mapping.getPhysicalDesigns().get(0)
-    ITransactionDefinition mandatoryTxnDef = new DefaultTransactionDefinition(2)
-    TransactionalDwgObjectTemplate template = new TransactionalDwgObjectTemplate(odi, mandatoryTxnDef)
-    template.execute({ securityToken, masterRepository, workRepository ->
-        design.initForGeneration()
-        MappingCompatibilityHelper.setCompatibleMappingEditable(mapping, true)
-        design.getPhysicalNodes().each { node ->
-            MappingCompatibilityHelper.setReferencedMappingEditable(node, true)
-        }
-        odi.getTransactionalEntityManager().flush()
-        def mappingBridge = bridgeRegistry.getDwgObjectBridge(mapping.getClass())
-        def designBridge = bridgeRegistry.getDwgObjectBridge(design.getClass())
-        def dwgMapping = mappingBridge.getDwgObject(mapping, masterRepository, workRepository, securityToken)
-        def dwgDeploySpec = designBridge.getDwgObject(design, masterRepository, workRepository, securityToken)
-        def scenSource = new DwgMapDeploySpec((SnpMapping) dwgMapping, (SnpDeploySpec) dwgDeploySpec)
-        ScenarioUtils.generateNewScen(
-            odi,
-            scenSource,
-            scenarioName,
-            scenarioVersion,
-            null,
-            true,
-            [],
-            securityToken,
-            masterRepository,
-            workRepository
-        )
-        return null
-    } as IWorkRepositoryDwgObjectCallback)
-
-    txnMgr.commit(txnStatus)
-    txnStatus = null
-
-    def generatedScenario = scenarioByNameVersion(scenFinder, scenarioName, scenarioVersion)
-    if (generatedScenario == null) {
-        throw new Exception("Scenario generation completed without read-back confirmation.")
+    em.flush()
+    IOdiScenarioGenerator generator = new OdiScenarioGeneratorImpl(odi)
+    List<RootIssue> generationIssues = new ArrayList<RootIssue>()
+    OdiScenario generated = generator.generateScenario(mapping, scenarioName, scenarioVersion, generationIssues)
+    if (RootIssue.isErrorOrFatal(generationIssues) || generated == null ||
+            !scenarioName.equalsIgnoreCase(generated.getName()) ||
+            !scenarioVersion.equalsIgnoreCase(generated.getVersion()) ||
+            mapping.getInternalId() == null || generated.getSourceMappingId() == null ||
+            generated.getSourceMappingId().toString() != mapping.getInternalId().toString()) {
+        throw new IllegalStateException("Generated scenario ownership could not be verified")
     }
+    em.flush()
+    def generatedScenario = scenarioByNameVersion(scenFinder, scenarioName, scenarioVersion)
+    if (generatedScenario == null || generatedScenario.getSourceMappingId() == null ||
+            generatedScenario.getSourceMappingId().toString() != mapping.getInternalId().toString()) {
+        throw new IllegalStateException("Generated scenario read-back ownership could not be verified")
+    }
+    // Public generation participates in this transaction. Never manufacture a source ID.
+    // Both the returned object and the finder read-back must prove ownership before commit.
+    commitAttempted = true
+    txnMgr.commit(txnStatus)
+    commitAcknowledged = true
+    txnStatus = null
 
     addCheck("scenario_generated", "pass", "Scenario metadata generated and committed.", [scenario: scenarioName, version: scenarioVersion])
     addCheck("forbidden_operations_not_called", "pass", "No remove, target DDL, data load, scenario start, or load plan start is used by this script.")
@@ -274,25 +264,53 @@ try {
         checks: checks
     ]
     println JsonOutput.toJson(payload)
-} catch (Exception e) {
-    try {
-        if (txnStatus != null && odi != null) {
+} catch (Throwable e) {
+    boolean rollbackAttempted = false
+    boolean rollbackSucceeded = false
+    if (txnStatus != null && odi != null) {
+        rollbackAttempted = true
+        try {
             odi.getTransactionManager().rollback(txnStatus)
-        }
-    } catch (ignored) {}
-    addCheck("scenario_generation_exception", "fail", "Scenario metadata generation failed before completion.")
+            rollbackSucceeded = true
+        } catch (Throwable ignored) {}
+    }
+    String repositoryOutcome = "no_transaction"
+    String reportStatus = "error"
+    Boolean sideEffects = false
+    if (commitAcknowledged) {
+        repositoryOutcome = "committed"
+        reportStatus = "committed_report_incomplete"
+        sideEffects = true
+    } else if (commitAttempted) {
+        repositoryOutcome = "commit_outcome_unknown"
+        reportStatus = "outcome_unknown"
+        sideEffects = null
+    } else if (rollbackAttempted && !rollbackSucceeded) {
+        repositoryOutcome = "rollback_failed"
+        reportStatus = "outcome_unknown"
+        sideEffects = null
+    } else if (rollbackAttempted) {
+        repositoryOutcome = "rolled_back"
+    }
+    addCheck("scenario_generation_exception", "fail", "Scenario metadata generation did not produce a verified success report.")
     def payload = [
         tool: "odi.generate_scenario_metadata",
-        status: "error",
+        status: reportStatus,
         mode: "scenario_metadata_generation",
-        side_effects: false,
+        side_effects: sideEffects,
         repository_connection_attempted: true,
         checks: checks,
-        error_type: e.getClass().getSimpleName()
+        error_type: e.getClass().getSimpleName() ?: "UnnamedError",
+        repository_outcome: repositoryOutcome,
+        commit_attempted: commitAttempted,
+        commit_acknowledged: commitAcknowledged,
+        rollback_attempted: rollbackAttempted,
+        rollback_succeeded: rollbackSucceeded,
+        manual_recovery_review_required: reportStatus != "error",
     ]
     println JsonOutput.toJson(payload)
 } finally {
     if (standaloneMode && odi != null) {
-        odi.close()
+        try { odi.close() } catch (Throwable ignored) {}
     }
 }

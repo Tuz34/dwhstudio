@@ -812,7 +812,7 @@ def _rule_counts(cursor: Any, flow: str, owner: str, table: str) -> dict[str, in
     )
     invalid_dates = isolated._count(
         cursor,
-        f'SELECT COUNT(*) FROM {sql} WHERE "EFFECTIVE_FROM" > "EFFECTIVE_TO" '
+        f'SELECT COUNT(*) FROM {sql} WHERE "EFFECTIVE_FROM" >= "EFFECTIVE_TO" '
         f'OR ("CURRENT_FLAG"={current} AND "EFFECTIVE_TO" <> {OPEN_ENDED_DATE_SQL}) '
         f'OR ("CURRENT_FLAG"={historical} AND "EFFECTIVE_TO" >= {OPEN_ENDED_DATE_SQL})',
     )

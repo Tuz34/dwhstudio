@@ -259,6 +259,7 @@ def test_reread_exception_reports_successful_rollback():
                and conn.role == "work" and conn.set_txn_count == 2, fail)
     report, _, _ = run_executor(world, "migrate")
     assert report["status"] == "failed" and report["rolled_back"] is True
+    assert work(world).rollback_calls == 2
 
 
 @pytest.mark.parametrize("resource", [Conn, Cursor])

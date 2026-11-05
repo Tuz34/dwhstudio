@@ -97,11 +97,21 @@ the flow and rerun the gates immediately before the separately approved run.
 After each app run, `after_run` requires source/target business equality in
 both directions and unique/non-null keys: run 1 has 3 rows; runs 2/3 have 4.
 Run 2 vs T_R2_BKP requires one changed existing, two unchanged, one inserted;
-run 3 vs T_R3_BKP requires zero changed/inserted and four unchanged. Retained
+run 3 vs T_R3_BKP requires zero changed/inserted and four unchanged, plus an
+bidirectional comparison of every fixed target column, including audit
+and timestamp fields. `full_target_snapshot_equal=true` is possible only after
+successful `after_run` verification of run 3 with identical full projections;
+before-run checks cannot prove a rerun. F1/F3 require this equality. F2 is a
+full reload: it records unequal audit values without misclassifying that valid
+reload as a failed incremental no-op, and labels `rerun_semantics=full_reload`.
+`rerun_semantics` is set only for that completed after-run of run 3. Earlier
+passes and `before_run` leave it unset. Any read or cleanup failure leaves the
+snapshot witness false and resets `logical_business_comparison_only` to false
+and `rerun_semantics` to unset. Retained
 backup business rows are checked against internal checkpoint constants, not
 against a source intentionally changed since backup creation.
 
-Business-only comparisons exclude the current app-generated fields:
+Run 1/2 business comparisons exclude the current app-generated fields:
 F1/F2: INSERT_DATE, UPDATE_DATE, SOURCE_SYSTEM, ETL_BATCH_ID.
 F3 additionally: CURRENT_FLAG, EFFECTIVE_FROM, EFFECTIVE_TO. These names do
 not imply Type 2: F3 must still have exactly one row per business key. Target
@@ -109,6 +119,18 @@ column names/counts and the three business type contracts are checked;
 backup-vs-original metadata checks include every column's ordinal, type,
 length, precision, scale, character semantics and nullability. This is not
 an independent verifier of ODI keys, IKM assignment, or audit default formulas.
+Run 3 includes all these columns in its retained-target snapshot equality check.
+The regression covers every non-business column of that flow, including F3
+CURRENT_FLAG, EFFECTIVE_FROM, and EFFECTIVE_TO. Equal values prove logical and
+audit idempotence for that checkpoint only when those values are populated.
+All-NULL equality is vacuous: MINUS treats two NULL projections as the same set,
+and that result is not proof that audit, flag, or effective-date columns were
+filled or left unchanged. The offline fixtures seed those columns as NULL, so a
+green equality there is not populated-audit evidence. Equality also does not prove
+zero physical DML: `physical_dml_count_proven` deliberately stays false. In particular,
+the truncate/reload F2 flow must not be described as a physical no-op. F1/F3
+fail on refreshed audit fields; F2 can pass business reload checks while reporting
+full snapshot equality false. It never claims unchanged audits from row counts.
 
 All comparisons use aggregates; SQL MINUS is paired with total counts and
 key uniqueness so duplicate multiplicity cannot pass as set equality. Each
@@ -126,13 +148,19 @@ false. Counts describe observations, not proof that an uncertain commit failed.
 All ordinary callback exceptions, including unexpected KeyError/custom Exception
 subclasses, become fixed error codes without exception text/class. Cleanup attempts
 rollback, cursor close and connection close independently for every resource,
-even if an earlier attempt raises an unexpected exception. Process-control
-BaseException subclasses are not suppressed.
+even if an earlier attempt raises an unexpected exception. Nested `finally`
+blocks still run the later releases, and the remaining resources, when rollback
+or a close raises `KeyboardInterrupt`, `SystemExit`, or `GeneratorExit`. That
+process-control exception then propagates. Ordinary exceptions are redacted into
+cleanup flags and are not suppressed as process control.
 
 The quality baseline explicitly raises only `broad_except_max` from 300 to 302
 for these two audited handlers in `odi81_isolated_fixtures.py`: `_operation`
 redacts arbitrary ordinary callback failures into fixed report codes, and
-`_cleanup` continues every remaining resource cleanup after an unexpected error.
+`_release` continues every remaining step of `_cleanup` after an unexpected
+ordinary error. Remembering a process-control exception until the other
+releases finish, then re-raising it, is not an `Exception` handler and does not
+add to that budget.
 Narrow exception lists let callback errors escape; suppressing cleanup errors
 would lose the failure evidence. This reviewed budget delta retains both safety
 boundaries without hiding catches behind aliases or weakening any other gate.

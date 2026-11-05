@@ -161,7 +161,13 @@ def test_run_route_returns_postflight(app_client, stub_services, plan):
             return rows
         if "TO_CHAR(MAX" in sql:
             return [("2026-11-04",)]
-        return [(3,)]
+        if sql in {
+            'SELECT COUNT(*) FROM "DM"."DIM_CUSTOMER"',
+            'SELECT COUNT(*) FROM "DM"."DIM_CUSTOMER" WHERE "CURRENT_FLAG"=\'1\'',
+            'SELECT COUNT(*) FROM "DWH"."ODS_CUSTOMERS"',
+        }:
+            return [(3,)]
+        return [(0,)]
 
     stub_services(
         FakeOrchestrator(plan, responses={"scd2_probe.groovy": probe_payload(mapping_exists=True, scenario_exists=True)}),
@@ -181,7 +187,15 @@ def test_run_route_returns_postflight(app_client, stub_services, plan):
 
 
 def test_postflight_route(app_client, stub_services, plan):
-    stub_services(catalog_handler=lambda sql, params: [("2026-11-04",)] if "TO_CHAR" in sql else [(2,)])
+    def catalog(sql, params):
+        if "TO_CHAR" in sql:
+            return [("2026-11-04",)]
+        if sql in {'SELECT COUNT(*) FROM "DM"."DIM_CUSTOMER"',
+                   'SELECT COUNT(*) FROM "DM"."DIM_CUSTOMER" WHERE "CURRENT_FLAG"=\'1\''}:
+            return [(2,)]
+        return [(0,)]
+
+    stub_services(catalog_handler=catalog)
     response = app_client.get("/api/scd2/postflight?owner=DM&table=DIM_CUSTOMER&natural_key=CUST_ID")
     assert response.status_code == 200
     assert response.get_json()["counts"]["target_current"] == 2

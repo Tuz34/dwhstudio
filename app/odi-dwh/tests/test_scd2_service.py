@@ -51,7 +51,10 @@ def ddl_handler(plan, **kw):
         if "FROM ALL_TAB_COLUMNS" in sql:
             return rows
         if "FROM ALL_TAB_PRIVS" in sql:
-            return kw.get("grants", [(g, p, t) for t, g, p in scd2_builder.required_grants(plan)])
+            username = kw.get("execution_user", "ODI_EXEC")
+            return kw.get(
+                "grants", [(g, p, t) for t, g, p in scd2_builder.required_grants(plan, username)]
+            )
         return []
 
     return handler
@@ -106,6 +109,7 @@ def test_generate_happy_path_runs_steps_in_order(plan):
     assert status == 200 and payload["status"] == "generated"
     assert step_names(payload) == [
         "odi_probe",
+        "execution_identity",
         "target_ddl",
         "odi_datastore_register",
         "odi_mapping_create",
@@ -113,10 +117,13 @@ def test_generate_happy_path_runs_steps_in_order(plan):
     ]
     assert orchestrator.order == [
         "scd2_probe.groovy",
+        "execution_identity_probe.groovy",
         "scd2_datastore_register.groovy",
         "scd2_mapping_create.groovy",
         "scenario_generate",
     ]
+    identity = payload["steps"][1]
+    assert identity["status"] == "passed" and "username" not in identity
     assert any(sql.startswith("CREATE TABLE") for sql in ddl_log)
     assert payload["scenario_name"] == "MAP_ODS_CUST_TO_DIM_CUST_SCN"
 
@@ -184,7 +191,7 @@ def test_ddl_failure_stops_before_odi_writes(plan):
     services = make_services(orchestrator, ddl_handler=ddl_handler(plan, fail_on="CREATE SEQUENCE"))
     payload, status = scd2_service.generate(REQUEST, services, approved=True)
     assert payload["status"] == "blocked_ddl_privilege" and status == 409
-    assert orchestrator.order == ["scd2_probe.groovy"]
+    assert orchestrator.order == ["scd2_probe.groovy", "execution_identity_probe.groovy"]
 
 
 def test_ddl_partial_state_is_surfaced(plan):
@@ -194,7 +201,7 @@ def test_ddl_partial_state_is_surfaced(plan):
     assert payload["status"] == "partial_failure_target_ddl" and status == 502
     ddl_step = payload["steps"][-1]
     assert ddl_step["sequence_created"] is True and ddl_step["target_created"] is False
-    assert orchestrator.order == ["scd2_probe.groovy"]
+    assert orchestrator.order == ["scd2_probe.groovy", "execution_identity_probe.groovy"]
 
 
 def test_register_failure_reports_partial_state_with_completed_steps(plan):
@@ -211,7 +218,7 @@ def test_register_failure_reports_partial_state_with_completed_steps(plan):
     services = make_services(orchestrator, ddl_handler=ddl_handler(plan))
     payload, status = scd2_service.generate(REQUEST, services, approved=True)
     assert payload["status"] == "partial_failure_datastore_register" and status == 502
-    assert [s["status"] for s in payload["steps"]] == ["passed", "created", "failed"]
+    assert [s["status"] for s in payload["steps"]] == ["passed", "passed", "created", "failed"]
     assert payload["steps"][-1]["error_type"] == "TargetModelUnavailable"
     assert "scd2_mapping_create.groovy" not in orchestrator.order
 
@@ -252,7 +259,9 @@ def test_missing_ikm_is_imported_before_registration(plan, monkeypatch):
         REQUEST, make_services(orchestrator, ddl_handler=ddl_handler(plan)), approved=True
     )
     assert status == 200 and calls == [True]
-    assert step_names(payload)[:4] == ["odi_probe", "target_ddl", "odi_ikm_import", "odi_datastore_register"]
+    assert step_names(payload)[:5] == [
+        "odi_probe", "execution_identity", "target_ddl", "odi_ikm_import", "odi_datastore_register",
+    ]
 
 
 def test_ikm_import_failure_stops(plan, monkeypatch):
@@ -309,11 +318,19 @@ def run_catalog_handler(plan, counts):
     rows = plan_catalog_rows(plan)
 
     def handler(sql, params):
+        if sql == "SET TRANSACTION READ ONLY":
+            return []
         if "FROM ALL_TAB_COLUMNS" in sql:
             return rows
         if "TO_CHAR(MAX" in sql:
             return [("2026-11-04",)]
-        return [(counts.pop(0) if counts else 5,)]
+        if sql in {
+            'SELECT COUNT(*) FROM "DM"."DIM_CUSTOMER"',
+            'SELECT COUNT(*) FROM "DM"."DIM_CUSTOMER" WHERE "CURRENT_FLAG"=\'1\'',
+            'SELECT COUNT(*) FROM "DWH"."ODS_CUSTOMERS"',
+        }:
+            return [(counts.pop(0) if counts else 5,)]
+        return [(0,)]
 
     return handler
 
@@ -330,6 +347,7 @@ def test_run_executes_scenario_and_returns_count_only_postflight(plan):
     assert set(counts) == {
         "target_total", "target_current", "max_effective_from", "rows_with_effective_to_set",
         "duplicate_current_groups", "invalid_date_order_rows", "source_count",
+        "invalid_current_flag_rows", "invalid_open_end_rows", "invalid_closed_end_rows", "null_natural_key_rows",
     }
     assert counts["max_effective_from"] == "2026-11-04"
     assert "preflight" in payload and payload["raw_rows_included"] is False
@@ -529,7 +547,7 @@ def test_unrepairable_existing_target_blocks_before_odi_writes(plan):
         approved=True,
     )
     assert status == 409 and payload["status"] == "blocked_target_incomplete"
-    assert orchestrator.order == ["scd2_probe.groovy"]
+    assert orchestrator.order == ["scd2_probe.groovy", "execution_identity_probe.groovy"]
 
 
 def test_incomplete_grants_on_fresh_create_stop_generation(plan):
@@ -540,7 +558,7 @@ def test_incomplete_grants_on_fresh_create_stop_generation(plan):
         approved=True,
     )
     assert status == 502 and payload["status"] == "partial_failure_target_grants"
-    assert orchestrator.order == ["scd2_probe.groovy"]
+    assert orchestrator.order == ["scd2_probe.groovy", "execution_identity_probe.groovy"]
 
 
 def run_services(plan, orchestrator):
@@ -593,8 +611,10 @@ def test_generate_blocks_on_missing_exec_user_before_any_odi_write(plan):
         approved=True,
     )
     assert status == 409 and payload["status"] == "blocked_grantee_missing"
-    assert orchestrator.order == ["scd2_probe.groovy"]
+    assert orchestrator.order == ["scd2_probe.groovy", "execution_identity_probe.groovy"]
     assert not any(sql.startswith(("CREATE", "GRANT")) for sql in ddl_log)
+    assert payload["steps"][-1]["missing_grantee_count"] == 1
+    assert "ODI_EXEC" not in str(payload)
     assert "message" in payload["steps"][-1]
 
 

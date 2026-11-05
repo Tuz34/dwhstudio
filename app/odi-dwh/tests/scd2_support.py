@@ -7,6 +7,7 @@ import re
 
 import oracledb
 
+import execution_identity
 import scd2_builder
 from scd2_service import Scd2Services
 
@@ -82,12 +83,17 @@ class FakeConnection:
         self.log = log
         self.handler = handler
         self.closed = False
+        self.autocommit = False
+        self.rollback_count = 0
 
     def cursor(self):
         return FakeCursor(self.log, self.handler)
 
     def close(self):
         self.closed = True
+
+    def rollback(self):
+        self.rollback_count += 1
 
 
 def connection_factory(log, handler):
@@ -240,6 +246,32 @@ def mapping_payload(plan):
     )
 
 
+def identity_payload(plan, username="ODI_EXEC", **overrides):
+    """Groovy success envelope for the plan's target topology. Tests may override it."""
+    payload = {
+        "tool": execution_identity.TOOL,
+        "status": "passed",
+        "mode": execution_identity.MODE,
+        "side_effects": False,
+        "repository_connection_attempted": True,
+        "raw_rows_included": False,
+        "pk_values_included": False,
+        "secret_printed": False,
+        "model_count": 1,
+        "context_count": 1,
+        "mapping_count": 1,
+        "data_server_count": 1,
+        "model_code": plan["models"]["target"],
+        "context_code": execution_identity.EXECUTION_CONTEXT,
+        "schema_name": plan["target"]["owner"],
+        "technology": execution_identity.ORACLE_TECHNOLOGY,
+        "data_server_technology": execution_identity.ORACLE_TECHNOLOGY,
+        "username": username,
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
 class FakeOrchestrator:
     """Stands in for OdiOrchestrator; scripts answer from ``responses``."""
 
@@ -252,6 +284,7 @@ class FakeOrchestrator:
             "scd2_probe.groovy": probe_payload(),
             "scd2_datastore_register.groovy": register_payload(plan),
             "scd2_mapping_create.groovy": mapping_payload(plan),
+            "execution_identity_probe.groovy": identity_payload(plan),
         }
         self.responses.update(responses or {})
         self.scenario_result = scenario_result or {"status": "passed"}
@@ -267,6 +300,27 @@ class FakeOrchestrator:
         self.calls.append(("groovy", script, _GROOVY_APPROVED.get(), dict(params)))
         value = self.responses[script]
         return value(params) if callable(value) else value
+
+    def prove_execution_identity(self, *, model_code, context_code, schema_name):
+        from odi_orchestrator import _GROOVY_APPROVED
+
+        self.calls.append(
+            (
+                "groovy",
+                "execution_identity_probe.groovy",
+                _GROOVY_APPROVED.get(),
+                {
+                    "odi.execution.model": model_code,
+                    "odi.execution.context": context_code,
+                    "odi.execution.schema": schema_name,
+                },
+            )
+        )
+        value = self.responses["execution_identity_probe.groovy"]
+        output = value(model_code) if callable(value) else value
+        return execution_identity.interpret_execution_identity(
+            output, model_code=model_code, context_code=context_code, schema_name=schema_name
+        )
 
     def generate_scenario_metadata(self, **kwargs):
         self.calls.append(("scenario_generate", kwargs))
