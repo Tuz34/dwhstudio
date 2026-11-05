@@ -14,6 +14,7 @@ from typing import Any
 
 import oracledb
 
+import execution_identity
 import remote_run_contract
 import scd2_builder
 import scd2_odi
@@ -216,8 +217,26 @@ def generate(
             **_km_extra(probe_step["mapping"], mismatches),
         )
 
+    identity_proof = None
+    if scd2_builder.grants_enabled():
+        public, identity_proof = orchestrator.prove_execution_identity(
+            model_code=plan["models"]["target"],
+            context_code=execution_identity.EXECUTION_CONTEXT,
+            schema_name=plan["target"]["owner"],
+        )
+        requested = plan["options"].get("exec_user") if plan["options"].get("exec_user_requested") else None
+        if identity_proof is not None and requested is not None and requested != identity_proof.username:
+            public = execution_identity.public_blocked("execution_identity_rejected", connected=True)
+            identity_proof = None
+        steps.append({"step": "execution_identity", **public})
+        if identity_proof is None:
+            return _generate_response("blocked_execution_identity", plan, steps, 409)
     ddl = scd2_target_executor.execute_target_ddl(
-        plan, approved=True, connection_factory=services.ddl_connection, ddl_user=services.ddl_user
+        plan,
+        approved=True,
+        connection_factory=services.ddl_connection,
+        ddl_user=services.ddl_user,
+        identity_proof=identity_proof,
     )
     steps.append({"step": "target_ddl", **ddl})
     if ddl["status"] not in {"created", "already_exists_matching", "repaired_incomplete_target"}:

@@ -57,6 +57,7 @@ GROOVY_ACTION_REGISTRY = {
     "delete_datastore.groovy": _action("repository_write"),
     "delete_mapping.groovy": _action("repository_write"),
     "diagnose_ikm.groovy": _action("read_only"),
+    "execution_identity_probe.groovy": _action("read_only"),
     "dim_product_scd2_capability_probe.groovy": _action("read_only"),
     "dim_product_scd2_datastore_register.groovy": _action("repository_write"),
     "dim_product_scd2_ikm_import.groovy": _action("repository_write"),
@@ -2269,6 +2270,31 @@ class OdiOrchestrator:
                 "error": "ODI scenario generation output parsing failed.",
                 "error_type": type(exc).__name__,
             }
+
+    def prove_execution_identity(
+        self, *, model_code: str, context_code: str, schema_name: str
+    ) -> tuple[dict, object]:
+        """Read one topology-bound execution account. The returned status omits that account."""
+        from execution_identity import (
+            interpret_execution_identity,
+            public_blocked,
+            validate_identity_request,
+        )
+
+        request = validate_identity_request(model_code, context_code, schema_name)
+        if request is None:
+            return public_blocked("execution_identity_invalid", connected=False), None
+        output = self.run_groovy(
+            "execution_identity_probe.groovy",
+            {
+                "odi.execution.model": request[0],
+                "odi.execution.context": request[1],
+                "odi.execution.schema": request[2],
+            },
+        )
+        return interpret_execution_identity(
+            output, model_code=request[0], context_code=request[1], schema_name=request[2]
+        )
 
     def preflight_mapping(self, *, ikm_name: str, src_owner: str | None = None,
                           src_table: str | None = None, context: str = "GLOBAL", approved: bool = False) -> dict:

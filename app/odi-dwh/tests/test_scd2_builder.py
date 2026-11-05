@@ -210,17 +210,22 @@ def test_explicit_byte_semantics_survive_planning_and_char_default_ddl():
     assert "CUST_NAME:VARCHAR2_50_BYTE" in scd2_builder.groovy_params(plan)["odi.scd2.column_types"]
 
 
-def test_sequence_and_grants_text_are_odi_exec_only_by_default():
+def test_preview_omits_execution_grants_until_a_username_is_proven():
     plan = build_scd2_plan(request(), small_columns())
     assert scd2_builder.render_create_sequence(plan) == (
         'CREATE SEQUENCE "DM"."SEQ_DIM_CUSTOMER" START WITH 1 INCREMENT BY 1 NOCYCLE'
     )
-    grants = scd2_builder.render_grant_statements(plan)
+    assert scd2_builder.render_grant_statements(plan) == []
+    assert "exec_user" not in plan["options"]
+    grants = [
+        scd2_builder.render_grant_statement(plan, grant)
+        for grant in scd2_builder.required_grants(plan, "ODI_EXEC")
+    ]
     for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
         assert f'GRANT {privilege} ON "DM"."DIM_CUSTOMER" TO ODI_EXEC' in grants
     assert 'GRANT SELECT ON "DM"."SEQ_DIM_CUSTOMER" TO ODI_EXEC' in grants
     assert len(grants) == 5
-    assert not any("APP_USER" in g or "DROP" in g or "REVOKE" in g for g in grants)
+    assert not any("APP_USER" in grant or "DROP" in grant or "REVOKE" in grant for grant in grants)
 
 
 def test_app_user_reader_grant_is_explicit_opt_in():
