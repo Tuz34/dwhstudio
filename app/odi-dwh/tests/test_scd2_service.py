@@ -17,6 +17,18 @@ from tests.test_remote_run_contract import RemoteFakeOrchestrator as FakeOrchest
 import remote_run_contract
 
 
+@pytest.fixture(autouse=True)
+def default_grant_config(monkeypatch):
+    """Pin the shipped grant defaults so a local runtime setting cannot leak into these tests.
+
+    Tests that exercise another setting override it with the same function-scoped monkeypatch.
+    """
+    import config
+
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", True)
+    monkeypatch.setattr(config, "ODI_EXEC_USER", "ODI_EXEC")
+
+
 @pytest.fixture
 def plan():
     return scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)
