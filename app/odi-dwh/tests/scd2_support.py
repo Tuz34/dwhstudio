@@ -83,12 +83,17 @@ class FakeConnection:
         self.log = log
         self.handler = handler
         self.closed = False
+        self.autocommit = False
+        self.rollback_count = 0
 
     def cursor(self):
         return FakeCursor(self.log, self.handler)
 
     def close(self):
         self.closed = True
+
+    def rollback(self):
+        self.rollback_count += 1
 
 
 def connection_factory(log, handler):

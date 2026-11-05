@@ -16,10 +16,10 @@ current rows per natural key. It returns aggregate-only evidence, never row or
 key values. The existing `collect_postflight` retains its legacy behavior for
 compatibility and is not a strict-stock acceptance witness.
 
-Application run-gate integration is a separate serialized code step after the
-concurrent execution-identity work releases `scd2_service.py`. Until that step
-is reviewed and merged, this helper's tests do not establish that the API uses
-the stricter collector. Code-first Phase A remains open. No live check was run.
+The subsequent serialized service slice wires the application run pre/postflight
+and postflight API to this stricter collector; see `scd2-stock-run-gate.md`.
+The helper tests alone remain distinct from service/route integration evidence.
+Code-first Phase A remains open. No live check was run.
 
 `ok` means the structural checks passed and the read-only transaction completed,
 not that a load is complete. Empty targets and targets with only closed history

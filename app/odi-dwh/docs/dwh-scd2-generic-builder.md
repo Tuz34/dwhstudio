@@ -75,9 +75,10 @@ topology name, and it does not take the first match.
 `ODI_EXEC_USER` is not that proof. A missing, ambiguous, or non-Oracle topology
 stops generation with `blocked_execution_identity` before any DDL. The response
 carries a reason code and counts, not the account name.
-This proof covers `GLOBAL` only; the current run route still accepts other
-contexts and must be bound to the proven context in the separate K3 integration
-before the coding gate or live acceptance can be declared complete.
+This proof covers `GLOBAL` only. The run route is now bound to that context and
+refreshes the proof before a run when execution grants are enabled. Other contexts
+are rejected before callbacks. See `scd2-stock-run-gate.md` for the stock pre/post
+checks and their limits; this does not constitute native or five-flow acceptance.
 
 An explicit `exec_user` argument must equal that proven account or generation
 stops with `execution_identity_rejected`. A request field cannot choose the
