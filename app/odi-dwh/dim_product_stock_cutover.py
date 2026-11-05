@@ -13,6 +13,7 @@ import dim_product_audit_role_repair as audit
 import dim_product_scd2_stock_checkpoint as checkpoint
 import execution_identity
 import remote_run_contract
+import repository_write_contract as write_contract
 from dim_product_scd2_scenario_backup import call_sanitized
 from scd2_builder import TARGET_MODEL_BY_OWNER
 from scd2_manager import _TRACKED_ATTRIBUTES
@@ -92,6 +93,8 @@ def _step(report: dict[str, Any], name: str, child: object, statuses: tuple[str,
             report["side_effects"] = True
         if child.get("outcome_unknown") is True or child.get("side_effects", False) is None:
             report["outcome_unknown"] = True
+            if report["side_effects"] is not True:
+                report["side_effects"] = None
         if child.get("manual_review_required") is True or child.get("manual_recovery_review_required") is True:
             report["manual_review_required"] = True
     if not valid:
@@ -114,12 +117,13 @@ def _witness(report: dict[str, Any], stage: str, factory: Callable[[], Any]) -> 
     return True
 
 
-def _generation_matches(child: object) -> bool:
+def _generation_matches(child: object, *, existing: bool = False) -> bool:
     if not isinstance(child, Mapping):
         return False
     scenario, checks = child.get("scenario"), child.get("checks")
     if (child.get("tool") != "odi.generate_scenario_metadata" or child.get("mode") != "scenario_metadata_generation"
-            or child.get("status") != "passed" or child.get("side_effects") is not True
+            or child.get("status") != ("already_ready" if existing else "passed")
+            or child.get("side_effects") is not (False if existing else True)
             or child.get("repository_connection_attempted") is not True or not isinstance(scenario, Mapping)
             or scenario.get("name") != SCENARIO or scenario.get("version") != VERSION or not isinstance(checks, list)):
         return False
@@ -129,7 +133,8 @@ def _generation_matches(child: object) -> bool:
                 or check.get("status") not in ("pass", "warning") or check["name"] in names):
             return False
         names[check["name"]] = check["status"]
-    return names.get("scenario_generated") == names.get("forbidden_operations_not_called") == "pass"
+    required = "scenario_already_ready" if existing else "scenario_generated"
+    return names.get(required) == names.get("forbidden_operations_not_called") == "pass"
 
 
 def _approved(live: object, approvals: object, reviews: object, exclusive: object, receipt_dir: object) -> bool:
@@ -201,8 +206,10 @@ def execute_stock_cutover(*, live: object = False, approvals: object = None, rev
     generated = call_sanitized(orchestrator.generate_scenario_metadata, approved=True,
         mapping_name=MAPPING, scenario_name=SCENARIO, version=VERSION)
     if not _generation_matches(generated):
-        _step(report, "scenario_generation", None)
-        report["outcome_unknown"] = True
+        state = write_contract.failure(generated, "odi.generate_scenario_metadata", "scenario_metadata_generation", generator=True)
+        if state is None:
+            state = {"side_effects": False} if _generation_matches(generated, existing=True) else write_contract.unverified()
+        _step(report, "scenario_generation", {"status": "failed", **state})
         return report
     _step(report, "scenario_generation", generated)
     for run in (1, 2):
@@ -212,8 +219,9 @@ def execute_stock_cutover(*, live: object = False, approvals: object = None, rev
             return report
         profile = call_sanitized(orchestrator.dim_product_audit_role_action,
             action="stable_preflight", approved=True, approval_scope=audit.STABLE_PREFLIGHT_SCOPE)
-        if (not _step(report, f"audit_before_run_{run}", profile, ("already_repaired",))
-                or profile.get("expression_profile") != audit.STABLE_PROFILE_ID):
+        if not _step(report, f"audit_before_run_{run}", profile, ("already_repaired",)):
+            return report
+        if profile.get("expression_profile") != audit.STABLE_PROFILE_ID:
             _step(report, f"audit_profile_before_run_{run}", None)
             return report
         raw = call_sanitized(orchestrator.run_scenario_remote, approved=True,

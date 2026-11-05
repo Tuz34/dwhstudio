@@ -7,6 +7,7 @@ import dim_product_audit_role_repair as audit
 import dim_product_stock_cutover as cutover
 import odi_orchestrator
 import remote_run_contract
+import dim_product_scd2_stock_checkpoint as checkpoint
 import execution_identity
 from tests.test_dim_product_scd2_stock_checkpoint import World
 from tests.test_dim_product_odi_scd2_mapping_probe import _raw as mapping_report
@@ -35,10 +36,15 @@ class Integration:
                 technology="Oracle", data_server_technology="Oracle", username="SYNTHETIC_EXEC")
             if self.fault == "identity":
                 payload["mapping_count"] = 2
+            if self.fault == "identity_run2" and self.runs == 1:
+                payload["schema_name"] = "OTHER"
             return json.dumps(payload)
         if name == audit.SCRIPT_NAME:
             action = params["odi.audit.action"]
             if action == "stable_preflight":
+                if ((self.fault == "profile_run2" and self.runs == 1)
+                        or (self.fault == "profile_after_repair" and self.stable and self.runs == 0)):
+                    return report_line(action=action, status="ready_for_repair", expression_profile=audit.VOLATILE_PROFILE_ID)
                 return report_line(action=action, status="already_repaired" if self.stable else "ready_for_repair",
                     expression_profile=audit.STABLE_PROFILE_ID if self.stable else audit.VOLATILE_PROFILE_ID,
                     **({"before_image": dict(ALL_OVERWRITE)} if self.stable else {}))
@@ -51,16 +57,25 @@ class Integration:
             assert params["odi.scenario.version"] == "008" and params["odi.mapping"] == cutover.MAPPING
             if self.fault == "generator":
                 return "SYNTHETIC_PRIVATE_EXCEPTION"
+            if self.fault in ("generation_committed", "generation_rolled_back"):
+                from tests.test_repository_write_outcomes import failure
+                raw = failure(outcome="committed" if self.fault == "generation_committed" else "rolled_back")
+                raw.update(tool="odi.generate_scenario_metadata", mode="scenario_metadata_generation")
+                for key in ("raw_rows_included", "pk_values_included", "secret_printed"):
+                    raw.pop(key)
+                raw["checks"] = [{"name": "scenario_generation_exception", "status": "fail"}]
+                return json.dumps(raw)
+            existing = self.fault == "existing_008"
             return json.dumps(dict(tool="odi.generate_scenario_metadata", mode="scenario_metadata_generation",
-                status="passed", side_effects=True, repository_connection_attempted=True,
+                status="already_ready" if existing else "passed", side_effects=not existing, repository_connection_attempted=True,
                 scenario={"name": cutover.SCENARIO, "version": "007" if self.fault == "version" else "008", "latest_version": "008"},
-                checks=[{"name": "scenario_generated", "status": "pass"}, {"name": "forbidden_operations_not_called", "status": "pass"}]))
+                checks=[{"name": "scenario_already_ready" if existing else "scenario_generated", "status": "pass"}, {"name": "forbidden_operations_not_called", "status": "pass"}]))
         assert name == "run_scenario_remote.groovy"
         assert params["odi.context"] == "GLOBAL" and params["odi.scenario.version"] == "008"
         self.runs += 1
         if self.fault == "unknown":
             return "SYNTHETIC_PRIVATE_EXCEPTION"
-        if self.fault == "audit_change":
+        if self.fault == "audit_change" or (self.fault == "audit_change_run2" and self.runs == 2):
             self.world.db.execute("UPDATE DIM_PRODUCT SET UPDATE_DATE=999 WHERE PRODUCT_SK=0")
             self.world.db.commit()
         return json.dumps(remote_run_contract.result("run", status="passed", stage="completed", agent=True,
@@ -176,3 +191,45 @@ def test_business_proof_is_read_only_aggregate_only_and_cleanup_sensitive(integr
     state.world.fail = "connection_close"
     report = cutover.business_proof(state.world.factory)
     assert report["status"] == "failed" and report["counts"] == {}
+
+
+@pytest.mark.parametrize("fault", ["generation_committed", "generation_rolled_back", "existing_008"])
+def test_known_generator_outcomes_are_not_flattened_to_unknown(integration, tmp_path, fault):
+    state, orchestrator = integration
+    assert checkpoint.create_stock_checkpoint(state.world.factory, approved=True,
+        approval_scope=checkpoint.CREATE_SCOPE, review_status="approved")["status"] == "passed"
+    state.stable = True
+    state.fault = fault
+    result = run(state, orchestrator, tmp_path)
+    assert result["status"] == "failed" and state.runs == 0
+    assert result["side_effects"] is (fault == "generation_committed")
+    assert result["outcome_unknown"] is False and result["manual_review_required"] is True
+
+
+@pytest.mark.parametrize("fault,stage,runs", [
+    ("audit_change_run2", "after_run_2_checkpoint", 2),
+    ("identity_run2", "identity_before_run_2", 1),
+    ("profile_run2", "audit_before_run_2", 1),
+    ("profile_after_repair", "stable_audit_probe", 0),
+])
+def test_each_fresh_preflight_and_final_witness_matters(integration, tmp_path, fault, stage, runs):
+    state, orchestrator = integration
+    state.fault = fault
+    result = run(state, orchestrator, tmp_path)
+    assert result["status"] == "failed" and state.runs == runs
+    assert result["stage"] == stage and result["rerun_full_snapshot_equal"] is False
+
+
+def test_relative_receipt_is_rejected_even_if_the_directory_exists(integration, tmp_path, monkeypatch):
+    state, orchestrator = integration
+    monkeypatch.chdir(tmp_path.parent)
+    assert run(state, orchestrator, tmp_path.name)["status"] == "blocked"
+    assert state.calls == [] and state.world.log == []
+
+
+def test_second_layer_rejects_wrong_schema_on_an_otherwise_typed_proof(integration, tmp_path, monkeypatch):
+    state, orchestrator = integration
+    proof = execution_identity.ExecutionIdentityProof("SYNTHETIC_EXEC", "TGT_DWH", "GLOBAL", "OTHER")
+    monkeypatch.setattr(orchestrator, "prove_execution_identity", lambda **kwargs: ({"status": "passed"}, proof))
+    assert run(state, orchestrator, tmp_path)["status"] == "failed"
+    assert state.world.log == []
