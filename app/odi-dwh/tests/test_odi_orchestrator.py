@@ -903,15 +903,16 @@ def test_generate_scenario_metadata_groovy_is_non_destructive_and_no_run():
     script_path = Path(__file__).resolve().parents[1] / "odi_automation" / "generate_scenario_metadata.groovy"
     content = script_path.read_text(encoding="utf-8")
 
-    assert "ScenarioUtils.generateNewScen" in content
-    assert "OdiScenarioGeneratorImpl" not in content
-    assert "generateScenario(" not in content
-    assert "TransactionalDwgObjectTemplate" in content
-    assert "new DefaultTransactionDefinition(2)" in content
+    assert "ScenarioUtils.generateNewScen" not in content
+    assert "new OdiScenarioGeneratorImpl(odi)" in content
+    assert "generator.generateScenario(mapping, scenarioName, scenarioVersion, generationIssues)" in content
+    assert "TransactionalDwgObjectTemplate" not in content
     assert "getTransaction(outerTxnDef)" in content
-    assert "getTransactionalEntityManager().flush()" in content
-    assert "MappingCompatibilityHelper.setCompatibleMappingEditable(mapping, true)" in content
-    assert "MappingCompatibilityHelper.setReferencedMappingEditable(node, true)" in content
+    assert "em.flush()" in content
+    assert "RootIssue.isErrorOrFatal(generationIssues)" in content
+    assert "generatedScenario.getSourceMappingId()" in content
+    assert "setSourceMappingId" not in content
+    assert content.index("generatedScenario.getSourceMappingId()") < content.index("txnMgr.commit")
     assert "txnMgr.commit" in content
     assert "rollback(txnStatus)" in content
     assert "findLatestByName" in content
