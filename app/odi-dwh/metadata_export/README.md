@@ -25,6 +25,15 @@ The local validator compares `const` and `enum` with JSON equality, so a boolean
 is distinct from `0` and `1`. It rejects NaN and infinities inside objects, arrays,
 and tuples. A tuple is not accepted where the schema requires a JSON array.
 
+The non-finite/cycle scan visits each distinct container once, so shared Python
+attribute graphs do not cause exponential rescans. Cycles are invalid; shared
+acyclic containers remain valid. A shared invalid container retains the first
+diagnostic rather than repeating it at every path. Attribute keys and values
+stay out of those diagnostics. Malformed policy labels and conflict references
+produce invalid results without recursive label comparison or value repr dumps.
+This does not make arbitrary Python objects JSON-serializable, protect custom
+recursive schemas, or replace authorization and serialization in a future adapter.
+
 ## Document shape
 
 The header fields are `contract_version`, `generated_at`, `producer`,
