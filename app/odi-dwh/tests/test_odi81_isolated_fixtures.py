@@ -328,6 +328,14 @@ def test_fixed_checkpoint_and_count_only_comparisons(db, flow, run, phase):
     result = verify(db, flow, run, phase)
     assert result["status"] == "passed", result
     assert result["physical_dml_count_proven"] is False
+    if phase == "after_run" and run == 3:
+        assert result["full_target_snapshot_equal"] is True
+        assert result["logical_business_comparison_only"] is False
+        assert result["rerun_semantics"] == ("full_reload" if flow == "F2" else "incremental")
+    else:
+        assert result["full_target_snapshot_equal"] is False
+        assert result["logical_business_comparison_only"] is True
+        assert result["rerun_semantics"] is None
     if phase == "after_run" and run > 1:
         assert result["counts"]["changed_existing"] == (1 if run == 2 else 0)
         assert result["counts"]["inserted"] == (1 if run == 2 else 0)
@@ -354,8 +362,14 @@ def test_rerun_witness_compares_the_complete_target_snapshot(db, flow):
     no_mutation(db)
 
 
-@pytest.mark.parametrize("flow", ["F1", "F2", "F3"])
-@pytest.mark.parametrize("column", ["UPDATE_DATE", "INSERT_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"])
+_NONBUSINESS = [
+    (flow, column)
+    for flow in ("F1", "F2", "F3")
+    for column in (fixture._EDW_EXTRA if flow == "F3" else fixture._ODS_EXTRA)
+]
+
+
+@pytest.mark.parametrize("flow,column", _NONBUSINESS)
 def test_rerun_with_only_an_audit_change_is_not_a_noop(db, flow, column):
     db.provision(flow, state="changed", run=3)
     target = fixture._FLOWS[flow][1]
@@ -364,10 +378,14 @@ def test_rerun_with_only_an_audit_change_is_not_a_noop(db, flow, column):
     assert (result["status"] == "passed") is (flow == "F2")
     assert result["full_target_snapshot_equal"] is False
     assert result["physical_dml_count_proven"] is False
-    if flow == "F2":
-        assert result["rerun_semantics"] == "full_reload"
     assert "SYNTHETIC_CHANGED_AUDIT" not in json.dumps(result)
     no_mutation(db)
+    if flow == "F2":
+        assert result["logical_business_comparison_only"] is True
+        assert result["rerun_semantics"] == "full_reload"
+    else:
+        assert result["logical_business_comparison_only"] is False
+        assert result["rerun_semantics"] is None
 
 
 @pytest.mark.parametrize("flow", ["F1", "F2", "F3"])
@@ -375,9 +393,12 @@ def test_before_run_is_not_a_postrun_noop_witness(db, flow):
     db.provision(flow, state="changed", run=3)
     result = verify(db, flow, run=3, phase="before_run")
     assert result["status"] == "passed" and result["full_target_snapshot_equal"] is False
+    assert result["logical_business_comparison_only"] is True
+    assert result["rerun_semantics"] is None
 
 
-def test_cleanup_failure_cannot_preserve_a_full_snapshot_success(db, monkeypatch):
+@pytest.mark.parametrize("phase", ["before_run", "after_run"])
+def test_cleanup_failure_cannot_preserve_a_full_snapshot_success(db, monkeypatch, phase):
     db.provision("F1", state="changed", run=3)
     original = Cursor.execute
 
@@ -388,9 +409,12 @@ def test_cleanup_failure_cannot_preserve_a_full_snapshot_success(db, monkeypatch
         return result
 
     monkeypatch.setattr(Cursor, "execute", execute)
-    result = verify(db, run=3)
+    result = verify(db, run=3, phase=phase)
     assert result["status"] == "failed" and result["error_code"] == "CleanupFailed"
-    assert result["full_target_snapshot_equal"] is False and result["physical_dml_count_proven"] is False
+    assert result["full_target_snapshot_equal"] is False
+    assert result["logical_business_comparison_only"] is False
+    assert result["rerun_semantics"] is None
+    assert result["physical_dml_count_proven"] is False
     no_mutation(db)
 
 
@@ -641,7 +665,46 @@ def test_unexpected_cleanup_failure_still_attempts_every_resource(failure):
     assert report["error_code"] == "CleanupFailed" and "PRIVATE_SENTINEL" not in json.dumps(report)
 
 
-@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, GeneratorExit])
+@pytest.mark.parametrize("point", ["rollback", "cursor", "connection"])
+def test_process_control_during_cleanup_still_releases_remaining_steps(error_type, point):
+    events = []
+
+    class Resource:
+        def __init__(self, role):
+            self.role = role
+
+        def rollback(self):
+            events.append((self.role, "rollback"))
+            if point == "rollback":
+                raise error_type()
+
+        def close(self):
+            events.append((self.role, "close"))
+            if point == "cursor" and self.role.endswith("cursor"):
+                raise error_type()
+            if point == "connection" and self.role.endswith("connection"):
+                raise error_type()
+
+    resources = [
+        [Resource("guard_connection"), Resource("guard_cursor")],
+        [Resource("writer_connection"), Resource("writer_cursor")],
+    ]
+    report = fixture._report("test")
+    report["status"] = "passed"
+    with pytest.raises(error_type):
+        fixture._cleanup(resources, report)
+    assert events == [
+        (f"{role}_{kind}", method)
+        for role in ("writer", "guard")
+        for kind, method in (("connection", "rollback"), ("cursor", "close"), ("connection", "close"))
+    ]
+    assert resources == []
+    assert report["status"] == "passed" and report["error_code"] != "CleanupFailed"
+    assert error_type.__name__ not in json.dumps(report)
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, GeneratorExit])
 def test_process_control_not_suppressed_but_acquired_resources_cleaned(db, error_type):
     resources = []
     report = fixture._report("test")
