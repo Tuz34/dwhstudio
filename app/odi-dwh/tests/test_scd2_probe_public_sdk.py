@@ -79,8 +79,9 @@ input.scenarios.each { id, spec ->
     if (spec.missing_expression) target.attributes[0].setExpressionText(null)
     def node = mapping.design.nodes.find { it.isTargetNode() }
     node.setTargetComponentKM(new OdiIKM(name: spec.wrong_ikm ? "OTHER" : "IKM Oracle Slowly Changing Dimension"))
-    mapping.design.getAllAPNodes().each { ap ->
-        if (!spec.missing_lkm) ap.setLKM(new OdiLKM(name: spec.wrong_lkm ? "LKM OTHER" : "LKM SQL to Oracle (Built-In)"))
+    mapping.design.getAllAPNodes().eachWithIndex { ap, index ->
+        boolean wrong = spec.wrong_lkm || (spec.mixed_lkm && index == 1)
+        if (!spec.missing_lkm) ap.setLKM(new OdiLKM(name: wrong ? "LKM OTHER" : "LKM SQL to Oracle (Built-In)"))
         if (spec.xkm_only) { ap.km = null; ap.setXKM(new OdiLKM(name: "LKM SQL to Oracle (Built-In)")) }
     }
     World.trace.clear()
@@ -95,6 +96,7 @@ print JsonOutput.toJson(results)
         "wrong_lkm": {"wrong_lkm": True}, "missing_lkm": {"missing_lkm": True},
         "xkm_only": {"xkm_only": True}, "wrong_ikm": {"wrong_ikm": True},
         "missing_attribute": {"missing_attribute": True}, "missing_expression": {"missing_expression": True},
+        "mixed_lkm": {"ap_count": 2, "mixed_lkm": True},
     }
     return fake._run(java, os.pathsep.join([str(fake.GROOVY_JAR), str(classes)]), driver,
                      {"script": str(PROBE), "scenarios": scenarios}, root)
@@ -109,7 +111,7 @@ def test_probe_uses_real_lkm_not_extract_reference(probe_results, scenario, coun
     assert result["trace"] == []
 
 
-@pytest.mark.parametrize("scenario", ["wrong_lkm", "missing_lkm", "xkm_only", "wrong_ikm", "missing_attribute", "missing_expression"])
+@pytest.mark.parametrize("scenario", ["wrong_lkm", "missing_lkm", "mixed_lkm", "xkm_only", "wrong_ikm", "missing_attribute", "missing_expression"])
 def test_probe_never_certifies_wrong_or_incomplete_physical_contract(probe_results, scenario):
     result = probe_results[scenario]
     payload = json.loads(result["output"])

@@ -97,9 +97,10 @@ cannot replace a report that has been written.
 - **Existing mappings.** An existing mapping still blocks. This builder does not
   repair or replace one, so a deployed mapping keeps its old KM and options.
 - **Scenario version.** The pin stays at `001`. No scenario is generated or run.
-- **Read-only probe.** `dim_product_scd2_mapping_probe.groovy` still counts
-  assigned LKMs through `getXKMName`. It is outside this change and can
-  under-count access-point LKMs.
+- **Read-only probe.** The subsequent public-SDK probe slice counts assigned
+  LKMs through `getAllAPNodes()` and `getLKMName()`, not the extract-KM accessor.
+  Every AP must have the exact reviewed built-in LKM; see
+  `odi87-public-sdk-probes.md` for offline evidence and native limitations.
 - **Output that never reaches the normalizer.** If the process dies, times out or
   exits with an error, there is no report. `odi_orchestrator.py` then returns its
   own parse-failure result with `side_effects: false`, even if a commit may have
