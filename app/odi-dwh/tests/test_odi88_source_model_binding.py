@@ -1,8 +1,9 @@
 """ODI-88 item 3: trusted context and owner bind one source model code.
 
 Offline only. Route tests stub Groovy output and persistent steps. Groovy tests execute the
-extracted helper, or the real script against fake SDK objects. Nothing here is a live repository
-proof, and client fields cannot choose the model code.
+extracted helper, or the real script against fake SDK objects, when those optional runtimes are
+installed. A missing runtime skips with a reason and is not a pass. Nothing here is a live
+repository proof, and client fields cannot choose the model code.
 """
 from __future__ import annotations
 
@@ -65,7 +66,7 @@ def _groovy_command() -> list[str]:
         "GROOVY_JAR_NAME", "groovy-all-2.4.17.jar",
     )
     if not (Path(java).is_file() and jar.is_file()):
-        pytest.fail("Standalone Groovy runtime is unavailable")
+        pytest.skip("Standalone Groovy runtime is unavailable; nothing is downloaded.")
     return [java, "-cp", str(jar), "groovy.ui.GroovyMain", "-e", parse_script, str(GROOVY_ROOT / "mapping_preflight.groovy")]
 
 
@@ -416,7 +417,7 @@ def _sdk_available() -> tuple[str, str] | None:
 def test_real_preflight_script_honors_only_the_server_model_property(tmp_path, models, property_line, code, model_code):
     runtime = _sdk_available()
     if runtime is None:
-        pytest.fail("Java, the Groovy jar or the ODI SDK is unavailable")
+        pytest.skip("Java, the Groovy jar or the ODI SDK is unavailable; nothing is downloaded.")
     java, classpath = runtime
     program = (HARNESS.replace("__MODELS__", models).replace("__MODEL_PROPERTY__", property_line)
                .replace("__SCRIPT__", json.dumps(str(SCRIPT))))
@@ -436,3 +437,31 @@ def test_real_preflight_script_honors_only_the_server_model_property(tmp_path, m
         assert payload["source"]["model_code"] == model_code
     assert payload["side_effects"] is False
     assert "CLIENT_MODEL" not in done.stdout
+
+
+def test_unavailable_optional_runtime_skips_and_does_not_pass(monkeypatch, tmp_path):
+    """A missing Java/Groovy/SDK runtime skips before a process. It must not pass or hide an assertion."""
+    monkeypatch.setattr(Path, "is_file", lambda _path: False)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("missing runtime must skip before a process starts"),
+    )
+    with pytest.raises(pytest.skip.Exception, match="Standalone Groovy runtime is unavailable"):
+        test_inspect_source_binding_fails_closed_for_every_unproven_shape()
+    with pytest.raises(pytest.skip.Exception, match="Java, the Groovy jar or the ODI SDK is unavailable"):
+        test_real_preflight_script_honors_only_the_server_model_property(
+            tmp_path, "NOT_EVALUATED", "NOT_EVALUATED", "source_identity_ambiguous", None,
+        )
+
+    # A reported runtime must leave the skip gate. Do not launch Java from this regression.
+    monkeypatch.setattr(Path, "is_file", lambda _path: True)
+    try:
+        command = _groovy_command()
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"a reported Groovy runtime must not skip: {exc}")
+    assert isinstance(command, list) and command
+    try:
+        runtime = _sdk_available()
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"a reported SDK runtime must not skip: {exc}")
+    assert runtime is not None
