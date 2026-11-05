@@ -96,3 +96,24 @@ def test_every_scd2_run_has_a_before_run_scope_and_step():
     for run in (1, 2, 3):
         assert f"verify_before_r{run}" in driver.CANONICAL_CALLS
         assert f"odi81_f4_verify_before_r{run}" in driver.required_scopes("F4")
+
+
+@pytest.mark.parametrize("flow", ["F4", "F5"])
+def test_zero_length_historical_version_is_not_valid_history(db, flow):
+    db.install_source(flow, "changed")
+    db.install_target(flow, "changed")
+    db.install_backup(flow, "target", 2, "seed")
+    table = fixtures.FLOWS[flow]["target_table"]
+    db.db.execute(f'UPDATE "{table}" SET "EFFECTIVE_TO"="EFFECTIVE_FROM" WHERE "CURRENT_FLAG"=\'0\'')
+    db.db.execute(f'UPDATE "{table}" AS c SET "EFFECTIVE_FROM"=(SELECT h."EFFECTIVE_FROM" FROM "{table}" h '
+                  'WHERE h."ENTITY_ID"=c."ENTITY_ID" AND h."CURRENT_FLAG"=\'0\') '
+                  f'WHERE c."CURRENT_FLAG"=\'1\' AND EXISTS (SELECT 1 FROM "{table}" h '
+                  'WHERE h."ENTITY_ID"=c."ENTITY_ID" AND h."CURRENT_FLAG"=\'0\')')
+    assert verify(db, flow, 2)["status"] != "passed"
+
+
+def test_post_write_verification_failure_requires_manual_review():
+    report = fixtures._report("driver")
+    report.update(calls=[], steps=[], http_write_attempted=True)
+    assert driver._accept_step(report, "verify_after_r1", {"status": "failed", "error_code": "BusinessParityMismatch"}) is False
+    assert report["manual_review_required"] is True

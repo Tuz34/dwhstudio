@@ -195,6 +195,8 @@ def _accept_step(report: dict[str, Any], action: str, child: Mapping[str, Any]) 
     report["error_code"] = child.get("error_code") or "VerificationFailed"
     report["stage"] = action
     report["downstream_stopped"] = True
+    if report.get("http_write_attempted") is True:
+        report["manual_review_required"] = True
     fixtures._finish(report)
     return False
 
