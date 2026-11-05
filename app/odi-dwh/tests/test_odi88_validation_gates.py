@@ -46,6 +46,7 @@ class MapPhysicalNode {
 }
 class FakeMapping {
     List events; List results; List nodes; boolean materialize; boolean explode; int calls = 0
+    String name
     List issuesByCall = []
     private boolean next() {
         calls++
@@ -146,6 +147,24 @@ def mapping = new FakeMapping(events: events, results: {json.dumps(results)}, no
     issuesByCall: {json.dumps(list(issues))})
 '''
     return _run(tmp_path, classes + setup + "try {\n" + body + "}\n")
+
+
+def _create(tmp_path, results, *, replacing=True, explode=False, issues=()):
+    source = _text("create_mapping.groovy")
+    helpers = _between(source, "def summarizeIssues = {", "def odi = null")
+    body = _between(source, "    List validationIssues = new ArrayList()\n", "} finally {")
+    setup = f'''
+String mName = "M"
+boolean preserveExistingOnFailure = {str(replacing).lower()}
+def existingMapping = new Object()
+List validationMessages = []
+Map physicalDiag = [same_schema: false, access_points: 0]
+def mapping = new FakeMapping(events: events, results: {json.dumps(results)}, nodes: [], explode: {str(explode).lower()},
+    issuesByCall: {json.dumps(list(issues))})
+def design = new Expando(validate: {{ list, only -> false }}, getPhysicalNodes: {{ [] }})
+def em = new Expando(remove: {{ target -> events << "remove" }}, flush: {{ events << "flush" }})
+'''
+    return _run(tmp_path, helpers + setup + "try {\n" + body + "}\n")
 
 
 def _payload(stdout):
@@ -342,10 +361,67 @@ def test_update_no_op_does_not_consult_the_validation_gate(tmp_path):
     assert events == ["commit"]
 
 
+# --- create_mapping.groovy --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("replacing", [True, False])
+@pytest.mark.parametrize("levels", [["FATAL"], ["ERROR"], ["WARNING", "FATAL"], ["INFO", "ERROR"]])
+def test_create_false_with_error_or_fatal_issue_blocks_before_remove_and_commit(tmp_path, levels, replacing):
+    code, out, events, err = _create(tmp_path, [False], replacing=replacing, issues=[levels])
+    assert code == 1
+    assert events == ["validate", "rollback"]
+    payload = _payload(out)
+    assert payload["status"] == "error"
+    assert payload["action"] == "create_mapping"
+    assert payload["replaced"] is False
+    assert payload["kept_existing_on_failure"] is replacing
+    assert payload["error_type"] == "IllegalStateException"
+    assert any(message.startswith(("ERROR: ", "FATAL: ")) for message in payload["validation_messages"])
+    assert "physical_design" in payload
+    assert "SUCCESS" not in out
+    assert "hunter2" not in out + err
+
+
+@pytest.mark.parametrize("levels", [[], ["WARNING"], ["INFO"], ["WARNING", "INFO"]])
+def test_create_false_with_only_lower_level_issues_replaces_and_commits(tmp_path, levels):
+    code, out, events, _ = _create(tmp_path, [False], issues=[levels])
+    assert code == 0
+    assert events == ["validate", "remove", "flush", "commit"]
+    payload = _payload(out)
+    assert payload["status"] == "passed"
+    assert payload["replaced"] is True
+    assert payload["kept_existing_on_failure"] is False
+
+
+def test_create_new_mapping_with_warning_only_commits_without_remove(tmp_path):
+    code, out, events, _ = _create(tmp_path, [False], replacing=False, issues=[["WARNING"]])
+    assert code == 0
+    assert events == ["validate", "commit"]
+    assert _payload(out)["replaced"] is False
+
+
+@pytest.mark.parametrize("levels", [[], ["WARNING"]])
+def test_create_true_without_error_issues_is_still_rejected(tmp_path, levels):
+    code, out, events, _ = _create(tmp_path, [True], issues=[levels])
+    assert code == 1
+    assert events == ["validate", "rollback"]
+    assert _payload(out)["kept_existing_on_failure"] is True
+
+
+def test_create_validate_exception_keeps_the_existing_mapping(tmp_path):
+    code, out, events, err = _create(tmp_path, [False], explode=True)
+    assert code == 1
+    assert events == ["validate", "rollback"]
+    payload = _payload(out)
+    assert payload["error_type"] == "RuntimeException"
+    assert payload["kept_existing_on_failure"] is True
+    assert "hunter2" not in out + err
+
+
 # --- compile against the installed SDK ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["scd2_mapping_create.groovy", "update_mapping.groovy"])
+@pytest.mark.parametrize("name", ["create_mapping.groovy", "scd2_mapping_create.groovy", "update_mapping.groovy"])
 def test_changed_scripts_compile_against_the_installed_sdk(name):
     """Compile only: resolves every import. Nothing connects and the script body does not run."""
     java = Path(odi_orchestrator._JAVA_BIN)
@@ -379,3 +455,12 @@ def test_final_gate_directly_precedes_the_changed_mapping_commit(name):
     assert "new ArrayList(), false" not in source
     # Issue text never reaches the output: the list is only filled and read through these calls.
     assert source.count("finalValidationIssues") == 3
+
+
+def test_create_mapping_gate_uses_both_signals_before_remove_and_commit():
+    source = _text("create_mapping.groovy")
+    assert "import oracle.odi.domain.root.RootIssue" in source
+    helper = _between(source, "def mappingHasErrors = {", "def collectDesignFailure")
+    assert "mp.validate(issues, false) == true || RootIssue.isErrorOrFatal(issues)" in helper
+    gate = source.index("mappingHasErrors(mapping, validationIssues)")
+    assert gate < source.index("em.remove(existingMapping)") < source.index("txnMgr.commit(txnStatus)")
