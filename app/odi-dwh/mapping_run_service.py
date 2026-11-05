@@ -14,6 +14,7 @@ class MappingRunSuccess(TypedDict):
     batch_id: str
     scenario: str
     version: str
+    context: str
     truncate_target_table: bool
     remote: dict
 
@@ -329,6 +330,7 @@ def execute_mapping_run(app_module: Any, options: MappingRunOptions) -> MappingR
         "batch_id": batch_id,
         "scenario": scenario_name,
         "version": options.version,
+        "context": options.context,
         "truncate_target_table": options.truncate_target_table,
         "remote": run_result,
     }

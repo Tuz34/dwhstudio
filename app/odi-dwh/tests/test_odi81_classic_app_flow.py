@@ -400,3 +400,23 @@ def test_classic_run_route_passes_version_context_and_truncate(app_client, monke
     assert incremental.status_code == 200
     assert seen["options"].truncate_target_table is False
     assert seen["options"].mapping_name == "MAP_ODI81_F3"
+
+
+def test_actual_run_service_success_satisfies_classic_driver_contract(monkeypatch):
+    from types import SimpleNamespace
+    import mapping_run_service as service
+    import odi_orchestrator
+    from tests.test_api_endpoints import _RemoteRunDouble
+
+    class Orchestrator(_RemoteRunDouble):
+        def update_mapping(self, **_kwargs):
+            return "SUCCESS: options updated"
+
+    monkeypatch.setattr(odi_orchestrator, "OdiOrchestrator", Orchestrator)
+    monkeypatch.setattr(service, "_persist_run_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_create_failure_alert", lambda *args, **kwargs: None)
+    options = service.MappingRunOptions("MAP_ODI81_F1", "001", "GLOBAL", False)
+    with odi_orchestrator.groovy_approval_context(True):
+        outcome = service.execute_mapping_run(SimpleNamespace(), options)
+    assert outcome.status_code == 200 and outcome.payload["status"] == "SUCCESS"
+    driver._accept_classic_run("F1", "GLOBAL", outcome.status_code, outcome.payload)
