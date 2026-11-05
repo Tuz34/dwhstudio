@@ -45,6 +45,7 @@ import oracle.odi.domain.project.*
 import oracle.odi.domain.mapping.*
 import oracle.odi.domain.mapping.component.*
 import oracle.odi.domain.mapping.physical.*
+import oracle.odi.domain.root.RootIssue
 import oracle.odi.domain.project.finder.*
 import oracle.odi.domain.model.finder.IOdiDataStoreFinder
 import oracle.odi.core.config.*
@@ -58,6 +59,13 @@ class IkmOptionUnsupported extends RuntimeException {
     IkmOptionUnsupported(String optionName) {
         super("IKM option unsupported")
         this.optionName = optionName
+    }
+}
+
+// Raised when the SDK reports validation errors on a changed mapping. The class name is the only output.
+class MappingValidationFailed extends RuntimeException {
+    MappingValidationFailed() {
+        super("Mapping validation failed")
     }
 }
 
@@ -660,7 +668,13 @@ try {
 
     // ── COMMIT ──────────────────────────────────────────────────────────────
     if (changed) {
-        mapping.validate()
+        // SDK 12.2.1.4: validate() returns TRUE when errors were found, and it can also return FALSE after
+        // adding a FATAL RootIssue (non-overridable target load order), so both signals block the commit.
+        // The issue details are never output.
+        List finalValidationIssues = new ArrayList()
+        if (mapping.validate(finalValidationIssues, false) || RootIssue.isErrorOrFatal(finalValidationIssues)) {
+            throw new MappingValidationFailed()
+        }
         txnMgr.commit(txnStatus)
         println "SUCCESS: Mapping '${mName}' updated (operation=${operation})."
     } else {

@@ -95,8 +95,10 @@ def summarizeIssues = { issues ->
 }
 
 // True when the SDK reports validation errors; collects the issues for the structured error line.
+// SDK 12.2.1.4: validate() can also return FALSE after adding a FATAL RootIssue (non-overridable
+// target load order), so both signals block the replace and the commit.
 def mappingHasErrors = { mp, List issues ->
-    return mp.validate(issues, false) == true
+    return mp.validate(issues, false) == true || RootIssue.isErrorOrFatal(issues)
 }
 
 // On failure also ask the physical design for its own messages (the logical result is often a bare
@@ -879,7 +881,8 @@ try {
     }
     
     // SDK 12.2.1.4: BOTH validate() overloads return TRUE when errors were found (the no-argument
-    // form delegates to the issue-list form). The issue-list overload is the only gate.
+    // form delegates to the issue-list form). Only the issue-list overload is called; its result and
+    // its issues both gate.
     List validationIssues = new ArrayList()
     boolean hasValidationErrors = mappingHasErrors(mapping, validationIssues)
     if (hasValidationErrors) {

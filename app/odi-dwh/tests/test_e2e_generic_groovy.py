@@ -484,6 +484,9 @@ assert !sameLogicalSchema(ds(null), ds(dwh))
 def noErrors = new Expando(validate: { issues, only -> false })
 def withErrors = new Expando(validate: { issues, only -> issues.add("x"); true })
 def sink = []
+// This runner has no SDK on the classpath, so RootIssue is a stub here. test_odi88_validation_gates.py
+// exercises the helper with the real RootIssue.
+binding.setVariable("RootIssue", new Expando(isErrorOrFatal: { list -> false }))
 assert !mappingHasErrors(noErrors, sink)          // false = no errors -> the mapping commits
 assert mappingHasErrors(withErrors, sink)         // true = errors found -> the mapping fails
 assert sink == ["x"]
