@@ -532,6 +532,116 @@ def test_deep_attribute_nest_returns_a_validation_result():
     assert result.valid, _diagnostics(result)
 
 
+@pytest.mark.parametrize("leaf,expected_valid", [("1.0", True), ('float("nan")', False)])
+def test_heavily_shared_attributes_finish_without_exponential_revisits(leaf, expected_valid):
+    script = f'''
+import json
+from metadata_export.validate import load_fixture, validate_document
+document = load_fixture()
+value = [{leaf}]
+for _ in range(40):
+    value = [value, value]
+document["nodes"][0]["attributes"] = {{"SENTINEL_KEY": value}}
+result = validate_document(document)
+print(json.dumps({{"valid": result.valid, "issues": [str(issue) for issue in result.issues]}}))
+'''
+    payload = _run_bounded_script(script, timeout=5.0)
+    assert payload["valid"] is expected_valid
+    assert "SENTINEL_KEY" not in str(payload["issues"])
+    if not expected_valid:
+        assert any("finite" in issue for issue in payload["issues"])
+        assert len(payload["issues"]) <= 2
+
+
+def test_cyclic_nonstring_redaction_labels_return_invalid_without_recursive_equality():
+    script = '''
+import json
+from metadata_export.validate import load_fixture, validate_document
+document = load_fixture()
+left, right = [], []
+left.append(left)
+right.append(right)
+document["nodes"][0]["label"] = left
+document["redaction_policy"]["placeholder_label"] = right
+result = validate_document(document)
+print(json.dumps({"valid": result.valid, "issues": [str(issue) for issue in result.issues]}))
+'''
+    payload = _run_bounded_script(script, timeout=5.0)
+    assert payload["valid"] is False
+    assert any("Expected type string" in issue for issue in payload["issues"])
+
+
+def test_deep_nonstring_conflict_id_has_fixed_bounded_diagnostic():
+    document = _copy(load_fixture())
+    item = next(node for node in document["nodes"] if node.get("status") == "conflicting")
+    value = "SENTINEL_PRIVATE_VALUE"
+    for _ in range(1500):
+        value = [value]
+    item["conflict_ids"] = [value]
+    result = validate_document(document)
+    assert not result.valid
+    assert any("does not match a conflict" in issue.message for issue in result.issues)
+    assert all(len(issue.message) < 160 for issue in result.issues)
+    assert "SENTINEL_PRIVATE_VALUE" not in _diagnostics(result)
+
+
+def test_ephemeral_mapping_containers_are_retained_until_the_walk_finishes():
+    script = '''
+import json
+import weakref
+from collections.abc import Mapping
+from metadata_export.validate import load_fixture, validate_document
+seen = []
+released_during_walk = []
+class TrackedList(list):
+    pass
+class DynamicChildren(Mapping):
+    def __init__(self, poison): self.poison = poison
+    def __iter__(self): return iter(range(50))
+    def __len__(self): return 50
+    def __getitem__(self, index):
+        if self.poison and index == 0:
+            released_during_walk.append(any(ref() is None for ref in seen))
+        value = TrackedList([float("nan") if self.poison and index == 25 else 1.0])
+        seen.append(weakref.ref(value))
+        return value
+class DynamicOuter(Mapping):
+    def __iter__(self): return iter(range(2))
+    def __len__(self): return 2
+    def __getitem__(self, index): return DynamicChildren(index == 1)
+document = load_fixture()
+document["nodes"][0]["attributes"] = DynamicOuter()
+result = validate_document(document)
+print(json.dumps({"valid": result.valid, "released": released_during_walk,
+                  "messages": [issue.message for issue in result.issues]}))
+'''
+    payload = _run_bounded_script(script, timeout=5.0)
+    assert payload["released"] == [False]
+    assert payload["valid"] is False
+    assert any("finite" in message for message in payload["messages"])
+
+
+@pytest.mark.parametrize("bad_field", ["absent", "placeholder_label", "placeholder_type"])
+def test_custom_schema_cannot_bypass_malformed_redaction_policy(bad_field):
+    document = _copy(load_fixture())
+    node = document["nodes"][0]
+    node["visibility"] = "hidden"
+    node["label"] = "SENTINEL_REAL_LABEL"
+    node["attributes"] = {"SENTINEL_KEY": "SENTINEL_VALUE"}
+    document["counts"]["hidden_placeholders"] = sum(
+        entry["visibility"] == "hidden" for entry in document["nodes"]
+    )
+    policy = document["redaction_policy"]
+    if bad_field == "absent":
+        policy.pop("placeholder_label")
+    else:
+        policy[bad_field] = 7
+    result = validate_document(document, {})
+    assert not result.valid
+    assert any(issue.path == "/redaction_policy" for issue in result.issues)
+    assert "SENTINEL" not in _diagnostics(result)
+
+
 def test_deep_nonfinite_attribute_is_rejected_without_recursion_error():
     document = _copy(load_fixture())
     document["nodes"][0]["attributes"] = _nested_attributes(1100, float("nan"))
