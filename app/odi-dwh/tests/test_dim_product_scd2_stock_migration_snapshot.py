@@ -1038,7 +1038,8 @@ def test_lock_contention_blocks_without_the_flag_update():
 
     assert result["status"] == "blocked_lock_contention"
     assert result["committed"] is False
-    assert result["rolled_back"] is False
+    assert result["rolled_back"] is True
+    assert work(world).rollback_calls == 2
     assert result["error_type"] == "DatabaseError"
     assert result["backup_may_exist"] is True
     assert result["backup_verified"] is True

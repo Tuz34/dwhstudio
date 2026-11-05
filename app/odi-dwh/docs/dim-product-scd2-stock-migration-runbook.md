@@ -154,7 +154,30 @@ They are historical. This runbook does not adopt a custom IKM.
   not erase that date.
 - Commit success and commit uncertainty use the same rules as migration.
 
-## What remains open
+## Failure reporting and verification limits
+
+Unexpected adapter exceptions are captured at the same stage-aware boundary as
+driver exceptions. A lost commit acknowledgement remains `outcome_unknown`;
+a failed fresh proof after an acknowledged commit is `committed_unverified`.
+Failed rollback requires manual review, including restore and migration with
+an already-existing backup. Reports and cleanup logs never contain exception
+messages. Process termination (`KeyboardInterrupt` or `SystemExit`) is not
+swallowed and is not a rollback proof.
+
+The trigger guard checks table-level entries in `ALL_TRIGGERS`, not schema-level
+or database-level triggers. Those remain a live operational review requirement.
+`migration_backup_retained: false` means retention was not proven by this call;
+it does not prove that the backup is absent. A separate connection can be unable
+to acquire the proof lock while the original uncertain transaction is alive.
+Never drop or automatically recreate a backup based on that flag.
+
+The row model is supplemented by the frozen, reviewed SQL contract in
+`tests/fixtures/odi87_stock_sql_contract.json`. SQL edits require an explicit
+review of that fixture; tests never refresh it. These checks pin lock modes,
+NOWAIT, metadata predicates, CTAS, UPDATE and date bounds, but do not execute
+Oracle SQL and do not establish live database behavior.
+
+## Remaining cutover work
 
 The fixed path is **NOT FULLY CUT OVER**. These dependencies stay unresolved:
 
