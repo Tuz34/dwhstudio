@@ -57,9 +57,11 @@ class Integration:
             assert params["odi.scenario.version"] == "008" and params["odi.mapping"] == cutover.MAPPING
             if self.fault == "generator":
                 return "SYNTHETIC_PRIVATE_EXCEPTION"
-            if self.fault in ("generation_committed", "generation_rolled_back"):
+            if self.fault in ("generation_committed", "generation_rolled_back", "generation_unknown"):
                 from tests.test_repository_write_outcomes import failure
-                raw = failure(outcome="committed" if self.fault == "generation_committed" else "rolled_back")
+                outcome = {"generation_committed": "committed", "generation_rolled_back": "rolled_back",
+                           "generation_unknown": "commit_outcome_unknown"}[self.fault]
+                raw = failure(outcome=outcome)
                 raw.update(tool="odi.generate_scenario_metadata", mode="scenario_metadata_generation")
                 for key in ("raw_rows_included", "pk_values_included", "secret_printed"):
                     raw.pop(key)
@@ -204,6 +206,53 @@ def test_known_generator_outcomes_are_not_flattened_to_unknown(integration, tmp_
     assert result["status"] == "failed" and state.runs == 0
     assert result["side_effects"] is (fault == "generation_committed")
     assert result["outcome_unknown"] is False and result["manual_review_required"] is True
+
+
+@pytest.mark.parametrize("fault", ["generator", "generation_unknown"])
+def test_unverifiable_generation_stays_unknown_without_prior_writes(integration, tmp_path, fault):
+    state, orchestrator = integration
+    assert checkpoint.create_stock_checkpoint(state.world.factory, approved=True,
+        approval_scope=checkpoint.CREATE_SCOPE, review_status="approved")["status"] == "passed"
+    state.stable = True
+    state.fault = fault
+    report = run(state, orchestrator, tmp_path)
+    assert report["status"] == "failed" and report["stage"] == "scenario_generation"
+    assert report["side_effects"] is None and report["outcome_unknown"] is True
+    assert report["manual_review_required"] is True and state.runs == 0
+    assert "SYNTHETIC_PRIVATE" not in json.dumps(report)
+
+
+def test_before_run_witness_blocks_drift_before_any_scenario_run(integration, tmp_path, monkeypatch):
+    state, orchestrator = integration
+    original = state.script
+
+    def drift_after_generation(name, params):
+        result = original(name, params)
+        if name == "generate_scenario_metadata.groovy":
+            state.world.db.execute("UPDATE DIM_PRODUCT SET UPDATE_DATE=999 WHERE PRODUCT_SK=0")
+            state.world.db.commit()
+        return result
+
+    monkeypatch.setattr(orchestrator, "run_groovy", drift_after_generation)
+    report = run(state, orchestrator, tmp_path)
+    assert report["status"] == "failed" and report["stage"] == "before_run_1_checkpoint"
+    assert state.runs == 0 and report["rerun_full_snapshot_equal"] is False
+
+
+def test_per_run_profile_id_is_checked_even_when_status_is_already_repaired(integration, tmp_path, monkeypatch):
+    state, orchestrator = integration
+    original = orchestrator.dim_product_audit_role_action
+
+    def changed_profile(**kwargs):
+        result = original(**kwargs)
+        if kwargs.get("action") == "stable_preflight" and state.runs == 1:
+            return {**result, "expression_profile": audit.VOLATILE_PROFILE_ID}
+        return result
+
+    monkeypatch.setattr(orchestrator, "dim_product_audit_role_action", changed_profile)
+    report = run(state, orchestrator, tmp_path)
+    assert report["status"] == "failed" and report["stage"] == "audit_profile_before_run_2"
+    assert state.runs == 1 and report["rerun_full_snapshot_equal"] is False
 
 
 @pytest.mark.parametrize("fault,stage,runs", [
