@@ -173,6 +173,7 @@ def mon_dq_score(owner: str = "DWH", table_name: str = "") -> str:
     Calculate a table-level DQ score.
     If table_name is empty, return an aggregate score for all tables.
     Score = (1 - violation_count / total_rows) * 100
+    Unsupported rules make a non-RED result UNKNOWN with score None.
     """
     from data_quality import DataQualityManager
 
@@ -202,6 +203,12 @@ def mon_dq_score(owner: str = "DWH", table_name: str = "") -> str:
                 total = summary["total_rows"]
                 violations = sum(v["violation_count"] for v in summary["violations"])
                 score = round((1 - violations / total) * 100, 1) if total > 0 else 100.0
+                status = "GREEN" if score >= 95 else ("YELLOW" if score >= 80 else "RED")
+                # Unevaluated rules leave the score incomplete: only a measured RED stands.
+                unsupported = summary.get("unsupported_rules") or []
+                if unsupported and status != "RED":
+                    score = None
+                    status = "UNKNOWN"
                 scores.append({
                     "table": f"{owner}.{tname}",
                     "total_rows": total,
@@ -209,7 +216,12 @@ def mon_dq_score(owner: str = "DWH", table_name: str = "") -> str:
                     "errors": summary["errors"],
                     "warnings": summary["warnings"],
                     "score": score,
-                    "status": "GREEN" if score >= 95 else ("YELLOW" if score >= 80 else "RED"),
+                    "status": status,
+                    "unsupported_rule_count": len(unsupported),
+                    "unsupported_rules": [
+                        {key: rule.get(key) for key in ("rule_name", "column", "rule_type")}
+                        for rule in unsupported
+                    ],
                 })
             except Exception as e:
                 scores.append({

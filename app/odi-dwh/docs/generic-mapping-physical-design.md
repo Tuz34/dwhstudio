@@ -21,10 +21,12 @@ mapping, sets the target staging location, assigns the approved IKM and then han
   300 characters; quoted text, URLs and key=value secrets are masked on a best-effort basis) and
   `physical_design` (`same_schema`, `access_points`, `access_points_with_lkm`, `access_point_names`,
   `physical_nodes`, `source_moved`). The success line carries `physical_design` too.
-- These are raw Groovy stdout diagnostics only. On failure the script exits non-zero, the
-  orchestrator captures and discards that stdout and raises a generic `GroovyProcessError`, and
-  `mapping_generator` reads only the status flags and `error_type`, so `validation_messages` do not
-  reach `POST /api/mapping/generate` responses. Redaction is best effort and the free-form SDK text
+- These are raw Groovy stdout diagnostics only. On failure the script exits 1. The orchestrator
+  accepts the last stdout line only if it matches the exact error schema, and returns a `Hata:` marker
+  plus a rebuilt line holding only `status`, `action`, `replaced`, `kept_existing_on_failure` and
+  `error_type`. Any other output returns the generic `GroovyProcessError` marker. `validation_messages`
+  and `physical_design` are discarded on both paths, so they do not reach
+  `POST /api/mapping/generate` responses. Redaction is best effort and the free-form SDK text
   must not be forwarded to any API or UI without a separately reviewed safe projection.
 - Limits: same-schema detection compares logical schema identity, not the physical schemas resolved
   in the effective context. A rejected `design.moveNodes` is not fatal; it is logged and reported as

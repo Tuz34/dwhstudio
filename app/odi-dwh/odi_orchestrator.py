@@ -141,6 +141,17 @@ _SCD2_ERROR_KEYS = frozenset(
         "error_type",
     }
 )
+_CREATE_MAPPING_ERROR_KEYS = frozenset(
+    {
+        "status",
+        "action",
+        "replaced",
+        "kept_existing_on_failure",
+        "error_type",
+        "validation_messages",
+        "physical_design",
+    }
+)
 _STRICT_STRUCTURED_ERROR_CONTRACTS = {
     "scd2_probe.groovy": {
         "tool": "odi.scd2_probe",
@@ -319,6 +330,43 @@ def _groovy_output_failed(text: str) -> bool:
         }:
             return True
     return False
+
+
+def _create_mapping_failure_envelope(stdout: object) -> str | None:
+    """Rebuild the create_mapping failure line from allowlisted fields, or return None.
+
+    The script prints this line last and then exits 1. Free text is validated by type
+    only and never returned, so raw stdout can be parsed without being forwarded.
+    """
+    lines = str(stdout or "").strip().splitlines()
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except (TypeError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _CREATE_MAPPING_ERROR_KEYS
+        or payload["status"] != "error"
+        or payload["action"] != "create_mapping"
+        or payload["replaced"] is not False
+        or type(payload["kept_existing_on_failure"]) is not bool
+        or not isinstance(payload["error_type"], str)
+        or not _ERROR_TYPE_RE.fullmatch(payload["error_type"])
+        or not isinstance(payload["validation_messages"], list)
+        or not isinstance(payload["physical_design"], dict)
+    ):
+        return None
+    envelope = {
+        "status": "error",
+        "action": "create_mapping",
+        "replaced": False,
+        "kept_existing_on_failure": payload["kept_existing_on_failure"],
+        "error_type": payload["error_type"],
+    }
+    marker = f"Hata: ODI Groovy action failed. error_type={payload['error_type']}"
+    return "\n".join((marker, json.dumps(envelope)))
 
 
 def groovy_sync_failure_reason(output: str) -> str | None:
@@ -563,6 +611,12 @@ class OdiOrchestrator:
                 if result.returncode != 0 or _groovy_output_failed(stderr):
                     return json.dumps(remote_run_contract.transport_failure(action, "RemoteProcessFailed"))
                 return json.dumps(remote_run_contract.parse(stdout, action))
+
+            if script_name == "create_mapping.groovy" and result.returncode == 1:
+                envelope = _create_mapping_failure_envelope(result.stdout)
+                if envelope is not None:
+                    logger.error("ODI Groovy returned reviewed structured error: action=%s", script_name)
+                    return envelope
 
             if result.returncode != 0:
                 logger.error(
