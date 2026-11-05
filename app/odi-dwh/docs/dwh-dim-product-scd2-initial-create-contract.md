@@ -31,6 +31,9 @@ The target carries 26 target columns:
 - `PROD_ID NUMBER(6)` as the natural key.
 - the 17 reviewed tracked product attributes.
 - `EFFECTIVE_FROM`, `EFFECTIVE_TO`, and `CURRENT_FLAG` for row-version control.
+  The current contract uses flag `1`/`0` and open-ended date `2400-01-01`.
+  The pre-migration `Y`/`N` and `9999-12-31` block remains named on the plan
+  and is not accepted by load preflight.
 - `INSERT_DATE`, `UPDATE_DATE`, `SOURCE_SYSTEM`, and `ETL_BATCH_ID` for load audit.
 
 ODS audit columns are not copied into the dimension. The natural key is not

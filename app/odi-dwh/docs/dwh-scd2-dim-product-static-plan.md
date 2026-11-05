@@ -66,7 +66,10 @@ attributes with their reviewed source types, and these SCD2/audit columns:
 
 - `EFFECTIVE_FROM DATE`
 - `EFFECTIVE_TO DATE`
-- `CURRENT_FLAG VARCHAR2(1)`
+- `CURRENT_FLAG VARCHAR2(1)`. The current stock contract stores `1` for the
+  open row and `0` for history, with open-ended `EFFECTIVE_TO` of
+  `2400-01-01`. The older `Y`/`N` and `9999-12-31` values are the
+  pre-migration contract and are not accepted by current fixed-path DQ.
 - `INSERT_DATE TIMESTAMP`
 - `UPDATE_DATE TIMESTAMP`
 - `SOURCE_SYSTEM VARCHAR2(50)`

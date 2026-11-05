@@ -1,5 +1,9 @@
 # ODI-68 Offline Compatibility Preparation (Batch A)
 
+Pre-migration historical note (`pre_migration_yn_9999`). The chosen cutover is
+the backed-up stock contract in `dim-product-scd2-stock-migration-runbook.md`.
+This document does not adopt a custom IKM.
+
 This preparation is not deployment authorization and does not diagnose the
 previous live failure. It performs no file writes, exports, imports, database
 connections, repository mutations, scenario generation or scenario execution.

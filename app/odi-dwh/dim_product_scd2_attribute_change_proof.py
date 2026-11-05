@@ -18,6 +18,14 @@ from dim_product_scd2_candidate_preflight import (
     collect_dim_product_scd2_candidate_evidence,
 )
 from dim_product_scd2_load_executor import build_expire_statement
+from dim_product_scd2_stock_contract import (
+    SQL_INSERT_AUDIT,
+    SQL_SOURCE_SYSTEM,
+    SQL_UPDATE_AUDIT,
+    STOCK_CURRENT_FLAG,
+    STOCK_CURRENT_MATCH_SQL,
+    STOCK_OPEN_ENDED_DATE_SQL,
+)
 
 CHANGE_PROOF_APPROVAL_SCOPE = (
     "odi68_dim_product_scd2_attribute_change_rollback_proof"
@@ -107,18 +115,18 @@ SELECT (
        ),
        {source_values},
        :effective_at,
-       DATE '9999-12-31',
-       'Y',
-       SYSTIMESTAMP,
-       NULL,
-       'SH',
+       {STOCK_OPEN_ENDED_DATE_SQL},
+       '{STOCK_CURRENT_FLAG}',
+       {SQL_INSERT_AUDIT},
+       {SQL_UPDATE_AUDIT},
+       {SQL_SOURCE_SYSTEM},
        :batch_id
 FROM "{SOURCE_OWNER}"."{SOURCE_TABLE}" s
 WHERE NOT EXISTS (
     SELECT 1
     FROM "{TARGET_OWNER}"."{TARGET_TABLE}" t
     WHERE t."PROD_ID" = s."PROD_ID"
-      AND t."CURRENT_FLAG" = 'Y'
+      AND t.{STOCK_CURRENT_MATCH_SQL}
 )'''
 
 

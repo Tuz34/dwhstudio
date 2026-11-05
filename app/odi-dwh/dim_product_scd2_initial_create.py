@@ -5,6 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from dim_product_scd2_stock_contract import (
+    PRE_MIGRATION_CONTRACT_ERA,
+    PRE_MIGRATION_CURRENT_FLAG,
+    PRE_MIGRATION_HISTORICAL_FLAG,
+    PRE_MIGRATION_OPEN_ENDED_ISO,
+    STOCK_CONTRACT_ERA,
+    STOCK_CURRENT_FLAG,
+    STOCK_HISTORICAL_FLAG,
+    STOCK_OPEN_ENDED_ISO,
+)
 from scd2_manager import build_dim_product_scd2_plan
 
 _SOURCE = {"owner": "DWH", "table": "ODS_SH_PRODUCTS"}
@@ -102,9 +112,20 @@ def build_dim_product_initial_create_plan(
         },
         "current_row_contract": {
             "column": "CURRENT_FLAG",
-            "current_value": "Y",
-            "historical_value": "N",
+            "contract_era": STOCK_CONTRACT_ERA,
+            "current_value": STOCK_CURRENT_FLAG,
+            "historical_value": STOCK_HISTORICAL_FLAG,
+            "open_ended_effective_to": STOCK_OPEN_ENDED_ISO,
             "maximum_current_rows_per_natural_key": 1,
+        },
+        "pre_migration_current_row_contract": {
+            "column": "CURRENT_FLAG",
+            "contract_era": PRE_MIGRATION_CONTRACT_ERA,
+            "current_value": PRE_MIGRATION_CURRENT_FLAG,
+            "historical_value": PRE_MIGRATION_HISTORICAL_FLAG,
+            "open_ended_effective_to": PRE_MIGRATION_OPEN_ENDED_ISO,
+            "accepted_by_load_preflight": False,
+            "accepted_by": "dim_product_stock_migration_preflight_only",
         },
         "initial_state": "empty_target_and_absent_sequence_before_approved_setup",
         "proposed_persistent_operations": [

@@ -99,7 +99,7 @@ class _Cursor:
             self.result = [(1 if self.sequence_exists else 0,)]
         elif "HAVING COUNT(*) > 1" in upper and '"PRODUCT_SK"' in upper:
             self.result = [(self.product_sk_duplicates,)]
-        elif "HAVING COUNT(*) > 1" in upper and '"CURRENT_FLAG" = \'Y\'' in upper:
+        elif "HAVING COUNT(*) > 1" in upper and '"CURRENT_FLAG" = \'1\'' in upper:
             self.result = [(self.current_duplicates,)]
         elif "HAVING COUNT(*) > 1" in upper:
             self.result = [(self.source_duplicates,)]
@@ -186,6 +186,13 @@ def test_preflight_accepts_aligned_target_and_sequence():
     assert report["target"]["invalid_current_flag_count"] == 0
     assert report["target"]["invalid_effective_date_order_count"] == 0
     assert report["sequence"]["exists"] is True
+    combined = "\n".join(sql for sql, _params in connection.cursor_instance.statements)
+    assert '"CURRENT_FLAG" = \'1\'' in combined
+    assert "NOT IN ('1', '0')" in combined
+    assert "DATE '2400-01-01'" in combined
+    assert "DATE '9999-12-31'" in combined
+    assert '"CURRENT_FLAG" = \'Y\'' not in combined
+    assert '"CURRENT_FLAG" NOT IN (\'Y\', \'N\')' not in combined
 
 
 def test_preflight_fails_closed_on_ods_metadata_drift():

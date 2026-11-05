@@ -200,10 +200,17 @@ def test_fixed_expire_and_insert_statements_use_only_reviewed_objects():
 
     expire = build_expire_statement()
     insert = build_insert_statement()
-    combined = f"{expire}\n{insert}".lower()
+    original = f"{expire}\n{insert}"
+    combined = original.lower()
 
     assert expire.startswith('UPDATE "DWH"."DIM_PRODUCT"')
-    assert '"CURRENT_FLAG" = \'Y\'' in expire
+    assert '"CURRENT_FLAG" = \'1\'' in expire
+    assert '"CURRENT_FLAG" = \'0\'' in expire
+    assert "DATE '2400-01-01'" in insert
+    assert insert.count("SYSTIMESTAMP") == 2
+    assert "DATE '9999-12-31'" not in original
+    assert "'Y'" not in original
+    assert "'N'" not in original
     assert "decode(" in expire.lower()
     assert insert.startswith('INSERT INTO "DWH"."DIM_PRODUCT"')
     assert '"DWH"."SEQ_DIM_PRODUCT".NEXTVAL' in insert

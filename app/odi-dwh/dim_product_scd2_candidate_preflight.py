@@ -11,6 +11,11 @@ import oracledb
 from dim_product_scd2_preflight import (
     run_configured_dim_product_scd2_read_only_preflight,
 )
+from dim_product_scd2_stock_contract import (
+    STOCK_CURRENT_MATCH_SQL,
+    STOCK_INVALID_FLAG_SQL,
+    stock_invalid_effective_sql,
+)
 from scd2_manager import PRODUCTS_SOURCE_METADATA, build_dim_product_scd2_plan
 
 SOURCE_OWNER = "DWH"
@@ -116,32 +121,32 @@ def collect_dim_product_scd2_candidate_evidence(cursor: Any) -> dict[str, int]:
             cursor,
             "duplicate_current_natural_key_groups",
             f'SELECT COUNT(*) FROM (SELECT "PROD_ID" FROM "{TARGET_OWNER}"."{TARGET_TABLE}" '
-            'WHERE "CURRENT_FLAG" = \'Y\' GROUP BY "PROD_ID" HAVING COUNT(*) > 1)',
+            f'WHERE {STOCK_CURRENT_MATCH_SQL} GROUP BY "PROD_ID" HAVING COUNT(*) > 1)',
         ),
         "invalid_current_flags": _scalar(
             cursor,
             "invalid_current_flags",
             f'SELECT COUNT(*) FROM "{TARGET_OWNER}"."{TARGET_TABLE}" '
-            'WHERE "CURRENT_FLAG" NOT IN (\'Y\', \'N\') OR "CURRENT_FLAG" IS NULL',
+            f'WHERE {STOCK_INVALID_FLAG_SQL}',
         ),
         "invalid_effective_dates": _scalar(
             cursor,
             "invalid_effective_dates",
             f'SELECT COUNT(*) FROM "{TARGET_OWNER}"."{TARGET_TABLE}" '
-            'WHERE "EFFECTIVE_FROM" > "EFFECTIVE_TO"',
+            f'WHERE {stock_invalid_effective_sql()}',
         ),
         "current_target_count": _scalar(
             cursor,
             "current_target_count",
             f'SELECT COUNT(*) FROM "{TARGET_OWNER}"."{TARGET_TABLE}" '
-            'WHERE "CURRENT_FLAG" = \'Y\'',
+            f'WHERE {STOCK_CURRENT_MATCH_SQL}',
         ),
         "insert_without_current_count": _scalar(
             cursor,
             "insert_without_current_count",
             f'SELECT COUNT(*) FROM "{SOURCE_OWNER}"."{SOURCE_TABLE}" s '
             f'LEFT JOIN "{TARGET_OWNER}"."{TARGET_TABLE}" t '
-            'ON t."PROD_ID" = s."PROD_ID" AND t."CURRENT_FLAG" = \'Y\' '
+            f'ON t."PROD_ID" = s."PROD_ID" AND t.{STOCK_CURRENT_MATCH_SQL} '
             'WHERE t."PROD_ID" IS NULL',
         ),
         "changed_current_count": _scalar(
@@ -149,7 +154,7 @@ def collect_dim_product_scd2_candidate_evidence(cursor: Any) -> dict[str, int]:
             "changed_current_count",
             f'SELECT COUNT(*) FROM "{SOURCE_OWNER}"."{SOURCE_TABLE}" s '
             f'JOIN "{TARGET_OWNER}"."{TARGET_TABLE}" t '
-            'ON t."PROD_ID" = s."PROD_ID" AND t."CURRENT_FLAG" = \'Y\' '
+            f'ON t."PROD_ID" = s."PROD_ID" AND t.{STOCK_CURRENT_MATCH_SQL} '
             f'WHERE {predicate}',
         ),
         "unchanged_current_count": _scalar(
@@ -157,14 +162,14 @@ def collect_dim_product_scd2_candidate_evidence(cursor: Any) -> dict[str, int]:
             "unchanged_current_count",
             f'SELECT COUNT(*) FROM "{SOURCE_OWNER}"."{SOURCE_TABLE}" s '
             f'JOIN "{TARGET_OWNER}"."{TARGET_TABLE}" t '
-            'ON t."PROD_ID" = s."PROD_ID" AND t."CURRENT_FLAG" = \'Y\' '
+            f'ON t."PROD_ID" = s."PROD_ID" AND t.{STOCK_CURRENT_MATCH_SQL} '
             f'WHERE NOT ({predicate})',
         ),
         "source_missing_current_count": _scalar(
             cursor,
             "source_missing_current_count",
             f'SELECT COUNT(*) FROM "{TARGET_OWNER}"."{TARGET_TABLE}" t '
-            'WHERE t."CURRENT_FLAG" = \'Y\' AND NOT EXISTS ('
+            f'WHERE t.{STOCK_CURRENT_MATCH_SQL} AND NOT EXISTS ('
             f'SELECT 1 FROM "{SOURCE_OWNER}"."{SOURCE_TABLE}" s '
             'WHERE s."PROD_ID" = t."PROD_ID")',
         ),

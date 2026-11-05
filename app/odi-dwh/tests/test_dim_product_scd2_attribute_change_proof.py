@@ -218,6 +218,11 @@ def test_proof_insert_does_not_advance_nontransactional_real_sequence():
     assert 'MAX("PRODUCT_SK")' in upper
     assert "NEXTVAL" not in upper
     assert "SEQ_DIM_PRODUCT" not in upper
+    assert "DATE '2400-01-01'" in upper
+    assert "'1'" in sql
+    assert "DATE '9999-12-31'" not in upper
+    assert "'Y'" not in sql
+    assert sql.count("SYSTIMESTAMP") == 2
 
 
 def test_change_proof_proves_one_expire_one_insert_and_always_rolls_back():
