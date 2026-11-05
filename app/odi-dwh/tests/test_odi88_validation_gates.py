@@ -1,11 +1,21 @@
 """ODI-88: a changed mapping never commits when the final SDK validation reports errors.
 
-The Groovy tests execute the real commit/rollback fragments of the production scripts against
-in-memory fakes (Groovy only: no ODI SDK instance, repository, database or scenario). The fakes are
-overload-agnostic: each validate() call, with or without an issue list, consumes the next scripted
-result, so the tests fix the behaviour and not one particular SDK call shape.
-SDK semantics, confirmed in the installed odi-core.jar bytecode and create_mapping.groovy:
-true means errors were found, and Root.validate() returns validate(list, false).
+The Groovy tests execute the real commit/rollback fragments of the production scripts on the
+installed SDK classpath, with no OdiInstance, repository, database or scenario.
+
+What is real and what is stubbed:
+- Real: the production fragments and oracle.odi.domain.root.RootIssue with isErrorOrFatal.
+- Stubbed: the Mapping (FakeMapping scripts each validate result and the issues it adds), the access
+  point nodes, and the transaction manager. The stub cannot prove what the SDK Mapping does at run
+  time, and nothing here proves a real mapping validates clean.
+
+Each validate() call, with or without an issue list, consumes the next scripted result.
+
+SDK semantics, from javap on the installed odi-core.jar and create_mapping.groovy:
+- true means errors were found, and Root.validate() returns validate(list, false).
+- Mapping.validate(List, boolean) can return false after adding a FATAL RootIssue: a non-overridable
+  target load order error adds the issue at offsets 143-164 and offsets 170-172 return the earlier
+  boolean unchanged. The gate therefore needs both the returned boolean and the issue list.
 """
 from __future__ import annotations
 
@@ -28,19 +38,15 @@ DB_LINK = "LKM Oracle to Oracle Pull (DB Link)"
 
 FAKES = r'''
 import groovy.json.JsonOutput
+import oracle.odi.domain.root.RootIssue
 class MapPhysicalNode {
     String name; String lkmName; List events
     void setLKM(km) { lkmName = km.name; events << ("setLKM:" + name) }
     String getLKMName() { lkmName }
 }
-class FakeIssue {
-    String message
-    String toString() { message }
-    String getMessage() { message }
-    String getLevel() { "ERROR" }
-}
 class FakeMapping {
     List events; List results; List nodes; boolean materialize; boolean explode; int calls = 0
+    List issuesByCall = []
     private boolean next() {
         calls++
         events << "validate"
@@ -53,7 +59,9 @@ class FakeMapping {
     boolean validate() { next() }
     boolean validate(List issues, boolean flag) {
         boolean result = next()
-        if (result) issues << new FakeIssue(message: SECRET_TEXT)
+        // Issues scripted for the call next() just consumed; the no-arg overload has no list to fill.
+        List levels = calls <= issuesByCall.size() ? issuesByCall[calls - 1] : []
+        levels.each { issues << new RootIssue(RootIssue.Level.valueOf(it), SECRET_TEXT) }
         return result
     }
     static String SECRET_TEXT
@@ -86,9 +94,10 @@ def _groovy():
     )
     home = Path(os.environ.get("ODI_HOME", r"C:\Oracle\Middleware\Oracle_Home"))
     jar = home / "oracle_common/modules/thirdparty" / os.environ.get("GROOVY_JAR_NAME", "groovy-all-2.4.17.jar")
-    if not (Path(java).is_file() and jar.is_file()):
-        pytest.skip("Java or the Groovy jar is unavailable; nothing is downloaded.")
-    return [java, "-cp", str(jar), "groovy.ui.GroovyMain"]
+    sdk = home / "odi/sdk/lib"
+    if not (Path(java).is_file() and jar.is_file() and (sdk / "odi-core.jar").is_file()):
+        pytest.skip("Java, the Groovy jar or the ODI SDK is unavailable; nothing is downloaded.")
+    return [java, "-cp", os.pathsep.join([str(sdk / "*"), str(jar)]), "groovy.ui.GroovyMain"]
 
 
 def _run(tmp_path, script):
@@ -101,7 +110,7 @@ def _run(tmp_path, script):
     return done.returncode, head, json.loads(tail.strip()), done.stderr
 
 
-def _scd2(tmp_path, results, *, nodes="[]", materialize=False, explode=False):
+def _scd2(tmp_path, results, *, nodes="[]", materialize=False, explode=False, issues=()):
     source = _text("scd2_mapping_create.groovy")
     header = _between(source, "def safeFlags = {", "def requireProp = {")
     body = _between(source, "    def readAccessPoints = ", "} finally {")
@@ -113,7 +122,8 @@ final String LKM_NAME = "{BUILT_IN}"
 def lkm = [name: LKM_NAME]
 def apNodes = {nodes}
 def mapping = new FakeMapping(events: events, results: {json.dumps(results)}, nodes: apNodes,
-    materialize: {str(materialize).lower()}, explode: {str(explode).lower()})
+    materialize: {str(materialize).lower()}, explode: {str(explode).lower()},
+    issuesByCall: {json.dumps(list(issues))})
 def design = new Expando(getAllAPNodes: {{ apNodes }})
 def attribute = new Expando(getExpression: {{ "EXPR" }})
 def targetComponent = new Expando(getAttributes: {{ [attribute] }})
@@ -122,7 +132,7 @@ def target = new Expando(getColumns: {{ ["COL"] }})
     return _run(tmp_path, header + setup + "try {\n" + body + "}\n")
 
 
-def _update(tmp_path, results, *, changed=True, explode=False):
+def _update(tmp_path, results, *, changed=True, explode=False, issues=()):
     source = _text("update_mapping.groovy")
     classes = "\n".join(
         match.group(0) for match in re.finditer(r"^class \w+ extends .*?^}\n", source, re.M | re.S)
@@ -132,7 +142,8 @@ def _update(tmp_path, results, *, changed=True, explode=False):
 boolean changed = {str(changed).lower()}
 String mName = "M"
 String operation = "update_km"
-def mapping = new FakeMapping(events: events, results: {json.dumps(results)}, nodes: [], explode: {str(explode).lower()})
+def mapping = new FakeMapping(events: events, results: {json.dumps(results)}, nodes: [], explode: {str(explode).lower()},
+    issuesByCall: {json.dumps(list(issues))})
 '''
     return _run(tmp_path, classes + setup + "try {\n" + body + "}\n")
 
@@ -151,7 +162,7 @@ def _assert_no_leak(*texts):
 
 
 def test_scd2_final_validation_errors_never_reach_commit(tmp_path):
-    code, out, events, err = _scd2(tmp_path, [False, True])
+    code, out, events, err = _scd2(tmp_path, [False, True], issues=[[], ["ERROR"]])
     assert "commit" not in events
     assert events[-1] == "rollback"
     payload = _payload(out)
@@ -205,11 +216,46 @@ def test_scd2_lkm_guard_still_precedes_the_final_validation(tmp_path):
     assert events[:2] == ["setLKM:AP", "validate"]
 
 
+@pytest.mark.parametrize("levels", [["FATAL"], ["ERROR"], ["WARNING", "FATAL"], ["INFO", "ERROR"]])
+def test_scd2_false_with_error_or_fatal_issue_never_reaches_commit(tmp_path, levels):
+    """Mapping.validate can return false after adding a FATAL issue; the list must also block."""
+    _, out, events, err = _scd2(tmp_path, [False, False], issues=[[], levels])
+    assert "commit" not in events
+    assert events[-1] == "rollback"
+    payload = _payload(out)
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "MappingValidationFailed"
+    assert "validation_messages" not in payload
+    _assert_no_leak(out, err)
+
+
+@pytest.mark.parametrize("levels", [[], ["WARNING"], ["INFO"], ["WARNING", "INFO"]])
+def test_scd2_false_with_only_lower_level_issues_commits(tmp_path, levels):
+    _, out, events, _ = _scd2(tmp_path, [False, False], issues=[[], levels])
+    assert events.count("commit") == 1
+    assert "rollback" not in events
+    assert _payload(out)["status"] == "passed"
+
+
+@pytest.mark.parametrize("levels", [[], ["WARNING"]])
+def test_scd2_true_without_error_issues_is_still_rejected(tmp_path, levels):
+    _, out, events, _ = _scd2(tmp_path, [False, True], issues=[[], levels])
+    assert "commit" not in events
+    assert _payload(out)["error_type"] == "MappingValidationFailed"
+
+
+def test_scd2_early_materialization_issues_do_not_reject_a_repaired_mapping(tmp_path):
+    """The early call discards its issues and repairs access points; only the final list decides."""
+    _, out, events, _ = _scd2(tmp_path, [True, False], materialize=True, issues=[["FATAL"], []])
+    assert _payload(out)["status"] == "passed"
+    assert events == ["validate", "setLKM:LATE_AP", "validate", "commit"]
+
+
 # --- update_mapping.groovy --------------------------------------------------------------------
 
 
 def test_update_validation_errors_never_reach_commit(tmp_path):
-    code, out, events, err = _update(tmp_path, [True])
+    code, out, events, err = _update(tmp_path, [True], issues=[["ERROR"]])
     assert code == 1
     assert "commit" not in events
     assert events == ["validate", "rollback"]
@@ -260,12 +306,76 @@ def test_update_validation_failure_stays_generic_through_run_groovy(monkeypatch)
     _assert_no_leak(output)
 
 
+@pytest.mark.parametrize("levels", [["FATAL"], ["ERROR"], ["WARNING", "FATAL"], ["INFO", "ERROR"]])
+def test_update_false_with_error_or_fatal_issue_never_reaches_commit(tmp_path, levels):
+    code, out, events, err = _update(tmp_path, [False], issues=[levels])
+    assert code == 1
+    assert events == ["validate", "rollback"]
+    assert _payload(out) == {
+        "status": "error",
+        "action": "update_mapping",
+        "error_type": "MappingValidationFailed",
+    }
+    assert "SUCCESS" not in out
+    _assert_no_leak(out, err)
+
+
+@pytest.mark.parametrize("levels", [[], ["WARNING"], ["INFO"], ["WARNING", "INFO"]])
+def test_update_false_with_only_lower_level_issues_commits(tmp_path, levels):
+    code, out, events, _ = _update(tmp_path, [False], issues=[levels])
+    assert code == 0
+    assert events == ["validate", "commit"]
+    assert "SUCCESS: Mapping 'M' updated" in out
+
+
+@pytest.mark.parametrize("levels", [[], ["WARNING"]])
+def test_update_true_without_error_issues_is_still_rejected(tmp_path, levels):
+    code, out, events, _ = _update(tmp_path, [True], issues=[levels])
+    assert code == 1
+    assert events == ["validate", "rollback"]
+    assert _payload(out)["error_type"] == "MappingValidationFailed"
+
+
+def test_update_no_op_does_not_consult_the_validation_gate(tmp_path):
+    code, _, events, _ = _update(tmp_path, [False], changed=False, issues=[["FATAL"]])
+    assert code == 0
+    assert events == ["commit"]
+
+
+# --- compile against the installed SDK ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["scd2_mapping_create.groovy", "update_mapping.groovy"])
+def test_changed_scripts_compile_against_the_installed_sdk(name):
+    """Compile only: resolves every import. Nothing connects and the script body does not run."""
+    java = Path(odi_orchestrator._JAVA_BIN)
+    sdk = Path(odi_orchestrator._ODI_SDK_LIB) / "odi-core.jar"
+    if not (java.is_file() and sdk.is_file() and Path(odi_orchestrator._GROOVY_JAR).is_file()):
+        pytest.skip("Local SDK or Groovy compiler is unavailable.")
+    done = subprocess.run(
+        [
+            str(java), "-cp", OdiOrchestrator()._build_classpath(), "groovy.ui.GroovyMain", "-e",
+            "new GroovyClassLoader().parseClass(new File(args[0])); println('SDK_COMPILE_OK')",
+            str(ROOT / name),
+        ],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "SDK_COMPILE_OK" in done.stdout
+
+
 # --- static guard for CI, where Groovy is absent and the behaviour tests above skip ------------
 
 
 @pytest.mark.parametrize("name", ["scd2_mapping_create.groovy", "update_mapping.groovy"])
 def test_final_gate_directly_precedes_the_changed_mapping_commit(name):
     source = _text(name)
-    gate = source.rindex("mapping.validate(new ArrayList(), false)")
-    assert "MappingValidationFailed" in source[gate:source.index("txnMgr.commit(txnStatus)", gate)]
+    assert "import oracle.odi.domain.root.RootIssue" in source
+    gate = source.rindex("mapping.validate(finalValidationIssues, false)")
+    block = source[gate:source.index("txnMgr.commit(txnStatus)", gate)]
+    assert "RootIssue.isErrorOrFatal(finalValidationIssues)" in block
+    assert "MappingValidationFailed" in block
     assert source.rfind("mapping.validate()") < gate
+    assert "new ArrayList(), false" not in source
+    # Issue text never reaches the output: the list is only filled and read through these calls.
+    assert source.count("finalValidationIssues") == 3

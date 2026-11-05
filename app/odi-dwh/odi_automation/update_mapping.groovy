@@ -45,6 +45,7 @@ import oracle.odi.domain.project.*
 import oracle.odi.domain.mapping.*
 import oracle.odi.domain.mapping.component.*
 import oracle.odi.domain.mapping.physical.*
+import oracle.odi.domain.root.RootIssue
 import oracle.odi.domain.project.finder.*
 import oracle.odi.domain.model.finder.IOdiDataStoreFinder
 import oracle.odi.core.config.*
@@ -667,8 +668,11 @@ try {
 
     // ── COMMIT ──────────────────────────────────────────────────────────────
     if (changed) {
-        // SDK 12.2.1.4: validate() returns TRUE when errors were found. The issue details are never output.
-        if (mapping.validate(new ArrayList(), false)) {
+        // SDK 12.2.1.4: validate() returns TRUE when errors were found, and it can also return FALSE after
+        // adding a FATAL RootIssue (non-overridable target load order), so both signals block the commit.
+        // The issue details are never output.
+        List finalValidationIssues = new ArrayList()
+        if (mapping.validate(finalValidationIssues, false) || RootIssue.isErrorOrFatal(finalValidationIssues)) {
             throw new MappingValidationFailed()
         }
         txnMgr.commit(txnStatus)

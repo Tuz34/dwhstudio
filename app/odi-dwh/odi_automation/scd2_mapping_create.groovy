@@ -20,6 +20,7 @@ import oracle.odi.domain.mapping.component.DatastoreComponent
 import oracle.odi.domain.mapping.expression.MapExpression
 import oracle.odi.domain.mapping.physical.MapPhysicalDesign
 import oracle.odi.domain.mapping.physical.MapPhysicalNode
+import oracle.odi.domain.root.RootIssue
 import oracle.odi.domain.model.OdiDataStore
 import oracle.odi.domain.model.finder.IOdiDataStoreFinder
 import oracle.odi.domain.project.OdiFolder
@@ -290,8 +291,11 @@ try {
     if (attributeCount != target.getColumns().size() || mappedCount != attributeCount) {
         throw new IllegalStateException("MappingCoverageMismatch")
     }
-    // SDK 12.2.1.4: validate() returns TRUE when errors were found. The issue details are never output.
-    if (mapping.validate(new ArrayList(), false)) {
+    // SDK 12.2.1.4: validate() returns TRUE when errors were found, and it can also return FALSE after
+    // adding a FATAL RootIssue (non-overridable target load order), so both signals block the commit.
+    // The issue details are never output.
+    List finalValidationIssues = new ArrayList()
+    if (mapping.validate(finalValidationIssues, false) || RootIssue.isErrorOrFatal(finalValidationIssues)) {
         throw new IllegalStateException("MappingValidationFailed")
     }
     txnMgr.commit(txnStatus)
