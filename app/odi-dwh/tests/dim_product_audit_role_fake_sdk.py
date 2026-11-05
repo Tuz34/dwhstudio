@@ -44,13 +44,38 @@ class World {
     static Map contract = [:]
     static List trace = []
     static List columns = []
+    static Map currentExpressions = [:]
+    static Map persistedExpressions = [:]
+    static Map hints = [:]
     static boolean committed = false
     static void reset(Map s, Map c) {
         spec = s; contract = c; trace = []; columns = []; committed = false
+        currentExpressions = [:]; persistedExpressions = [:]; hints = [:]
+        String alias = spec.source_alias ?: "ODS_SH_PRODUCTS"
+        if (alias != "ODS_SH_PRODUCTS" && spec.rebind_alias) {
+            (contract.direct_columns ?: []).each { String column -> currentExpressions[column] = alias + "." + column }
+            (contract.literal_expressions ?: [:]).each { key, value -> currentExpressions[key] = value }
+        } else {
+            (contract.fixed_expressions ?: [:]).each { key, value -> currentExpressions[key] = value }
+        }
+        Map audits = spec.audit_profile == "stable" ? (contract.stable_expressions ?: [:]) : (contract.audit_expressions ?: [:])
+        audits.each { key, value -> currentExpressions[key] = value }
+        (spec.expressions ?: [:]).each { key, value -> currentExpressions[key] = value }
+        currentExpressions.each { key, value -> persistedExpressions[key] = value }
+        (contract.target_columns ?: []).each { String name -> hints[name] = name == "PRODUCT_SK" ? "TARGET" : "NO_HINT" }
+        (spec.execute_hints ?: [:]).each { key, value -> hints[key] = value }
     }
     static void log(String event) { trace << event }
-    static void commitColumns() { columns.each { it.persisted = it.current } }
-    static void rollbackColumns() { columns.each { it.current = it.persisted } }
+    static void commitColumns() {
+        columns.each { it.persisted = it.current }
+        persistedExpressions = [:]
+        currentExpressions.each { key, value -> persistedExpressions[key] = value }
+    }
+    static void rollbackColumns() {
+        columns.each { it.current = it.persisted }
+        currentExpressions = [:]
+        persistedExpressions.each { key, value -> currentExpressions[key] = value }
+    }
     static class FailingOut {
         Writer writer
         int failures
@@ -282,26 +307,42 @@ class FakeExpression {
     String text
     String getText() { text }
 }
+class Hint {
+    String label
+    String name() { label }
+}
 class FakeAttribute {
-    String name; Object expression
+    String name
     String getName() { name }
-    Object getExpression() { expression }
-    void setExpressionText(String t) { World.log("forbidden_write") }
+    Object getExpression() {
+        String text = World.currentExpressions[name]
+        text == null ? null : new FakeExpression(text: text)
+    }
+    void setExpressionText(String t) {
+        World.log("setExpressionText:" + name)
+        if (World.spec.expression_setter_raises_on == name) throw new RuntimeException("''' + RAISE_TOKEN + r'''")
+        if (!(name in ["INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"])) {
+            World.log("forbidden_write")
+            return
+        }
+        World.currentExpressions[name] = t
+    }
+    Hint getExecuteOnHint() {
+        String label = World.hints[name]
+        label == null ? null : new Hint(label: label)
+    }
+    void setExecuteOnHint(Object ignored) { World.log("forbidden_write") }
 }
 class DatastoreComponent {
     def bound; boolean target
     DatastoreComponent(def b, boolean t) { bound = b; target = t }
     def getBoundDataStore() { bound }
+    String getName() { target ? "DIM_PRODUCT" : (World.spec.source_alias ?: "ODS_SH_PRODUCTS") }
     String getIntegrationType() { target ? (World.spec.integration_type ?: "SCD") : null }
     List getAttributes() {
         List names = bound.getColumns()*.getName()
         (World.spec.remove_attributes ?: []).each { if (target) names.remove(it) }
-        names.collect { String n ->
-            String text = World.contract.audit_expressions[n] ?: ("OTHER_" + n + "_''' + EXPRESSION_TOKEN + r'''")
-            Map overrides = World.spec.expressions ?: [:]
-            if (target && overrides.containsKey(n)) text = overrides[n]
-            new FakeAttribute(name: n, expression: (target && text == null) ? null : new FakeExpression(text: text))
-        }
+        names.collect { String n -> new FakeAttribute(name: n) }
     }
 }
 ''',
@@ -315,13 +356,15 @@ import oracle.odi.core.OdiInstance
 
 Map input = new JsonSlurper().parse(System.in)
 ["odi.audit.action", "odi.audit.approved", "odi.audit.approval_scope", "odi.audit.expected_before",
- "odi.audit.changed_columns", "odi.project", "odi.folder"].each { System.clearProperty(it) }
+ "odi.audit.changed_columns", "odi.audit.changed_expressions", "odi.audit.expression_profile_before",
+ "odi.audit.expression_sql", "odi.project", "odi.folder"].each { System.clearProperty(it) }
 Map results = [:]
 input.scenarios.each { String id, Map scenario ->
     Map spec = scenario.spec ?: [:]
     World.reset(spec, input.contract)
     ["odi.audit.action", "odi.audit.approved", "odi.audit.approval_scope", "odi.audit.expected_before",
-     "odi.audit.changed_columns", "odi.project", "odi.folder"].each { System.clearProperty(it) }
+     "odi.audit.changed_columns", "odi.audit.changed_expressions", "odi.audit.expression_profile_before",
+     "odi.audit.expression_sql", "odi.project", "odi.folder"].each { System.clearProperty(it) }
     scenario.params.each { key, value -> System.setProperty(key, value) }
     StringWriter captured = new StringWriter()
     Map variables = [out: new World.FailingOut(writer: captured, failures: spec.print_failures ?: 0)]
@@ -343,6 +386,7 @@ input.scenarios.each { String id, Map scenario ->
     results[id] = [
         output: captured.toString(), trace: World.trace, committed: World.committed, script_raised: scriptRaised,
         persisted: World.columns.collectEntries { [(it.getName()): it.persisted?.name()] },
+        expressions: World.persistedExpressions, hints: World.hints,
     ]
 }
 print JsonOutput.toJson(results)

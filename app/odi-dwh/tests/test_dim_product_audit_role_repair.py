@@ -14,20 +14,34 @@ from dim_product_audit_role_repair import (
     PREFLIGHT_SCOPE,
     REPAIR_SCOPE,
     RESTORE_SCOPE,
+    STABLE_PREFLIGHT_SCOPE,
+    STABLE_PROFILE_ID,
+    STABLE_REPAIR_SCOPE,
+    STABLE_RESTORE_SCOPE,
+    VOLATILE_PROFILE_ID,
     SCRIPT_NAME,
     expected_contract,
+    fixed_expression_issue,
     normalize_audit_role_report,
     run_audit_role_action,
+    stable_audit_expression,
 )
 from tests import dim_product_audit_role_fake_sdk as fake
 
 ALL_NULL = {column: "NULL" for column in AUDIT_COLUMNS}
 ALL_OVERWRITE = {column: "OVERWRITE_ON_CHANGE" for column in AUDIT_COLUMNS}
-SCOPES = {"preflight": PREFLIGHT_SCOPE, "repair": REPAIR_SCOPE, "restore": RESTORE_SCOPE}
+SCOPES = {
+    "preflight": PREFLIGHT_SCOPE,
+    "repair": REPAIR_SCOPE,
+    "restore": RESTORE_SCOPE,
+    "stable_preflight": STABLE_PREFLIGHT_SCOPE,
+    "stable_repair": STABLE_REPAIR_SCOPE,
+    "stable_restore": STABLE_RESTORE_SCOPE,
+}
 LEAK_PATTERN = re.compile(r"RAISE_TOKEN|EXPRESSION_TOKEN|jdbc|CURRENT_TIMESTAMP|SESS_NO|odiRef|internal_id", re.I)
 
 
-def params(action="preflight", *, before=None, changed=None, **overrides):
+def params(action="preflight", *, before=None, changed=None, profile=None, expressions=None, **overrides):
     values = {
         "odi.audit.action": action,
         "odi.audit.approved": "true",
@@ -39,6 +53,10 @@ def params(action="preflight", *, before=None, changed=None, **overrides):
         values["odi.audit.expected_before"] = repair.encode_image(before)
     if changed is not None:
         values["odi.audit.changed_columns"] = ",".join(changed)
+    if profile is not None:
+        values["odi.audit.expression_profile_before"] = profile
+    if expressions is not None:
+        values["odi.audit.changed_expressions"] = ",".join(expressions)
     values.update(overrides)
     return {key: value for key, value in values.items() if value is not None}
 
@@ -150,6 +168,81 @@ SCENARIOS = {
     "script_restore_changed_missing": {"params": params("restore", before=ALL_NULL), "spec": {}},
     "script_restore_changed_other_column": {"params": params("restore", before=ALL_NULL, changed=["PROD_NAME"]), "spec": {}},
     "script_restore_changed_not_null_before": {"params": params("restore", before=ALL_OVERWRITE, changed=["INSERT_DATE"]), "spec": {}},
+    "script_stable_profile_sql": {
+        "params": params(
+            "stable_repair",
+            before=ALL_NULL,
+            changed=list(AUDIT_COLUMNS),
+            expressions=list(AUDIT_COLUMNS),
+            **{
+                "odi.audit.expression_profile_before": "SELECT SECRET",
+                "odi.audit.expression_sql": "CASE WHEN DECODE(SECRET) THEN SELECT SECRET END",
+            },
+        ),
+        "spec": {},
+    },
+    "stable_preflight_volatile": {"params": params("stable_preflight"), "spec": {}},
+    "stable_repair_all": {
+        "params": params("stable_repair", before=ALL_NULL, changed=list(AUDIT_COLUMNS), expressions=list(AUDIT_COLUMNS), profile=VOLATILE_PROFILE_ID),
+        "spec": {},
+    },
+    "stable_repair_expressions_only": {
+        "params": params("stable_repair", before=ALL_OVERWRITE, changed=[], expressions=list(AUDIT_COLUMNS), profile=VOLATILE_PROFILE_ID),
+        "spec": {"roles": overwrite_roles()},
+    },
+    "stable_repair_partial_roles": {
+        "params": params(
+            "stable_repair",
+            before={**ALL_NULL, "INSERT_DATE": "OVERWRITE_ON_CHANGE"},
+            changed=[column for column in AUDIT_COLUMNS if column != "INSERT_DATE"],
+            expressions=list(AUDIT_COLUMNS),
+            profile=VOLATILE_PROFILE_ID,
+        ),
+        "spec": {"roles": {"INSERT_DATE": "OVERWRITE_ON_CHANGE"}},
+    },
+    "stable_repair_already": {
+        "params": params("stable_repair", before=ALL_OVERWRITE, changed=[], expressions=[], profile=STABLE_PROFILE_ID),
+        "spec": {"roles": overwrite_roles(), "audit_profile": "stable"},
+    },
+    "stable_repair_rebind_alias": {
+        "params": params("stable_repair", before=ALL_NULL, changed=list(AUDIT_COLUMNS), expressions=list(AUDIT_COLUMNS), profile=VOLATILE_PROFILE_ID),
+        "spec": {"source_alias": "SRC_ALIAS", "rebind_alias": True},
+    },
+    "stable_restore_to_volatile": {
+        "params": params("stable_restore", before=ALL_NULL, changed=list(AUDIT_COLUMNS), expressions=list(AUDIT_COLUMNS), profile=VOLATILE_PROFILE_ID),
+        "spec": {"roles": overwrite_roles(), "audit_profile": "stable"},
+    },
+    "stable_restore_already": {
+        "params": params("stable_restore", before=ALL_NULL, changed=list(AUDIT_COLUMNS), expressions=list(AUDIT_COLUMNS), profile=VOLATILE_PROFILE_ID),
+        "spec": {},
+    },
+    "legacy_flag": {"params": params(**REPAIR_ALL), "spec": {"expressions": {"CURRENT_FLAG": "Y"}}},
+    "legacy_end": {"params": params(**REPAIR_ALL), "spec": {"expressions": {"EFFECTIVE_TO": "DATE '9999-12-31'"}}},
+    "unknown_end": {"params": params(**REPAIR_ALL), "spec": {"expressions": {"EFFECTIVE_TO": "DATE '1999-01-01'"}}},
+    "wrong_tracked_expression": {"params": params(**REPAIR_ALL), "spec": {"expressions": {"PROD_NAME": "SRC_ALIAS.PROD_NAME"}}},
+    "audit_hint_target": {"params": params(**REPAIR_ALL), "spec": {"execute_hints": {"INSERT_DATE": "TARGET"}}},
+    "sk_hint_missing": {"params": params(**REPAIR_ALL), "spec": {"execute_hints": {"PRODUCT_SK": "NO_HINT"}}},
+    "bad_source_alias": {"params": params(**REPAIR_ALL), "spec": {"source_alias": "bad-name"}},
+    "stable_active_session": {
+        "params": params("stable_repair", before=ALL_NULL, changed=list(AUDIT_COLUMNS), expressions=list(AUDIT_COLUMNS), profile=VOLATILE_PROFILE_ID),
+        "spec": {"active_sessions": {"RUNNING": 1}},
+    },
+    "stable_commit_applied_then_raises": {
+        "params": params("stable_repair", before=ALL_NULL, changed=list(AUDIT_COLUMNS), expressions=list(AUDIT_COLUMNS), profile=VOLATILE_PROFILE_ID),
+        "spec": {"commit_applied_then_raises": True},
+    },
+    "stable_expression_setter_raises": {
+        "params": params("stable_repair", before=ALL_NULL, changed=list(AUDIT_COLUMNS), expressions=list(AUDIT_COLUMNS), profile=VOLATILE_PROFILE_ID),
+        "spec": {"expression_setter_raises_on": "SOURCE_SYSTEM"},
+    },
+    "stable_rollback_fails": {
+        "params": params("stable_repair", before=ALL_NULL, changed=list(AUDIT_COLUMNS), expressions=list(AUDIT_COLUMNS), profile=VOLATILE_PROFILE_ID),
+        "spec": {"expression_setter_raises_on": "INSERT_DATE", "rollback_raises": True},
+    },
+    "stable_foreign_expression": {
+        "params": params("stable_restore", before=ALL_NULL, changed=list(AUDIT_COLUMNS), expressions=list(AUDIT_COLUMNS), profile=VOLATILE_PROFILE_ID),
+        "spec": {"roles": overwrite_roles(), "audit_profile": "stable", "expressions": {"PROD_DESC": "OTHER.PROD_DESC"}},
+    },
 }
 
 NO_WRITE_BLOCKS = [
@@ -162,6 +255,8 @@ NO_WRITE_BLOCKS = [
     "role_tracked_overwrite", "audit_role_unknown", "audit_role_natural_key", "before_image_drift", "expression_drift",
     "expression_missing", "other_expression_missing", "active_running", "active_waiting", "active_queued",
     "restore_current_drift", "restore_unknown_role", "restore_unchanged_column_drift",
+    "legacy_flag", "legacy_end", "unknown_end", "wrong_tracked_expression", "audit_hint_target",
+    "sk_hint_missing", "bad_source_alias", "stable_active_session", "stable_foreign_expression",
 ]
 REFUSED_BEFORE_CONNECTION = [name for name in SCENARIOS if name.startswith("script_")]
 
@@ -472,6 +567,14 @@ def test_builder_and_registrar_scripts_use_the_same_column_lists():
     for column, expression in contract["audit_expressions"].items():
         escaped = expression.replace('"', '\\"')
         assert f'{column}: "{escaped}"' in builder
+    assert 'PRODUCT_SK: "DWH.SEQ_DIM_PRODUCT.NEXTVAL"' in builder
+    assert 'EFFECTIVE_FROM: "CURRENT_DATE"' in builder
+    assert "TO_DATE('24000101','YYYYMMDD')" in builder
+    assert 'CURRENT_FLAG: "1"' in builder
+    repair_script = (root / "dim_product_audit_role_repair.groovy").read_text(encoding="utf-8")
+    assert re.search(r"TRACKED_COLUMNS = \[(.*?)\]", repair_script, re.S).group(1).split()
+    tracked_text = re.search(r"final List<String> TRACKED_COLUMNS = \[(.*?)\]", repair_script, re.S).group(1)
+    assert re.findall(r'"([A-Z0-9_]+)"', tracked_text) == contract["tracked"]
 
 
 def test_script_uses_only_public_methods_of_the_installed_sdk(java, tmp_path):
@@ -493,6 +596,9 @@ def test_script_uses_only_public_methods_of_the_installed_sdk(java, tmp_path):
         {"type": "oracle.odi.domain.mapping.component.DatastoreComponent", "method": "getAttributes", "params": []},
         {"type": "oracle.odi.domain.mapping.component.DatastoreComponent", "method": "getIntegrationType", "params": []},
         {"type": "oracle.odi.domain.mapping.MapAttribute", "method": "getExpression", "params": []},
+        {"type": "oracle.odi.domain.mapping.MapAttribute", "method": "setExpressionText", "params": [string]},
+        {"type": "oracle.odi.domain.mapping.MapAttribute", "method": "getExecuteOnHint", "params": []},
+        {"type": "oracle.odi.domain.root.NamedObject", "method": "getName", "params": []},
         {"type": "oracle.odi.domain.mapping.expression.MapExpression", "method": "getText", "params": []},
         {"type": "oracle.odi.domain.runtime.session.finder.IOdiSessionFinder", "method": "countByStatus", "params": ["oracle.odi.domain.runtime.session.Status"]},
         {"type": "oracle.odi.core.persistence.IOdiEntityManager", "method": "flush", "params": []},
@@ -541,6 +647,8 @@ def report_line(**overrides):
         "before_image": dict(ALL_NULL),
         "after_image": None,
         "changed_columns": [],
+        "changed_expressions": [],
+        "expression_profile": None,
     }
     payload.update(overrides)
     return json.dumps(payload)
@@ -627,11 +735,14 @@ def test_wrong_scope_makes_zero_callback_calls(tmp_path, scope):
 
 def test_required_scope_strings_are_exact():
     assert REPAIR_SCOPE == "odi87_dim_product_audit_role_repair"
+    assert STABLE_REPAIR_SCOPE == "odi87_dim_product_stable_audit_repair"
+    assert STABLE_RESTORE_SCOPE == "odi87_dim_product_stable_audit_restore"
     assert RESTORE_SCOPE != REPAIR_SCOPE and PREFLIGHT_SCOPE != REPAIR_SCOPE
+    assert STABLE_REPAIR_SCOPE != REPAIR_SCOPE and STABLE_RESTORE_SCOPE != RESTORE_SCOPE
 
 
 @pytest.mark.parametrize("review", [None, "pending", True, "APPROVED"])
-@pytest.mark.parametrize("action", ["repair", "restore"])
+@pytest.mark.parametrize("action", ["repair", "restore", "stable_repair", "stable_restore"])
 def test_unreviewed_implementation_makes_zero_callback_calls(tmp_path, action, review):
     script = Script()
     result = act(action, script, tmp_path, implementation_review_status=review)
@@ -639,7 +750,7 @@ def test_unreviewed_implementation_makes_zero_callback_calls(tmp_path, action, r
 
 
 @pytest.mark.parametrize("attested", [False, None, 1, "true"])
-@pytest.mark.parametrize("action", ["repair", "restore"])
+@pytest.mark.parametrize("action", ["repair", "restore", "stable_repair", "stable_restore"])
 def test_missing_session_attestation_makes_zero_callback_calls(tmp_path, action, attested):
     script = Script()
     result = act(action, script, tmp_path, no_active_odi_session_writes_attested=attested)
@@ -1033,3 +1144,331 @@ def test_real_run_groovy_blocks_without_the_approval_context():
 
     output = odi_orchestrator.OdiOrchestrator().run_groovy(SCRIPT_NAME, {"odi.audit.action": "preflight"})
     assert output.startswith("Hata: ODI Groovy action blocked")
+
+
+def sqlite_audit_sql(oracle_sql: str, batch: int) -> str:
+    """Translate only DECODE and the session-batch token. The CASE shape stays."""
+    sql = oracle_sql.replace('<%=odiRef.getSession("SESS_NO")%>', str(batch))
+    sql = re.sub(
+        r"DECODE\(([A-Z0-9_.]+), ([A-Z0-9_.]+), 0, 1\)",
+        r"(CASE WHEN \1 IS \2 THEN 0 ELSE 1 END)",
+        sql,
+    )
+    assert "DECODE" not in sql and "odiRef" not in sql and "ROWNUM" not in sql
+    return sql
+
+
+def _business_row(contract: dict, **overrides: object) -> dict:
+    row: dict = {contract["natural_key"]: 101}
+    for name, meta in contract["tracked_types"].items():
+        if meta["nullable"]:
+            row[name] = None
+        elif "VARCHAR" in str(meta["data_type"]):
+            row[name] = "T"
+        else:
+            row[name] = 1
+    row.update(overrides)
+    return row
+
+
+def _evaluate_audits(source: dict, dim_rows: list[dict], batch: int, alias: str = "ODS_SH_PRODUCTS") -> dict:
+    import sqlite3
+
+    contract = expected_contract()
+    expressions = {column: stable_audit_expression(column, alias) for column in AUDIT_COLUMNS}
+    connection = sqlite3.connect(":memory:")
+    connection.execute("ATTACH DATABASE ':memory:' AS DWH")
+    columns = [contract["natural_key"], *contract["tracked"], "CURRENT_FLAG", *AUDIT_COLUMNS]
+    connection.execute(f"CREATE TABLE DWH.DIM_PRODUCT ({', '.join(columns)})")
+    for row in dim_rows:
+        connection.execute(
+            f"INSERT INTO DWH.DIM_PRODUCT VALUES ({', '.join('?' for _ in columns)})",
+            [row.get(column) for column in columns],
+        )
+    # Oracle raises ORA-01427 when this scalar matches two rows. SQLite 3.49 returns
+    # one row instead, so the adaptor rejects that count before accepting a value.
+    matched = connection.execute(
+        "SELECT COUNT(*) FROM DWH.DIM_PRODUCT C "
+        "WHERE C.PROD_ID = ? AND C.CURRENT_FLAG = '1'",
+        (source[contract["natural_key"]],),
+    ).fetchone()[0]
+    if matched > 1:
+        connection.close()
+        raise sqlite3.OperationalError("scalar subquery matched more than one current row")
+    selected = ", ".join(f"({sqlite_audit_sql(sql, batch)}) AS {column}" for column, sql in expressions.items())
+    projected = ", ".join(f"? AS {column}" for column in (contract["natural_key"], *contract["tracked"]))
+    cursor = connection.execute(
+        f"SELECT {selected} FROM (SELECT {projected}) {alias}",
+        [source[column] for column in (contract["natural_key"], *contract["tracked"])],
+    )
+    values = dict(zip(AUDIT_COLUMNS, cursor.fetchone(), strict=True))
+    connection.close()
+    return values
+
+
+def test_tracked_metadata_and_frozen_expressions_come_from_the_planner():
+    from scd2_manager import PRODUCTS_SOURCE_METADATA
+
+    contract = expected_contract()
+    assert len(contract["tracked"]) == 17
+    assert len(contract["fixed_expressions"]) == 22
+    nullable = [name for name, meta in contract["tracked_types"].items() if meta["nullable"]]
+    assert nullable == ["PROD_UNIT_OF_MEASURE"]
+    source_types = {name: data_type for name, data_type, _nullable in PRODUCTS_SOURCE_METADATA}
+    for name, meta in contract["tracked_types"].items():
+        assert meta["data_type"] == source_types[name]
+    alias = "ODS_SH_PRODUCTS"
+    for column in (contract["natural_key"], *contract["tracked"]):
+        assert contract["fixed_expressions"][column] == f"{alias}.{column}"
+    assert fixed_expression_issue("CURRENT_FLAG", "Y", alias) == "legacy_expression_gap"
+    assert fixed_expression_issue("EFFECTIVE_TO", "DATE '9999-12-31'", alias) == "legacy_expression_gap"
+    assert fixed_expression_issue("EFFECTIVE_TO", "DATE '1999-01-01'", alias) == "fixed_expression_drift"
+    assert fixed_expression_issue("CURRENT_FLAG", "1", alias) is None
+    for column in AUDIT_COLUMNS:
+        sql = stable_audit_expression(column, alias)
+        assert " JOIN " not in sql and "ROWNUM" not in sql
+        assert "C.CURRENT_FLAG = '1'" in sql
+        assert sql.endswith(f"ELSE {contract['audit_expressions'][column]} END")
+        for tracked in contract["tracked"]:
+            assert f"DECODE(C.{tracked}, {alias}.{tracked}, 0, 1) = 0" in sql
+
+
+def test_case_preserves_audits_for_equal_and_null_business_rows():
+    contract = expected_contract()
+    current = {
+        **_business_row(contract),
+        "CURRENT_FLAG": "1",
+        "INSERT_DATE": "2020-01-01 00:00:00",
+        "UPDATE_DATE": "2020-06-01 00:00:00",
+        "SOURCE_SYSTEM": "SH",
+        "ETL_BATCH_ID": 7,
+    }
+    history = {
+        **current,
+        "CURRENT_FLAG": "0",
+        "INSERT_DATE": "2019-01-01 00:00:00",
+        "UPDATE_DATE": "2019-06-01 00:00:00",
+        "ETL_BATCH_ID": 3,
+    }
+    preserved = _evaluate_audits(dict(current), [history, current], 99)
+    assert preserved == {
+        "INSERT_DATE": current["INSERT_DATE"],
+        "UPDATE_DATE": current["UPDATE_DATE"],
+        "SOURCE_SYSTEM": "SH",
+        "ETL_BATCH_ID": 7,
+    }
+    again = _evaluate_audits(dict(current), [history, current], 250)
+    assert again == preserved
+
+
+@pytest.mark.parametrize("column", list(expected_contract()["tracked"]))
+def test_each_tracked_change_refreshes_audits_and_equality_preserves_them(column):
+    contract = expected_contract()
+    current = {
+        **_business_row(contract),
+        "CURRENT_FLAG": "1",
+        "INSERT_DATE": "2020-01-01 00:00:00",
+        "UPDATE_DATE": "2020-06-01 00:00:00",
+        "SOURCE_SYSTEM": "SH",
+        "ETL_BATCH_ID": 7,
+    }
+    same = _evaluate_audits(dict(current), [dict(current)], 40)
+    assert same["INSERT_DATE"] == current["INSERT_DATE"] and same["ETL_BATCH_ID"] == 7
+    changed_source = dict(current)
+    changed_source[column] = "CHANGED" if current[column] is None or isinstance(current[column], str) else 9
+    refreshed = _evaluate_audits(changed_source, [dict(current)], 40)
+    assert refreshed["SOURCE_SYSTEM"] == "SH"
+    assert refreshed["ETL_BATCH_ID"] == 40
+    assert refreshed["INSERT_DATE"] == refreshed["UPDATE_DATE"]
+    assert refreshed["INSERT_DATE"] != current["INSERT_DATE"]
+
+
+def test_new_natural_key_uses_the_creation_expression():
+    contract = expected_contract()
+    current = {**_business_row(contract), "CURRENT_FLAG": "1", "INSERT_DATE": "2020-01-01 00:00:00",
+               "UPDATE_DATE": "2020-06-01 00:00:00", "SOURCE_SYSTEM": "SH", "ETL_BATCH_ID": 7}
+    source = dict(current)
+    source[contract["natural_key"]] = 104
+    created = _evaluate_audits(source, [current], 15)
+    assert created["SOURCE_SYSTEM"] == "SH" and created["ETL_BATCH_ID"] == 15
+    assert created["INSERT_DATE"] == created["UPDATE_DATE"]
+    assert created["INSERT_DATE"] != current["INSERT_DATE"]
+
+
+def test_two_current_rows_make_the_scalar_query_fail():
+    import sqlite3
+
+    contract = expected_contract()
+    current = {**_business_row(contract), "CURRENT_FLAG": "1", "INSERT_DATE": "2020-01-01 00:00:00",
+               "UPDATE_DATE": "2020-06-01 00:00:00", "SOURCE_SYSTEM": "SH", "ETL_BATCH_ID": 7}
+    with pytest.raises(sqlite3.Error):
+        _evaluate_audits(dict(current), [dict(current), dict(current)], 15)
+
+
+def test_existing_readiness_rejects_multiple_current_rows_before_load():
+    from dim_product_scd2_candidate_preflight import candidate_status
+
+    evidence = {
+        "source_duplicate_groups": 0,
+        "duplicate_product_sk_groups": 0,
+        "duplicate_current_natural_key_groups": 1,
+        "invalid_current_flags": 0,
+        "invalid_effective_dates": 0,
+        "source_missing_current_count": 0,
+        "backup_exists": 1,
+        "backup_column_count": 24,
+        "backup_row_count": 0,
+        "insert_without_current_count": 0,
+        "changed_current_count": 0,
+        "unchanged_current_count": 1,
+        "source_count": 1,
+    }
+    assert candidate_status(evidence) == "blocked_target_multiple_current_rows"
+
+
+def test_role_scope_cannot_authorize_an_expression_write(tmp_path):
+    script = Script()
+    result = act("stable_repair", script, tmp_path, approval_scope=REPAIR_SCOPE)
+    assert result["status"] == "blocked_until_exact_approval_scope" and script.calls == []
+
+
+def test_stable_repair_records_profile_ids_without_sql(tmp_path):
+    def run(parameters):
+        if parameters["odi.audit.action"] == "stable_preflight":
+            return report_line(action="stable_preflight", expression_profile=VOLATILE_PROFILE_ID)
+        assert (tmp_path / repair.RECEIPT_NAME).is_file()
+        return report_line(
+            action="stable_repair",
+            status="repaired",
+            side_effects=True,
+            repository_outcome="committed",
+            write_attempted=True,
+            commit_attempted=True,
+            commit_acknowledged=True,
+            rollback_attempted=False,
+            rollback_succeeded=False,
+            scenario_regeneration_required=True,
+            after_image=dict(ALL_OVERWRITE),
+            changed_columns=list(AUDIT_COLUMNS),
+            changed_expressions=list(AUDIT_COLUMNS),
+            expression_profile=STABLE_PROFILE_ID,
+        )
+
+    result = act("stable_repair", run, tmp_path)
+    assert result["status"] == "repaired"
+    text = (tmp_path / repair.RECEIPT_NAME).read_text(encoding="utf-8")
+    receipt = json.loads(text)
+    assert receipt["schema_version"] == 2
+    assert receipt["expression_profile_before"] == repair.profile_record(VOLATILE_PROFILE_ID)
+    assert receipt["expression_profile_target"]["id"] == STABLE_PROFILE_ID
+    assert "CURRENT_TIMESTAMP" not in text and "DECODE" not in text and "SELECT" not in text
+    assert "CASE" not in json.dumps(result)
+
+
+def test_already_stable_does_not_write_a_new_receipt(tmp_path):
+    script = Script(report_line(
+        action="stable_preflight",
+        status="already_repaired",
+        before_image=dict(ALL_OVERWRITE),
+        expression_profile=STABLE_PROFILE_ID,
+    ))
+    result = act("stable_repair", script, tmp_path)
+    assert result["status"] == "already_repaired" and len(script.calls) == 1
+    assert not (tmp_path / repair.RECEIPT_NAME).exists()
+
+
+def test_unknown_profile_receipt_is_rejected_without_a_call_or_sql(tmp_path):
+    payload = {
+        "schema_version": 2,
+        "sql": "SELECT SECRET FROM DWH.DIM_PRODUCT",
+        "expression_profile_before": {"id": "unknown", "hash": "0"},
+    }
+    (tmp_path / repair.RECEIPT_NAME).write_text(json.dumps(payload), encoding="utf-8")
+    script = Script()
+    result = act("stable_restore", script, tmp_path)
+    assert result["status"] == "blocked_receipt_invalid" and script.calls == []
+    rendered = json.dumps(result)
+    assert "SELECT" not in rendered and "SECRET" not in rendered and "DECODE" not in rendered
+
+
+def test_role_receipt_cannot_restore_expressions(tmp_path):
+    do_repair(tmp_path)
+    script = Script()
+    result = act("stable_restore", script, tmp_path)
+    assert result["status"] == "blocked_receipt_invalid" and script.calls == []
+
+
+def test_stable_script_writes_expressions_and_keeps_hints(runs):
+    run = runs["stable_repair_all"]
+    payload = payload_of(run)
+    assert payload["status"] == "repaired"
+    assert payload["expression_profile"] == STABLE_PROFILE_ID
+    assert payload["changed_expressions"] == list(AUDIT_COLUMNS)
+    assert not any(event.startswith("setExecuteOnHint") for event in run["trace"])
+    for column in AUDIT_COLUMNS:
+        assert run["expressions"][column] == stable_audit_expression(column, "ODS_SH_PRODUCTS")
+    assert run["hints"]["PRODUCT_SK"] == "TARGET"
+    assert run["hints"]["INSERT_DATE"] == "NO_HINT"
+
+
+def test_role_repair_does_not_rewrite_audit_expressions(runs):
+    run = runs["repair_all"]
+    assert not any(event.startswith("setExpressionText") for event in run["trace"])
+    for column, text in expected_contract()["audit_expressions"].items():
+        assert run["expressions"][column] == text
+
+
+def test_rebound_alias_is_the_one_written_into_the_expression(runs):
+    run = runs["stable_repair_rebind_alias"]
+    written = run["expressions"]["ETL_BATCH_ID"]
+    assert written == stable_audit_expression("ETL_BATCH_ID", "SRC_ALIAS")
+    assert "ODS_SH_PRODUCTS" not in written
+
+
+def test_stable_restore_returns_the_volatile_profile(runs):
+    run = runs["stable_restore_to_volatile"]
+    assert payload_of(run)["status"] == "restored"
+    for column, text in expected_contract()["audit_expressions"].items():
+        assert run["expressions"][column] == text
+    assert all(run["persisted"][column] is None for column in AUDIT_COLUMNS)
+
+
+def test_expression_failure_rolls_back_roles_and_expressions(runs):
+    run = runs["stable_expression_setter_raises"]
+    payload = payload_of(run)
+    assert payload["status"] == "aborted" and payload["error_type"] == "RuntimeException"
+    assert payload["repository_outcome"] == "rolled_back" and payload["side_effects"] is False
+    assert run["committed"] is False and "commit" not in run["trace"]
+    assert all(run["persisted"][column] is None for column in AUDIT_COLUMNS)
+    assert run["expressions"]["INSERT_DATE"] == expected_contract()["audit_expressions"]["INSERT_DATE"]
+
+
+def test_stable_commit_loss_and_rollback_failure_stay_unknown(runs):
+    applied = payload_of(runs["stable_commit_applied_then_raises"])
+    assert applied["status"] == "outcome_unknown" and applied["repository_outcome"] == "commit_outcome_unknown"
+    assert applied["side_effects"] is None and runs["stable_commit_applied_then_raises"]["committed"] is True
+    failed = payload_of(runs["stable_rollback_fails"])
+    assert failed["repository_outcome"] == "rollback_failed" and failed["side_effects"] is None
+
+
+def test_legacy_and_hint_drift_block_before_any_expression_write(runs):
+    expected = {
+        "legacy_flag": "legacy_expression_gap",
+        "legacy_end": "legacy_expression_gap",
+        "unknown_end": "fixed_expression_drift",
+        "wrong_tracked_expression": "fixed_expression_drift",
+        "audit_hint_target": "audit_execute_hint_target",
+        "sk_hint_missing": "execute_hint_drift",
+        "bad_source_alias": "source_alias_invalid",
+    }
+    for name, code in expected.items():
+        run = runs[name]
+        assert payload_of(run)["code"] == code
+        assert not any(event.startswith("setExpressionText") for event in run["trace"])
+        assert "commit" not in run["trace"]
+
+
+def test_unknown_profile_argument_is_not_echoed(runs):
+    run = runs["script_stable_profile_sql"]
+    assert "begin" not in run["trace"]
+    assert "SELECT" not in run["output"] and "DECODE" not in run["output"] and "SECRET" not in run["output"]

@@ -1,8 +1,9 @@
 /*
   ODI-87 fixed DIM_PRODUCT audit-role preflight, repair and restore.
   Object identities, columns, roles and expressions are not caller-controlled.
-  Writes only OdiColumn.setScdType on four audit columns, in one transaction.
-  No scenario, mapping, database row or other column is changed.
+  Role actions write only OdiColumn.setScdType on four audit columns.
+  Stable actions may also call MapAttribute.setExpressionText on those four.
+  No execute hint, scenario, database row or other column is changed.
 */
 
 import groovy.json.JsonOutput
@@ -48,6 +49,23 @@ final Map<String, String> SCOPES = [
     preflight: "odi87_dim_product_audit_role_preflight",
     repair: "odi87_dim_product_audit_role_repair",
     restore: "odi87_dim_product_audit_role_restore",
+    stable_preflight: "odi87_dim_product_stable_audit_preflight",
+    stable_repair: "odi87_dim_product_stable_audit_repair",
+    stable_restore: "odi87_dim_product_stable_audit_restore",
+]
+final String VOLATILE_PROFILE = "odi87_dim_product_audit_volatile_v1"
+final String STABLE_PROFILE = "odi87_dim_product_audit_stable_v1"
+final Set<String> LEGACY_FLAGS = ["Y", "'Y'", "N", "'N'"] as Set
+final Set<String> LEGACY_ENDS = [
+    "DATE '9999-12-31'",
+    "TO_DATE('99991231','YYYYMMDD')",
+    "to_date ('12-31-9999', 'mm-dd-yyyy')",
+] as Set
+final Map<String, String> FIXED_LITERALS = [
+    PRODUCT_SK: "DWH.SEQ_DIM_PRODUCT.NEXTVAL",
+    EFFECTIVE_FROM: "CURRENT_DATE",
+    EFFECTIVE_TO: "TO_DATE('24000101','YYYYMMDD')",
+    CURRENT_FLAG: "1",
 ]
 final List<String> AUDIT_COLUMNS = ["INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"]
 final List<String> TRACKED_COLUMNS = [
@@ -88,6 +106,8 @@ Integer activeSessionCount = null
 Map<String, String> beforeImage = null
 Map<String, String> afterImage = null
 List<String> changedColumns = []
+List<String> changedExpressions = []
+String expressionProfile = null
 
 def block = { String code -> throw new AuditRoleBlock(code) }
 
@@ -116,7 +136,24 @@ def report = { String status, String outcome, Boolean sideEffects, String code, 
         before_image: beforeImage,
         after_image: afterImage,
         changed_columns: changedColumns,
+        changed_expressions: changedExpressions,
+        expression_profile: expressionProfile,
     ])
+}
+
+def matchPredicate = { String alias ->
+    List<String> parts = ["C.PROD_ID = ${alias}.PROD_ID", "C.CURRENT_FLAG = '1'"]
+    TRACKED_COLUMNS.each { String column ->
+        parts.add("DECODE(C.${column}, ${alias}.${column}, 0, 1) = 0")
+    }
+    parts.join(" AND ")
+}
+
+def stableText = { String column, String alias ->
+    String predicate = matchPredicate(alias)
+    String preserved = "SELECT C.${column} FROM DWH.DIM_PRODUCT C WHERE ${predicate}"
+    String exists = "SELECT 1 FROM DWH.DIM_PRODUCT C WHERE ${predicate}"
+    "CASE WHEN EXISTS (${exists}) THEN (${preserved}) ELSE ${AUDIT_EXPRESSIONS[column]} END"
 }
 
 def parseImage = { String text ->
@@ -177,20 +214,46 @@ def readContract = { em, String project, String folder ->
     if (targetComponents[0].getBoundDataStore().getModel()?.getCode() != MODEL_CODE) block("mapping_contract")
     if (!(targetComponents[0].getIntegrationType() in ["SCD", "SLOWLY_CHANGING_DIMENSION"])) block("mapping_contract")
 
+    String alias = sourceComponents[0].getName()
+    if (!(alias ==~ /^[A-Z][A-Z0-9_]{0,29}$/)) block("source_alias_invalid")
     List attributes = targetComponents[0].getAttributes() as List
     List<String> attributeNames = attributes*.getName()
     if (attributeNames.size() != TARGET_COLUMN_COUNT || (attributeNames as Set) != expected) block("mapping_contract")
+    Map attributesByName = attributes.collectEntries { [(it.getName()): it] }
+    Map<String, String> expressions = [:]
+    Map<String, String> hints = [:]
     attributes.each { attribute ->
         String name = attribute.getName()
         // Expression bodies are compared here and never reported.
         String text = attribute.getExpression()?.getText()
-        if (AUDIT_EXPRESSIONS.containsKey(name)) {
-            if (text != AUDIT_EXPRESSIONS[name]) block("audit_expression_drift")
-        } else if (text == null || text.trim().isEmpty()) {
-            block("mapping_contract")
-        }
+        def hint = attribute.getExecuteOnHint()
+        String hintName = hint == null ? "NO_HINT" : hint.name()
+        expressions[name] = text
+        hints[name] = hintName
+        if (AUDIT_COLUMNS.contains(name) && hintName == "TARGET") block("audit_execute_hint_target")
+        if (name == "PRODUCT_SK" && hintName != "TARGET") block("execute_hint_drift")
     }
-    [byName: byName, image: image]
+    (["PROD_ID"] + TRACKED_COLUMNS).each { String name ->
+        if (expressions[name] != "${alias}.${name}") block("fixed_expression_drift")
+    }
+    FIXED_LITERALS.each { String name, String literal ->
+        String text = expressions[name]
+        if (text == literal) return
+        if (name == "CURRENT_FLAG" && text in LEGACY_FLAGS) block("legacy_expression_gap")
+        if (name == "EFFECTIVE_TO" && text in LEGACY_ENDS) block("legacy_expression_gap")
+        block("fixed_expression_drift")
+    }
+    boolean volatileProfile = AUDIT_COLUMNS.every { expressions[it] == AUDIT_EXPRESSIONS[it] }
+    boolean stableProfile = AUDIT_COLUMNS.every { expressions[it] == stableText(it, alias) }
+    if (!volatileProfile && !stableProfile) block("audit_expression_drift")
+    [
+        byName: byName,
+        attributes: attributesByName,
+        image: image,
+        alias: alias,
+        hints: hints,
+        profile: volatileProfile ? VOLATILE_PROFILE : STABLE_PROFILE,
+    ]
 }
 
 def countActiveSessions = { em ->
@@ -212,12 +275,28 @@ try {
     if (System.getProperty("odi.audit.approved") != "true") block("invalid_input")
     if (System.getProperty("odi.audit.approval_scope") != SCOPES[action]) block("invalid_input")
     if (project == null || folder == null || !(project ==~ PROJECT_NAME) || !(folder ==~ PROJECT_NAME)) block("invalid_input")
-    Map<String, String> expectedBefore = action == "preflight" ? null : parseImage(System.getProperty("odi.audit.expected_before"))
+    boolean readOnly = action in ["preflight", "stable_preflight"]
+    boolean stableAction = action.startsWith("stable_")
+    Map<String, String> expectedBefore = readOnly ? null : parseImage(System.getProperty("odi.audit.expected_before"))
+    String expectedProfile = null
     List<String> restoreColumns = []
-    if (action == "restore") {
+    List<String> declaredExpressions = []
+    if (stableAction && !readOnly) {
+        expectedProfile = System.getProperty("odi.audit.expression_profile_before")
+        if (!(expectedProfile in [VOLATILE_PROFILE, STABLE_PROFILE])) block("invalid_input")
+        String rawExpressions = System.getProperty("odi.audit.changed_expressions")
+        declaredExpressions = rawExpressions == null || rawExpressions.isEmpty() ? [] : rawExpressions.split(",", -1).toList()
+        List<String> orderedExpressions = AUDIT_COLUMNS.findAll { it in declaredExpressions }
+        if (declaredExpressions != orderedExpressions || !(declaredExpressions.isEmpty() || declaredExpressions == AUDIT_COLUMNS)) {
+            block("invalid_input")
+        }
+    }
+    if (action == "restore" || action == "stable_restore") {
         String changed = System.getProperty("odi.audit.changed_columns")
         restoreColumns = changed == null || changed.isEmpty() ? [] : changed.split(",", -1).toList()
-        if (restoreColumns.isEmpty() || restoreColumns.size() != (restoreColumns as Set).size()) block("invalid_input")
+        List<String> orderedColumns = AUDIT_COLUMNS.findAll { it in restoreColumns }
+        if (restoreColumns != orderedColumns) block("invalid_input")
+        if (action == "restore" && restoreColumns.isEmpty()) block("invalid_input")
         if (restoreColumns.any { !(it in AUDIT_COLUMNS) || expectedBefore[it] != NULL_ROLE }) block("invalid_input")
     }
 
@@ -256,16 +335,44 @@ try {
     Map<String, String> current = contract.image
     beforeImage = current
 
-    if (action == "preflight") {
-        String outcomeStatus = current.values().any { it == NULL_ROLE } ? "ready_for_repair" : "already_repaired"
+    if (readOnly) {
+        String outcomeStatus
+        if (action == "stable_preflight") {
+            expressionProfile = contract.profile
+            boolean rolesDone = current.values().every { it == OVERWRITE_ROLE }
+            boolean expressionsDone = contract.profile == STABLE_PROFILE
+            outcomeStatus = rolesDone && expressionsDone ? "already_repaired" : "ready_for_repair"
+        } else {
+            outcomeStatus = current.values().any { it == NULL_ROLE } ? "ready_for_repair" : "already_repaired"
+        }
         endWithoutWrite()
         println report(outcomeStatus, "no_write", false, null, null, false, false)
     } else {
         Map<String, String> wanted
-        if (action == "repair") {
+        String wantedProfile = contract.profile
+        if (action == "repair" || action == "stable_repair") {
             if (current != expectedBefore) block("before_image_drift")
+            if (stableAction && contract.profile != expectedProfile) block("expression_profile_drift")
             changedColumns = AUDIT_COLUMNS.findAll { current[it] == NULL_ROLE }
+            if (stableAction) {
+                changedExpressions = contract.profile == STABLE_PROFILE ? [] : new ArrayList<String>(AUDIT_COLUMNS)
+                String declaredRaw = System.getProperty("odi.audit.changed_columns")
+                List<String> declaredColumns = declaredRaw == null || declaredRaw.isEmpty() ? [] : declaredRaw.split(",", -1).toList()
+                if (declaredColumns != changedColumns || declaredExpressions != changedExpressions) block("invalid_input")
+            }
             wanted = AUDIT_COLUMNS.collectEntries { [(it): OVERWRITE_ROLE] }
+            wantedProfile = STABLE_PROFILE
+        } else if (action == "stable_restore") {
+            Map<String, String> repaired = AUDIT_COLUMNS.collectEntries { [(it): it in restoreColumns ? OVERWRITE_ROLE : expectedBefore[it]] }
+            boolean atBefore = current == expectedBefore && contract.profile == expectedProfile
+            boolean atRepaired = current == repaired && contract.profile == STABLE_PROFILE
+            if (!atBefore && !atRepaired) block("restore_state_drift")
+            // A volatile before-image cannot also be the stable repaired profile.
+            if (!declaredExpressions.isEmpty() && expectedProfile == STABLE_PROFILE) block("invalid_input")
+            changedColumns = atRepaired && repaired != expectedBefore ? new ArrayList<String>(restoreColumns) : []
+            changedExpressions = atRepaired && !declaredExpressions.isEmpty() ? new ArrayList<String>(declaredExpressions) : []
+            wanted = expectedBefore
+            wantedProfile = expectedProfile
         } else {
             // Only the exact receipt state or the exact repaired state is acceptable.
             Map<String, String> repaired = AUDIT_COLUMNS.collectEntries { [(it): it in restoreColumns ? OVERWRITE_ROLE : expectedBefore[it]] }
@@ -273,25 +380,39 @@ try {
             changedColumns = current == repaired && repaired != expectedBefore ? new ArrayList<String>(restoreColumns) : []
             wanted = expectedBefore
         }
-        if (changedColumns.isEmpty()) {
-            String outcomeStatus = action == "repair" ? "already_repaired" : "already_restored"
+        boolean nothingToWrite = changedColumns.isEmpty() && changedExpressions.isEmpty()
+        if (nothingToWrite) {
+            if (stableAction) expressionProfile = contract.profile
+            String outcomeStatus = action in ["repair", "stable_repair"] ? "already_repaired" : "already_restored"
             endWithoutWrite()
             println report(outcomeStatus, "no_write", false, null, null, false, false)
         } else {
             writeAttempted = true
+            Map<String, String> hintsBefore = new LinkedHashMap<String, String>(contract.hints)
             changedColumns.each { String name ->
                 OdiColumn column = contract.byName[name]
                 column.setScdType(wanted[name] == NULL_ROLE ? null : OdiColumn.ScdType.valueOf(wanted[name]))
             }
+            if (stableAction) {
+                expressionProfile = wantedProfile
+                changedExpressions.each { String name ->
+                    String text = wantedProfile == STABLE_PROFILE ? stableText(name, contract.alias) : AUDIT_EXPRESSIONS[name]
+                    contract.attributes[name].setExpressionText(text)
+                }
+            }
             em.flush()
             Map verified = readContract(em, project, folder)
             if (verified.image != wanted) block("post_write_verification")
+            if (verified.hints != hintsBefore) block("post_write_verification")
+            if (stableAction && verified.profile != wantedProfile) block("post_write_verification")
+            if (!stableAction && verified.profile != contract.profile) block("post_write_verification")
             afterImage = verified.image
             commitAttempted = true
             txnMgr.commit(txnStatus)
             commitAcknowledged = true
             txnStatus = null
-            println report(action == "repair" ? "repaired" : "restored", "committed", true, null, null, false, true)
+            boolean repairing = action in ["repair", "stable_repair"]
+            println report(repairing ? "repaired" : "restored", "committed", true, null, null, false, true)
         }
     }
 } catch (Throwable failure) {
