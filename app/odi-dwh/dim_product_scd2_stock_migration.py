@@ -1111,6 +1111,7 @@ def _noop_after_lock(
         approved=approved,
         connection_attempted=True,
         rolled_back=rolled,
+        manual_recovery_review_required=not rolled,
         **_backup_state(confirmed, attempted=False),
     )
 
@@ -1177,25 +1178,30 @@ def _exception_outcome(
             **_backup_state(observation, attempted=attempted),
         )
     if stage in {"create_migration_backup", "reread_after_lock"}:
+        rolled = False
         if connection is not None and stage != "create_migration_backup":
-            _rollback(connection)
+            rolled = _rollback(connection)
         observation = _fresh_evidence(connection_factory)
         return _report(
             "failed",
             committed=False,
-            rolled_back=False,
+            rolled_back=rolled,
             manual_recovery_review_required=True,
             **common,
             **_backup_state(observation, attempted=True if stage == "create_migration_backup" else attempted),
         )
     rolled = _rollback(connection) if connection is not None else False
+    # Pre-CTAS evidence cannot establish absence after a backup creation attempt.
+    observation = seen
+    if attempted and (seen is None or not seen.get("backup_exists")):
+        observation = _fresh_evidence(connection_factory)
     return _report(
         "failed",
         committed=False,
         rolled_back=rolled,
         manual_recovery_review_required=attempted or not rolled,
         **common,
-        **_backup_state(seen, attempted=attempted),
+        **_backup_state(observation, attempted=attempted),
     )
 
 
@@ -1344,7 +1350,7 @@ def execute_dim_product_stock_migration(
                     connection_attempted=True,
                     writes=writes,
                     rolled_back=rolled,
-                    manual_recovery_review_required=attempted,
+                    manual_recovery_review_required=attempted or not rolled,
                     **_backup_state(confirmed, attempted=attempted),
                 )
             stage = "migrate_update"
@@ -1520,6 +1526,7 @@ def execute_dim_product_stock_migration_restore(
                     approved=approved,
                     connection_attempted=True,
                     rolled_back=rolled,
+                    manual_recovery_review_required=not rolled,
                     **_backup_state(confirmed, attempted=False),
                 )
             if not _same(confirmed, reviewed, EVIDENCE_KEYS) or not _legacy_preimage(confirmed):
@@ -1538,6 +1545,7 @@ def execute_dim_product_stock_migration_restore(
                     connection_attempted=True,
                     writes=writes,
                     rolled_back=rolled,
+                    manual_recovery_review_required=not rolled,
                     **_backup_state(confirmed, attempted=False),
                 )
             stage = "restore_update"

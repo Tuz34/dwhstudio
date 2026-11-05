@@ -176,6 +176,10 @@ The row model is supplemented by the frozen, reviewed SQL contract in
 review of that fixture; tests never refresh it. These checks pin lock modes,
 NOWAIT, metadata predicates, CTAS, UPDATE and date bounds, but do not execute
 Oracle SQL and do not establish live database behavior.
+The row model uses static guard counts and does not enforce transaction statement
+ordering. Independent reviewer probes check ordering separately; neither is an
+Oracle integration test. A post-CTAS failure must not reuse pre-CTAS evidence to
+claim the backup is absent; unavailable fresh proof keeps its existence uncertain.
 
 ## Remaining cutover work
 
