@@ -224,7 +224,7 @@ def test_classic_flow_reaches_run3_with_mode_specific_witness(db, flow):
     assert client.bodies[0]["params"]["update_key_columns"] == ([] if flow == "F2" else ["ENTITY_ID"])
     assert all(body["truncate_target_table"] is (flow == "F2") for body in client.bodies[1:])
     assert all(body["context"] == "GLOBAL" and body["scenario_version"] == "001" for body in client.bodies[1:])
-    assert result["logical_business_comparison_only"] is True
+    assert result["logical_business_comparison_only"] is (flow == "F2")
     if flow == "F2":
         assert result["full_target_snapshot_equal"] is False
         assert result["rerun_semantics"] == "full_reload"
