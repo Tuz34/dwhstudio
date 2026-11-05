@@ -110,10 +110,10 @@ def normalize_dim_product_odi_scd2_mapping_probe(
             or not isinstance(mapping, Mapping)
             or set(mapping) != _MAPPING_KEYS
             or mapping.get("name") != MAPPING_NAME
-            or mapping.get("source_component_count") != 1
-            or mapping.get("target_component_count") != 1
-            or mapping.get("target_attribute_count") != 26
-            or mapping.get("mapped_attribute_count") != 26
+            or _count(mapping.get("source_component_count")) != 1
+            or _count(mapping.get("target_component_count")) != 1
+            or _count(mapping.get("target_attribute_count")) != 26
+            or _count(mapping.get("mapped_attribute_count")) != 26
             or mapping.get("integration_type") != "SCD"
             or mapping.get("target_ikm") != TARGET_IKM
         ):

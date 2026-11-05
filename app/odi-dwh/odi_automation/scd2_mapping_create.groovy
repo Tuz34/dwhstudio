@@ -261,7 +261,7 @@ try {
     }
     ["FLOW_CONTROL", "STATIC_CONTROL"].each { String optionName ->
         def optionValue = targetNode.getIKMOptionValue(optionName)
-        if (optionValue == null || optionValue.getValue() != false) {
+        if (optionValue == null || !"false".equalsIgnoreCase(String.valueOf(optionValue.getOptionValue()))) {
             throw new IllegalStateException("IkmOptionMismatch")
         }
     }
