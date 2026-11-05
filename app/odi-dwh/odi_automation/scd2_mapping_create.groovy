@@ -45,6 +45,8 @@ def odi = null
 boolean standaloneMode = false
 ITransactionManager txnMgr = null
 ITransactionStatus txnStatus = null
+boolean commitAttempted = false
+boolean commitAcknowledged = false
 
 def safeFlags = {
     [
@@ -57,7 +59,7 @@ def safeFlags = {
 // Fixed allowlisted reason codes or the exception class simple name; the exception
 // message is never returned (it could carry repository values).
 final Set<String> REASON_CODES = ["InvalidParameter", "ProjectContextUnavailable", "ProjectFolderUnavailable", "MappingAlreadyExists", "ScenarioAlreadyExists", "SourceDatastoreUnavailable", "TargetDatastoreUnavailable", "SourceColumnsMissing", "ScdRoleContractMismatch", "IkmUnavailable", "LkmUnavailable", "IkmIntegrationTypeMismatch", "IntegrationTypeMismatch", "SourceAttributeUnavailable", "UnmappedTargetAttribute", "TargetPhysicalNodeUnavailable", "StagingLocationUnavailable", "TargetNodeLostAfterReset", "IkmAssignmentMismatch", "LkmAssignmentMismatch", "LkmDbLinkRemains", "MappingCoverageMismatch", "MappingValidationFailed", "IkmOptionMismatch"] as Set
-def reasonCode = { Exception e ->
+def reasonCode = { Throwable e ->
     String message = e.getMessage()
     if (e instanceof IllegalStateException && message != null && REASON_CODES.contains(message)) {
         return message
@@ -184,15 +186,21 @@ try {
     }
 
     IOdiIKMFinder ikmFinder = (IOdiIKMFinder) em.getFinder(OdiIKM.class)
-    OdiIKM ikm = (ikmFinder.findByName(TARGET_IKM) ?: []).find { it.getName()?.equalsIgnoreCase(TARGET_IKM) }
+    List ikms = (ikmFinder.findByName(TARGET_IKM) ?: []).findAll {
+        TARGET_IKM == it.getName() && (it.isGlobal() || it.getProject()?.getCode() == projectCode)
+    }
     IOdiLKMFinder lkmFinder = (IOdiLKMFinder) em.getFinder(OdiLKM.class)
-    OdiLKM lkm = (lkmFinder.findByName(LKM_NAME) ?: []).find { it.getName()?.equalsIgnoreCase(LKM_NAME) }
-    if (ikm == null) {
+    List lkms = (lkmFinder.findByName(LKM_NAME) ?: []).findAll {
+        LKM_NAME == it.getName() && (it.isGlobal() || it.getProject()?.getCode() == projectCode)
+    }
+    if (ikms.size() != 1) {
         throw new IllegalStateException("IkmUnavailable")
     }
-    if (lkm == null) {
+    if (lkms.size() != 1) {
         throw new IllegalStateException("LkmUnavailable")
     }
+    OdiIKM ikm = ikms[0]
+    OdiLKM lkm = lkms[0]
     if (ikm.getIntegrationType() != "SLOWLY_CHANGING_DIMENSION") {
         throw new IllegalStateException("IkmIntegrationTypeMismatch")
     }
@@ -256,15 +264,16 @@ try {
     }
     // Data-quality checks are intentionally off for SCD2 loads: with CKM Oracle present FLOW_CONTROL
     // defaults to true and the CKM would divert rows to E$_<target>.
-    ["FLOW_CONTROL", "STATIC_CONTROL"].each { String optionName ->
-        targetNode.getIKMOptionValue(optionName)?.setValue(false)
-    }
-    ["FLOW_CONTROL", "STATIC_CONTROL"].each { String optionName ->
-        def optionValue = targetNode.getIKMOptionValue(optionName)
-        if (optionValue == null || !"false".equalsIgnoreCase(String.valueOf(optionValue.getOptionValue()))) {
-            throw new IllegalStateException("IkmOptionMismatch")
+    final Map<String, Boolean> lockedOptions = [FLOW_CONTROL: false, STATIC_CONTROL: false,
+        RECYCLE_ERRORS: false, TRUNCATE: false, DELETE_ALL: false, CREATE_TARG_TABLE: false, COMMIT: true]
+    def writeOptions = { node ->
+        lockedOptions.each { optionName, expected ->
+            def optionValue = node.getIKMOptionValue(optionName)
+            if (optionValue == null) throw new IllegalStateException("IkmOptionMismatch")
+            optionValue.setValue(expected)
         }
     }
+    writeOptions(targetNode)
     // Access-point nodes are re-read from the final physical design (after the last reset/staging call)
     // so the built-in LKM is forced on every one of them; ODI otherwise defaults cross-server APs to a DB-Link LKM.
     def readAccessPoints = { design.getAllAPNodes() as List<MapPhysicalNode> }
@@ -273,6 +282,9 @@ try {
     // This call only materializes access points for the repair below: an error here may describe a
     // repairable intermediate state, so its result is deliberately not a gate. The final call decides.
     mapping.validate()
+    targetNode = findTargetNode()
+    if (targetNode == null) throw new IllegalStateException("TargetNodeLostAfterReset")
+    writeOptions(targetNode)
     List<MapPhysicalNode> accessPoints = readAccessPoints()
     if (accessPoints.any { !lkmOk(it) }) {
         accessPoints.each { node -> node.setLKM(lkm) }
@@ -298,7 +310,24 @@ try {
     if (mapping.validate(finalValidationIssues, false) || RootIssue.isErrorOrFatal(finalValidationIssues)) {
         throw new IllegalStateException("MappingValidationFailed")
     }
+    // Validation can materialize an AP or reset an option. Never repair after this final gate.
+    MapPhysicalNode finalTarget = findTargetNode()
+    if (finalTarget == null || TARGET_IKM != finalTarget.getTargetComponentKMName()) {
+        throw new IllegalStateException("IkmAssignmentMismatch")
+    }
+    lockedOptions.each { optionName, expected ->
+        def optionValue = finalTarget.getIKMOptionValue(optionName)
+        if (optionValue == null || !String.valueOf(expected).equalsIgnoreCase(String.valueOf(optionValue.getOptionValue()))) {
+            throw new IllegalStateException("IkmOptionMismatch")
+        }
+    }
+    List<MapPhysicalNode> finalAccessPoints = readAccessPoints()
+    if (finalAccessPoints.size() != accessPoints.size() || finalAccessPoints.any { !lkmOk(it) }) {
+        throw new IllegalStateException("LkmAssignmentMismatch")
+    }
+    commitAttempted = true
     txnMgr.commit(txnStatus)
+    commitAcknowledged = true
     txnStatus = null
 
     println JsonOutput.toJson([
@@ -321,21 +350,34 @@ try {
             commit_completed: true,
         ],
     ])
-} catch (Exception e) {
+} catch (Throwable e) {
+    boolean rollbackAttempted = false
+    boolean rollbackSucceeded = false
     if (txnStatus != null && txnMgr != null) {
-        try { txnMgr.rollback(txnStatus) } catch (Exception ignored) {}
+        rollbackAttempted = true
+        try { txnMgr.rollback(txnStatus); rollbackSucceeded = true } catch (Throwable ignored) {}
     }
+    String repositoryOutcome = commitAcknowledged ? "committed" : commitAttempted ? "commit_outcome_unknown" :
+        rollbackAttempted ? (rollbackSucceeded ? "rolled_back" : "rollback_failed") : "no_transaction"
+    String reportStatus = commitAcknowledged ? "committed_report_incomplete" :
+        (commitAttempted || (rollbackAttempted && !rollbackSucceeded)) ? "outcome_unknown" : "error"
     println JsonOutput.toJson([
         tool: TOOL,
-        status: "error",
+        status: reportStatus,
         mode: MODE,
-        side_effects: false,
+        side_effects: commitAcknowledged ? true : reportStatus == "outcome_unknown" ? null : false,
         repository_connection_attempted: true,
         *: safeFlags(),
         error_type: reasonCode(e),
+        repository_outcome: repositoryOutcome,
+        commit_attempted: commitAttempted,
+        commit_acknowledged: commitAcknowledged,
+        rollback_attempted: rollbackAttempted,
+        rollback_succeeded: rollbackSucceeded,
+        manual_recovery_review_required: reportStatus != "error",
     ])
 } finally {
     if (standaloneMode && odi != null) {
-        odi.close()
+        try { odi.close() } catch (Throwable ignored) {}
     }
 }

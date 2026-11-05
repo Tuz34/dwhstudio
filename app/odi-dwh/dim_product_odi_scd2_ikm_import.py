@@ -189,7 +189,7 @@ def build_dim_product_odi_scd2_ikm_import_request(
     return _base("ready_for_fixed_ikm_import_execution")
 
 
-def _normalized_base(status: str, *, side_effects: bool) -> dict[str, Any]:
+def _normalized_base(status: str, *, side_effects: bool | None) -> dict[str, Any]:
     return {
         "tool": TOOL,
         "status": status,
@@ -205,7 +205,9 @@ def _normalized_base(status: str, *, side_effects: bool) -> dict[str, Any]:
 def _invalid(error_type: str = "InvalidImportOutput") -> dict[str, Any]:
     safe_type = error_type if _ERROR_TYPE_RE.fullmatch(error_type) else "InvalidImportOutput"
     return {
-        **_normalized_base("blocked_invalid_import_output", side_effects=False),
+        **_normalized_base("blocked_invalid_import_output", side_effects=None),
+        "repository_outcome": "unverified",
+        "manual_recovery_review_required": True,
         "error": "ODI IKM import output was rejected.",
         "error_type": safe_type,
     }

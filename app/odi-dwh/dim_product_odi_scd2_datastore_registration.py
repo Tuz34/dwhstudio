@@ -275,7 +275,9 @@ def _invalid_output(error_type: str = "InvalidRegistrationOutput") -> dict[str, 
     )
     return {
         **_normalized_base("blocked_invalid_registration_output"),
-        "side_effects": False,
+        "side_effects": None,
+        "repository_outcome": "unverified",
+        "manual_recovery_review_required": True,
         "error": "ODI datastore registration output was rejected.",
         "error_type": safe_error_type,
     }
@@ -288,26 +290,14 @@ def normalize_dim_product_odi_scd2_datastore_registration(
     try:
         if not isinstance(payload, Mapping):
             return _invalid_output()
-        if payload.get("status") == "error":
-            error_type = payload.get("error_type")
-            if (
-                set(payload) != _ERROR_KEYS
-                or payload.get("tool") != TOOL
-                or payload.get("mode") != RAW_MODE
-                or payload.get("side_effects") is not False
-                or payload.get("repository_connection_attempted") is not True
-                or payload.get("raw_rows_included") is not False
-                or payload.get("pk_values_included") is not False
-                or payload.get("secret_printed") is not False
-                or not isinstance(error_type, str)
-                or not _ERROR_TYPE_RE.fullmatch(error_type)
-            ):
+        if payload.get("status") in {"error", "outcome_unknown", "committed_report_incomplete"}:
+            from repository_write_contract import failure
+            state = failure(payload, TOOL, RAW_MODE)
+            if state is None:
                 return _invalid_output()
             return {
-                **_normalized_base("error"),
-                "side_effects": False,
-                "error": "ODI datastore registration failed.",
-                "error_type": error_type,
+                **_normalized_base(payload["status"]), **state,
+                "error": "ODI datastore registration did not produce a verified success report.",
             }
 
         result = payload.get("result")

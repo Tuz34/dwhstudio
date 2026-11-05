@@ -59,6 +59,8 @@ def odi = null
 boolean standaloneMode = false
 ITransactionManager txnMgr = null
 ITransactionStatus txnStatus = null
+boolean commitAttempted = false
+boolean commitAcknowledged = false
 
 def safeFlags = {
     [
@@ -98,7 +100,6 @@ try {
 
     txnMgr = odi.getTransactionManager()
     txnStatus = txnMgr.getTransaction(new DefaultTransactionDefinition())
-    try {
         def em = odi.getTransactionalEntityManager()
         IOdiModelFinder modelFinder = (IOdiModelFinder) em.getFinder(OdiModel.class)
         OdiModel model = modelFinder.findByCode(MODEL_CODE)
@@ -201,7 +202,9 @@ try {
             throw new IllegalStateException("Created natural key metadata does not match fixed contract")
         }
 
+        commitAttempted = true
         txnMgr.commit(txnStatus)
+        commitAcknowledged = true
         txnStatus = null
 
         def roleCounts = [
@@ -232,26 +235,35 @@ try {
             ],
         ]
         println JsonOutput.toJson(payload)
-    } catch (Exception inner) {
-        if (txnStatus != null) {
-            try { txnMgr.rollback(txnStatus) } catch (Exception ignored) {}
-            txnStatus = null
-        }
-        throw inner
+} catch (Throwable e) {
+    boolean rollbackAttempted = false
+    boolean rollbackSucceeded = false
+    if (txnStatus != null && txnMgr != null) {
+        rollbackAttempted = true
+        try { txnMgr.rollback(txnStatus); rollbackSucceeded = true } catch (Throwable ignored) {}
     }
-} catch (Exception e) {
+    String repositoryOutcome = commitAcknowledged ? "committed" : commitAttempted ? "commit_outcome_unknown" :
+        rollbackAttempted ? (rollbackSucceeded ? "rolled_back" : "rollback_failed") : "no_transaction"
+    String reportStatus = commitAcknowledged ? "committed_report_incomplete" :
+        (commitAttempted || (rollbackAttempted && !rollbackSucceeded)) ? "outcome_unknown" : "error"
     def payload = [
         tool: "odi.dim_product_scd2_datastore_registration",
-        status: "error",
+        status: reportStatus,
         mode: "fixed_absent_only_odi_datastore_registration",
-        side_effects: false,
+        side_effects: commitAcknowledged ? true : reportStatus == "outcome_unknown" ? null : false,
         repository_connection_attempted: true,
         *: safeFlags(),
         error_type: e.getClass().getSimpleName(),
+        repository_outcome: repositoryOutcome,
+        commit_attempted: commitAttempted,
+        commit_acknowledged: commitAcknowledged,
+        rollback_attempted: rollbackAttempted,
+        rollback_succeeded: rollbackSucceeded,
+        manual_recovery_review_required: reportStatus != "error",
     ]
     println JsonOutput.toJson(payload)
 } finally {
     if (standaloneMode && odi != null) {
-        odi.close()
+        try { odi.close() } catch (Throwable ignored) {}
     }
 }
