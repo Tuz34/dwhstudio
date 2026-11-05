@@ -156,6 +156,9 @@ ODI_APPROVED_IKMS   = os.getenv(
     "IKM SQL Control Append",
 )
 ODI_LKM_PRIORITY    = os.getenv("ODI_LKM_PRIORITY", "sql to oracle,mssql to oracle,sql to sql")
+# Optional JSON object: {"CONTEXT": {"PHYSICAL_OWNER": "MODEL_CODE"}}.
+# Empty keeps the existing source-model ambiguity refusal. Callers do not supply this map.
+ODI_SOURCE_MODEL_BINDINGS = os.getenv("ODI_SOURCE_MODEL_BINDINGS", "")
 
 # ── 9. Alert & Monitoring Settings ──────────────────────────────────────────
 ALERT_FRESHNESS_DAYS = int(os.getenv("ALERT_FRESHNESS_DAYS", "2"))
