@@ -47,6 +47,17 @@ class World {
     static boolean committed = false
     static void reset(Map s) { spec = s; trace = []; mapping = null; committed = false }
     static void log(String event) { trace << event }
+    static class FailingOut {
+        Writer writer
+        int failures
+        void println(Object value) {
+            if (failures > 0) {
+                failures--
+                throw new RuntimeException("''' + RAISE_TOKEN + r'''")
+            }
+            writer.write(String.valueOf(value) + "\n")
+        }
+    }
     static Map defaults() {
         [FLOW_CONTROL: true, STATIC_CONTROL: false, RECYCLE_ERRORS: false, TRUNCATE: false,
          DELETE_ALL: false, CREATE_TARG_TABLE: false, COMMIT: true]
@@ -57,24 +68,40 @@ class World {
 import fake.World
 import oracle.odi.core.persistence.transaction.ITransactionManager
 class OdiInstance {
-    static OdiInstance createInstance(Object c) { throw new IllegalStateException("standalone is not used") }
+    static OdiInstance createInstance(Object c) { new OdiInstance() }
     ITransactionManager getTransactionManager() { new ITransactionManager() }
     def getTransactionalEntityManager() { new oracle.odi.domain.mapping.FakeEntityManager() }
-    def getSecurityManager() { throw new IllegalStateException("standalone is not used") }
-    void close() {}
+    def getSecurityManager() {
+        [createAuthentication: { String u, char[] p -> new oracle.odi.core.security.Authentication() },
+         setCurrentThreadAuthentication: { a -> }]
+    }
+    void close() {
+        World.log("odi_close")
+        if (World.spec.close_raises) throw new RuntimeException("''' + RAISE_TOKEN + r'''")
+    }
 }
 ''',
     "oracle.odi.core.persistence.transaction.ITransactionManager": r'''
 import fake.World
 import oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition
 class ITransactionManager {
-    ITransactionStatus getTransaction(DefaultTransactionDefinition d) { new ITransactionStatus() }
+    ITransactionStatus getTransaction(DefaultTransactionDefinition d) {
+        if (World.spec.begin_raises) throw new RuntimeException("''' + RAISE_TOKEN + r'''")
+        new ITransactionStatus()
+    }
     void commit(ITransactionStatus s) {
         World.log("commit")
+        // The two commit failures look the same to the script: only the repository differs.
         if (World.spec.commit_raises) throw new RuntimeException("''' + RAISE_TOKEN + r'''")
         World.committed = true
+        if (World.spec.commit_applied_then_raises) throw new RuntimeException("''' + RAISE_TOKEN + r'''")
+        if (World.spec.commit_applied_then_error) throw new Error("''' + RAISE_TOKEN + r'''")
     }
-    void rollback(ITransactionStatus s) { World.log("rollback") }
+    void rollback(ITransactionStatus s) {
+        World.log("rollback")
+        if (World.spec.rollback_raises) throw new RuntimeException("''' + RAISE_TOKEN + r'''")
+        if (World.spec.rollback_error) throw new Error("''' + RAISE_TOKEN + r'''")
+    }
 }
 ''',
     "oracle.odi.domain.root.RootIssue": r'''
@@ -369,14 +396,29 @@ Map results = [:]
 input.scenarios.each { String id, Map spec ->
     World.reset(spec)
     StringWriter captured = new StringWriter()
-    Binding binding = new Binding(odiInstance: new OdiInstance(), out: new PrintWriter(captured, true))
-    new GroovyShell(this.class.classLoader, binding).evaluate(new File(input.script))
+    Map variables = [out: new World.FailingOut(writer: captured, failures: spec.print_failures ?: 0)]
+    if (spec.standalone) {
+        // Synthetic placeholders only. The fake instance never reads or connects with them.
+        File properties = new File(input.workspace, "fake_connection.properties")
+        properties.text = ["master_jdbc", "master_jdbc_driver", "master_username", "master_password",
+                           "work_name", "odi_username", "odi_password"].collect { it + "=fake" }.join("\n")
+        variables.args = [properties.path] as String[]
+    } else {
+        variables.odiInstance = new OdiInstance()
+    }
+    String scriptRaised = null
+    try {
+        new GroovyShell(this.class.classLoader, new Binding(variables)).evaluate(new File(input.script))
+    } catch (Throwable raised) {
+        scriptRaised = raised.getClass().getSimpleName()
+    }
     Map state = World.mapping == null ? [:] : [
         lkm_names: World.mapping.design.getAllAPNodes().collect { it.getLKMName() },
         xkm_names: World.mapping.design.getAllAPNodes().collect { it.getXKMName() },
         options: World.mapping.design.nodes.find { it.isTargetNode() }.options.collectEntries { n, o -> [n, o.getOptionValue()] },
     ]
-    results[id] = [output: captured.toString(), trace: World.trace, committed: World.committed, state: state]
+    results[id] = [output: captured.toString(), trace: World.trace, committed: World.committed,
+                   state: state, script_raised: scriptRaised]
 }
 print JsonOutput.toJson(results)
 '''
@@ -461,7 +503,8 @@ def run_scenarios(java: str, workspace: Path, scenarios: dict[str, dict]) -> dic
     driver = workspace / "fake_sdk_driver.groovy"
     driver.write_text(_DRIVER, encoding="utf-8")
     classpath = os.pathsep.join([str(GROOVY_JAR), str(classes)])
-    return _run(java, classpath, driver, {"script": str(SCRIPT), "scenarios": scenarios}, workspace)
+    payload = {"script": str(SCRIPT), "workspace": str(workspace), "scenarios": scenarios}
+    return _run(java, classpath, driver, payload, workspace)
 
 
 def check_real_public_api(java: str, workspace: Path, required: list[dict]) -> dict:

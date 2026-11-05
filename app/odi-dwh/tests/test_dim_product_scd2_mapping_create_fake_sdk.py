@@ -75,7 +75,72 @@ SCENARIOS: dict[str, dict] = {
     },
     "mapping_exists": {"mapping_exists": True},
     "scenario_exists": {"scenario_exists": True},
+    "begin_raises": {"begin_raises": True},
     "commit_raises": {"commit_raises": True},
+    "commit_applied_then_raises": {"commit_applied_then_raises": True},
+    "commit_applied_then_error": {"commit_applied_then_error": True},
+    "commit_raises_rollback_raises": {"commit_raises": True, "rollback_raises": True},
+    "commit_applied_rollback_raises": {"commit_applied_then_raises": True, "rollback_raises": True},
+    "rollback_raises_before_commit": {"final_validate": {"levels": ["ERROR"]}, "rollback_raises": True},
+    "rollback_error_before_commit": {"final_validate": {"levels": ["ERROR"]}, "rollback_error": True},
+    "success_report_print_fails": {"print_failures": 1},
+    "standalone_clean": {"standalone": True},
+    "standalone_close_raises_after_success": {"standalone": True, "close_raises": True},
+    "standalone_close_raises_after_error": {
+        "standalone": True, "close_raises": True, "final_validate": {"levels": ["ERROR"]},
+    },
+    "standalone_close_raises_after_unknown": {
+        "standalone": True, "close_raises": True, "commit_applied_then_raises": True,
+    },
+}
+
+# Fixed report for each repository outcome. An uncertain commit stays unknown even when rollback succeeds.
+COMMIT_UNKNOWN = {
+    "status": "outcome_unknown",
+    "repository_outcome": "commit_outcome_unknown",
+    "side_effects": None,
+    "commit_attempted": True,
+    "commit_acknowledged": False,
+    "rollback_attempted": True,
+    "manual_recovery_review_required": True,
+}
+ROLLBACK_FAILED = {
+    "status": "outcome_unknown",
+    "repository_outcome": "rollback_failed",
+    "side_effects": None,
+    "commit_attempted": False,
+    "commit_acknowledged": False,
+    "rollback_attempted": True,
+    "rollback_succeeded": False,
+    "manual_recovery_review_required": True,
+}
+UNCERTAIN_OUTCOMES = {
+    "commit_raises": {**COMMIT_UNKNOWN, "rollback_succeeded": True},
+    "commit_applied_then_raises": {**COMMIT_UNKNOWN, "rollback_succeeded": True},
+    "commit_applied_then_error": {**COMMIT_UNKNOWN, "rollback_succeeded": True},
+    "commit_raises_rollback_raises": {**COMMIT_UNKNOWN, "rollback_succeeded": False},
+    "commit_applied_rollback_raises": {**COMMIT_UNKNOWN, "rollback_succeeded": False},
+    "standalone_close_raises_after_unknown": {**COMMIT_UNKNOWN, "rollback_succeeded": True},
+    "rollback_raises_before_commit": ROLLBACK_FAILED,
+    "rollback_error_before_commit": ROLLBACK_FAILED,
+}
+# The repository state a test harness can see, which the report must not contradict.
+APPLIED_IN_THE_MODEL = {
+    "commit_raises": False,
+    "commit_applied_then_raises": True,
+    "commit_applied_then_error": True,
+    "commit_raises_rollback_raises": False,
+    "commit_applied_rollback_raises": True,
+    "standalone_close_raises_after_unknown": True,
+    "rollback_raises_before_commit": False,
+    "rollback_error_before_commit": False,
+}
+OTHER_REPORTS = {
+    "begin_raises",
+    "success_report_print_fails",
+    "standalone_clean",
+    "standalone_close_raises_after_success",
+    "standalone_close_raises_after_error",
 }
 
 BLOCKED_BEFORE_COMMIT = [
@@ -141,7 +206,9 @@ def payload_of(run: dict) -> dict:
 
 
 def test_every_scenario_has_an_expected_outcome():
-    assert set(SCENARIOS) == set(BLOCKED_BEFORE_COMMIT) | set(BLOCKED_BEFORE_CREATE) | set(PASSING) | {"commit_raises"}
+    assert set(SCENARIOS) == (
+        set(BLOCKED_BEFORE_COMMIT) | set(BLOCKED_BEFORE_CREATE) | set(PASSING) | set(UNCERTAIN_OUTCOMES) | OTHER_REPORTS
+    )
 
 
 @pytest.mark.parametrize("name", PASSING)
@@ -166,10 +233,16 @@ def test_failures_after_create_roll_back_without_commit(runs, name):
 
     assert payload["status"] == "error"
     assert payload["side_effects"] is False
+    assert payload["repository_outcome"] == "rolled_back"
+    assert payload["rollback_succeeded"] is True
+    assert payload["manual_recovery_review_required"] is False
     assert run["committed"] is False
     assert "commit" not in run["trace"]
     assert run["trace"][-1] == "rollback"
-    assert normalize_dim_product_odi_scd2_mapping(payload)["status"] == "error"
+    normalized = normalize_dim_product_odi_scd2_mapping(payload)
+    assert normalized["status"] == "error"
+    assert normalized["side_effects"] is False
+    assert normalized["repository_outcome"] == "rolled_back"
 
 
 @pytest.mark.parametrize("name", BLOCKED_BEFORE_CREATE)
@@ -182,14 +255,75 @@ def test_identity_and_collision_failures_block_before_creating_anything(runs, na
     assert "commit" not in run["trace"]
 
 
-def test_commit_failure_rolls_back_and_reports_only_the_class(runs):
-    run = runs["commit_raises"]
+@pytest.mark.parametrize("name", list(UNCERTAIN_OUTCOMES))
+def test_uncertain_repository_state_is_never_reported_as_clean(runs, name):
+    run = runs[name]
     payload = payload_of(run)
+    normalized = normalize_dim_product_odi_scd2_mapping(payload)
 
-    assert payload["status"] == "error"
-    assert payload["error_type"] == "RuntimeException"
-    assert run["committed"] is False
-    assert run["trace"][-2:] == ["commit", "rollback"]
+    assert run["committed"] is APPLIED_IN_THE_MODEL[name]
+    assert run["script_raised"] is None
+    for field, expected in UNCERTAIN_OUTCOMES[name].items():
+        assert payload[field] == expected, field
+        assert normalized[field] == expected, field
+    assert "result" not in normalized
+
+
+def test_applied_and_unapplied_commit_failures_report_the_same_unknown(runs):
+    unapplied = payload_of(runs["commit_raises"])
+    applied = payload_of(runs["commit_applied_then_raises"])
+
+    assert runs["commit_raises"]["committed"] is False
+    assert runs["commit_applied_then_raises"]["committed"] is True
+    assert unapplied == applied
+    assert applied["error_type"] == "RuntimeException"
+
+
+def test_failure_before_the_transaction_starts_is_a_clean_error(runs):
+    run = runs["begin_raises"]
+    payload = payload_of(run)
+    normalized = normalize_dim_product_odi_scd2_mapping(payload)
+
+    assert payload["repository_outcome"] == "no_transaction"
+    assert payload["rollback_attempted"] is False
+    assert run["trace"] == []
+    assert normalized["status"] == "error"
+    assert normalized["side_effects"] is False
+    assert normalized["manual_recovery_review_required"] is False
+
+
+def test_acknowledged_commit_with_a_failed_report_keeps_the_commit(runs):
+    run = runs["success_report_print_fails"]
+    payload = payload_of(run)
+    normalized = normalize_dim_product_odi_scd2_mapping(payload)
+
+    assert run["committed"] is True
+    assert "rollback" not in run["trace"]
+    for report in (payload, normalized):
+        assert report["status"] == "committed_report_incomplete"
+        assert report["repository_outcome"] == "committed"
+        assert report["side_effects"] is True
+        assert report["commit_acknowledged"] is True
+        assert report["rollback_attempted"] is False
+        assert report["manual_recovery_review_required"] is True
+    assert "result" not in normalized
+
+
+@pytest.mark.parametrize(
+    ("name", "status"),
+    [
+        ("standalone_clean", "passed"),
+        ("standalone_close_raises_after_success", "passed"),
+        ("standalone_close_raises_after_error", "error"),
+        ("standalone_close_raises_after_unknown", "outcome_unknown"),
+    ],
+)
+def test_instance_close_failure_cannot_replace_the_report(runs, name, status):
+    run = runs[name]
+
+    assert run["script_raised"] is None
+    assert payload_of(run)["status"] == status
+    assert run["trace"][-1] == "odi_close"
 
 
 @pytest.mark.parametrize("name", list(SCENARIOS))

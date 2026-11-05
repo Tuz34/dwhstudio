@@ -58,6 +58,32 @@ The writer now checks these before it commits, and rolls back if any fails:
 Issue text and exception text are never output. An error returns a class name
 only.
 
+## Failure Reports
+
+Every failure report states what is known about the repository. These are the
+only accepted combinations:
+
+| `repository_outcome` | `status` | `side_effects` | Manual review | Meaning |
+| --- | --- | --- | --- | --- |
+| `no_transaction` | `error` | `false` | no | The failure came before a transaction started |
+| `rolled_back` | `error` | `false` | no | No commit was tried and the rollback was acknowledged |
+| `rollback_failed` | `outcome_unknown` | `null` | yes | No commit was tried, but the rollback failed |
+| `commit_outcome_unknown` | `outcome_unknown` | `null` | yes | The commit call raised, so it may have applied |
+| `committed` | `committed_report_incomplete` | `true` | yes | The commit was acknowledged, but the success report failed |
+
+After a commit call raises, the writer still attempts a rollback and records the
+result. A successful rollback does not change `commit_outcome_unknown`, because it
+cannot undo or disprove a commit that applied.
+
+The normalizer accepts only these combinations. Anything else, including the older
+error report with no outcome fields, becomes `blocked_invalid_mapping_output` with
+`side_effects: null`, `repository_outcome: unverified` and manual review required.
+Rejected output is not proof that nothing changed.
+
+Success stays narrow: exact integer component and attribute counts, and an LKM count
+equal to the access-point count. A failure while closing the standalone instance
+cannot replace a report that has been written.
+
 ## What This Does Not Fix
 
 - **Audit columns.** `INSERT_DATE`, `UPDATE_DATE`, `SOURCE_SYSTEM` and
@@ -74,8 +100,14 @@ only.
 - **Read-only probe.** `dim_product_scd2_mapping_probe.groovy` still counts
   assigned LKMs through `getXKMName`. It is outside this change and can
   under-count access-point LKMs.
-- **Commit acknowledgement.** A commit failure still reports `side_effects:
-  false`, as the result normalizer requires, although the outcome may be unknown.
+- **Output that never reaches the normalizer.** If the process dies, times out or
+  exits with an error, there is no report. `odi_orchestrator.py` then returns its
+  own parse-failure result with `side_effects: false`, even if a commit may have
+  applied. That file is outside this change, so a caller must not read that
+  result as proof of absence. The same applies if writing the failure report itself
+  fails.
+- **Reconciliation.** `outcome_unknown` asks for manual review. This builder does
+  not reread the repository to settle it.
 - **Native proof.** The evidence is a fake SDK plus public API checks against the
   installed jar. The boolean meaning of `validate` comes from the jar's bytecode
   and earlier generic builder notes. No native ODI validation, mapping creation
@@ -86,7 +118,8 @@ only.
 The writer is absent-only. An existing mapping or fixed scenario blocks before
 creation. It has no replacement, remove, reflection fallback, scenario
 generation, scenario run, target DDL, or data-load surface. A failed transaction
-is rolled back and returns fixed text plus a class-only error type.
+gets a rollback attempt and returns fixed text, a class-only error type and the
+repository outcome above.
 
 The separate read-only mapping probe returns only component, attribute, access
 point, and assigned-KM counts plus fixed names. It does not return expressions,

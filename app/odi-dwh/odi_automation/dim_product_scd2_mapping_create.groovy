@@ -75,6 +75,8 @@ def odi = null
 boolean standaloneMode = false
 ITransactionManager txnMgr = null
 ITransactionStatus txnStatus = null
+boolean commitAttempted = false
+boolean commitAcknowledged = false
 
 def safeFlags = {
     [
@@ -320,7 +322,9 @@ try {
     if (verifyPhysicalContract().size() != accessPoints.size()) {
         throw new IllegalStateException("Fixed access point count changed during validation")
     }
+    commitAttempted = true
     txnMgr.commit(txnStatus)
+    commitAcknowledged = true
     txnStatus = null
 
     println JsonOutput.toJson([
@@ -344,22 +348,58 @@ try {
             commit_completed: true,
         ],
     ])
-} catch (Exception e) {
+} catch (Throwable e) {
+    boolean rollbackAttempted = false
+    boolean rollbackSucceeded = false
     if (txnStatus != null && txnMgr != null) {
-        try { txnMgr.rollback(txnStatus) } catch (Exception ignored) {}
+        rollbackAttempted = true
+        try {
+            txnMgr.rollback(txnStatus)
+            rollbackSucceeded = true
+        } catch (Throwable ignored) {}
+    }
+    // A commit that raised may still have applied, and a later rollback cannot undo or
+    // disprove it, so that outcome stays unknown whatever the rollback did. A failed
+    // rollback before any commit cannot claim a clean result either.
+    String repositoryOutcome = "no_transaction"
+    String reportStatus = "error"
+    Boolean sideEffects = false
+    if (commitAcknowledged) {
+        repositoryOutcome = "committed"
+        reportStatus = "committed_report_incomplete"
+        sideEffects = true
+    } else if (commitAttempted) {
+        repositoryOutcome = "commit_outcome_unknown"
+        reportStatus = "outcome_unknown"
+        sideEffects = null
+    } else if (rollbackAttempted && !rollbackSucceeded) {
+        repositoryOutcome = "rollback_failed"
+        reportStatus = "outcome_unknown"
+        sideEffects = null
+    } else if (rollbackAttempted) {
+        repositoryOutcome = "rolled_back"
     }
     println JsonOutput.toJson([
         tool: "odi.dim_product_scd2_mapping_create",
-        status: "error",
+        status: reportStatus,
         mode: "fixed_absent_only_scd2_mapping_creation",
-        side_effects: false,
+        side_effects: sideEffects,
         repository_connection_attempted: true,
         *: safeFlags(),
-        error_type: e.getClass().getSimpleName(),
+        error_type: e.getClass().getSimpleName() ?: "UnnamedError",
+        repository_outcome: repositoryOutcome,
+        commit_attempted: commitAttempted,
+        commit_acknowledged: commitAcknowledged,
+        rollback_attempted: rollbackAttempted,
+        rollback_succeeded: rollbackSucceeded,
+        manual_recovery_review_required: reportStatus != "error",
     ])
 } finally {
     if (standaloneMode && odi != null) {
-        odi.close()
+        // The report is already out. A close failure cannot change the repository outcome.
+        try {
+            odi.close()
+        } catch (Throwable ignored) {}
     }
 }
 
