@@ -342,6 +342,58 @@ def test_fixed_checkpoint_and_count_only_comparisons(db, flow, run, phase):
     assert all(secret not in text for secret in ("FIXTURE_A", "ENTITY_ID", "SELECT", "101", "LEAK"))
 
 
+@pytest.mark.parametrize("flow", ["F1", "F2", "F3"])
+def test_rerun_witness_compares_the_complete_target_snapshot(db, flow):
+    db.provision(flow, state="changed", run=3)
+    result = verify(db, flow, run=3)
+    assert result["status"] == "passed"
+    assert result["full_target_snapshot_equal"] is True
+    assert result["logical_business_comparison_only"] is False
+    assert result["physical_dml_count_proven"] is False
+    assert result["rerun_semantics"] == ("full_reload" if flow == "F2" else "incremental")
+    no_mutation(db)
+
+
+@pytest.mark.parametrize("flow", ["F1", "F2", "F3"])
+@pytest.mark.parametrize("column", ["UPDATE_DATE", "INSERT_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"])
+def test_rerun_with_only_an_audit_change_is_not_a_noop(db, flow, column):
+    db.provision(flow, state="changed", run=3)
+    target = fixture._FLOWS[flow][1]
+    db.db.execute(f'UPDATE "{target}" SET "{column}"=?', ("SYNTHETIC_CHANGED_AUDIT",))
+    result = verify(db, flow, run=3)
+    assert (result["status"] == "passed") is (flow == "F2")
+    assert result["full_target_snapshot_equal"] is False
+    assert result["physical_dml_count_proven"] is False
+    if flow == "F2":
+        assert result["rerun_semantics"] == "full_reload"
+    assert "SYNTHETIC_CHANGED_AUDIT" not in json.dumps(result)
+    no_mutation(db)
+
+
+@pytest.mark.parametrize("flow", ["F1", "F2", "F3"])
+def test_before_run_is_not_a_postrun_noop_witness(db, flow):
+    db.provision(flow, state="changed", run=3)
+    result = verify(db, flow, run=3, phase="before_run")
+    assert result["status"] == "passed" and result["full_target_snapshot_equal"] is False
+
+
+def test_cleanup_failure_cannot_preserve_a_full_snapshot_success(db, monkeypatch):
+    db.provision("F1", state="changed", run=3)
+    original = Cursor.execute
+
+    def execute(self, sql, params=None):
+        result = original(self, sql, params)
+        if "MINUS" in sql and '"UPDATE_DATE"' in sql:
+            db.fail_cleanup = "rollback"
+        return result
+
+    monkeypatch.setattr(Cursor, "execute", execute)
+    result = verify(db, run=3)
+    assert result["status"] == "failed" and result["error_code"] == "CleanupFailed"
+    assert result["full_target_snapshot_equal"] is False and result["physical_dml_count_proven"] is False
+    no_mutation(db)
+
+
 @pytest.mark.parametrize("corruption", ["duplicate", "null", "value", "backup", "metadata", "pk", "view"])
 def test_corrupt_source_or_snapshot_never_proves_readiness(db, corruption):
     db.provision("F1")

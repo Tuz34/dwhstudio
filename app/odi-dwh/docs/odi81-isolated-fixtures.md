@@ -93,11 +93,18 @@ the flow and rerun the gates immediately before the separately approved run.
 After each app run, `after_run` requires source/target business equality in
 both directions and unique/non-null keys: run 1 has 3 rows; runs 2/3 have 4.
 Run 2 vs T_R2_BKP requires one changed existing, two unchanged, one inserted;
-run 3 vs T_R3_BKP requires zero changed/inserted and four unchanged. Retained
+run 3 vs T_R3_BKP requires zero changed/inserted and four unchanged, plus an
+bidirectional comparison of every fixed target column, including audit
+and timestamp fields. `full_target_snapshot_equal=true` is possible only after
+successful `after_run` verification of run 3 with identical full projections;
+before-run checks cannot prove a rerun. F1/F3 require this equality. F2 is a
+full reload: it records unequal audit values without misclassifying that valid
+reload as a failed incremental no-op, and labels `rerun_semantics=full_reload`.
+Any read or cleanup failure leaves that witness false. Retained
 backup business rows are checked against internal checkpoint constants, not
 against a source intentionally changed since backup creation.
 
-Business-only comparisons exclude the current app-generated fields:
+Run 1/2 business comparisons exclude the current app-generated fields:
 F1/F2: INSERT_DATE, UPDATE_DATE, SOURCE_SYSTEM, ETL_BATCH_ID.
 F3 additionally: CURRENT_FLAG, EFFECTIVE_FROM, EFFECTIVE_TO. These names do
 not imply Type 2: F3 must still have exactly one row per business key. Target
@@ -105,6 +112,12 @@ column names/counts and the three business type contracts are checked;
 backup-vs-original metadata checks include every column's ordinal, type,
 length, precision, scale, character semantics and nullability. This is not
 an independent verifier of ODI keys, IKM assignment, or audit default formulas.
+Run 3 includes all these columns in its retained-target snapshot equality check.
+Equal values prove logical and audit idempotence for that checkpoint, not zero
+physical DML: `physical_dml_count_proven` deliberately stays false. In particular,
+the truncate/reload F2 flow must not be described as a physical no-op. F1/F3
+fail on refreshed audit fields; F2 can pass business reload checks while reporting
+full snapshot equality false. It never claims unchanged audits from row counts.
 
 All comparisons use aggregates; SQL MINUS is paired with total counts and
 key uniqueness so duplicate multiplicity cannot pass as set equality. Each
