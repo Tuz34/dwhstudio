@@ -386,6 +386,7 @@ def execute_target_table_plan(
         column_definitions.append(key_constraint_sql(context.table, key_columns, kind))
         key_result = {
             "status": "CREATED",
+            "kind": kind,
             "columns": key_columns,
             "constraint": key_constraint_name(context.table, key_columns, kind),
         }
