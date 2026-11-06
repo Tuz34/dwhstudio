@@ -134,6 +134,12 @@ def _probe_column(column):
     }
 
 
+STABLE_AUDIT_PROFILE = {
+    "stable": True, "role_contract_valid": True, "source_alias_valid": True,
+    "audit_attribute_count": 4, "stable_expression_count": 4, "audit_target_hint_count": 0,
+}
+
+
 def probe_payload(plan=None, **overrides):
     plan = plan or _default_plan()
     result = {
@@ -174,6 +180,8 @@ def probe_payload(plan=None, **overrides):
             "access_point_count": 1,
             "target_attribute_count": count,
             "mapped_attribute_count": count,
+            # A mapping created by the generic builder carries the stable audit profile.
+            "audit_profile": dict(STABLE_AUDIT_PROFILE),
         }
     if overrides.get("scenario_exists"):
         result["scenario_versions"] = ["001"]
@@ -182,6 +190,11 @@ def probe_payload(plan=None, **overrides):
 
 
 def error_payload(tool, mode, error_type, side_effects=False):
+    outcome = {}
+    if tool in {"odi.scd2_mapping_create", "odi.scd2_datastore_register"} and side_effects is False:
+        outcome = dict(repository_outcome="rolled_back", commit_attempted=False,
+                       commit_acknowledged=False, rollback_attempted=True, rollback_succeeded=True,
+                       manual_recovery_review_required=False)
     return json.dumps(
         {
             "tool": tool,
@@ -193,6 +206,7 @@ def error_payload(tool, mode, error_type, side_effects=False):
             "pk_values_included": False,
             "secret_printed": False,
             "error_type": error_type,
+            **outcome,
         }
     )
 
@@ -215,7 +229,7 @@ def register_payload(plan):
                     "end_date": 1,
                     "current_flag": 1,
                     "tracked_attributes": len(plan["tracked_attributes"]),
-                    "overwrite_attributes": 0,
+                    "overwrite_attributes": len(plan["overwrite_attributes"]) + 4,
                 },
                 "commit_completed": True,
             },
@@ -240,6 +254,7 @@ def mapping_payload(plan):
                 "target_ikm": "IKM Oracle Slowly Changing Dimension",
                 "access_point_count": 2,
                 "lkm_assigned_count": 2,
+                "stable_audit_expression_count": 4,
                 "commit_completed": True,
             },
         )

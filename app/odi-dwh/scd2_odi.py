@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import remote_run_contract
+import repository_write_contract as write_contract
 import scd2_builder
 from odi_orchestrator import groovy_approval_context
 
@@ -64,7 +65,12 @@ _MAPPING_COUNT_KEYS = (
     "mapped_attribute_count",
     "access_point_count",
     "lkm_assigned_count",
+    "stable_audit_expression_count",
 )
+# The four audit columns whose creation expressions must carry the stable profile.
+STABLE_AUDIT_COLUMN_COUNT = 4
+_AUDIT_PROFILE_BOOLEANS = ("stable", "role_contract_valid", "source_alias_valid")
+_AUDIT_PROFILE_COUNTS = ("audit_attribute_count", "stable_expression_count", "audit_target_hint_count")
 _ROLE_COUNT_KEYS = (
     "surrogate_key",
     "natural_key",
@@ -98,14 +104,17 @@ def _failed(step: str, error_type: str, *, side_effects: bool = False) -> dict[s
 
 def _parse_envelope(script: str, step: str, output: object) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Return (payload, None) for a passed envelope or (None, failed_step)."""
+    writing = script != SCRIPT_PROBE
+    def rejected(error_type: str) -> dict[str, Any]:
+        return _step(step, "failed", **write_contract.unverified(error_type)) if writing else _failed(step, error_type)
     text = str(output or "").strip()
     if text.upper().startswith("HATA:"):
         match = _HATA_ERROR_TYPE_RE.search(text)
-        return None, _failed(step, match.group(1) if match else "GroovyActionFailed")
+        return None, rejected(match.group(1) if match else "GroovyActionFailed")
     try:
-        payload = json.loads(text)
+        payload = write_contract.parse_json(text)
     except (TypeError, ValueError):
-        return None, _failed(step, "InvalidGroovyOutput")
+        return None, rejected("InvalidGroovyOutput")
     tool, mode = _TOOLS[script]
     if (
         not isinstance(payload, dict)
@@ -116,14 +125,17 @@ def _parse_envelope(script: str, step: str, output: object) -> tuple[dict[str, A
         or payload.get("secret_printed") is not False
         or payload.get("repository_connection_attempted") is not True
     ):
-        return None, _failed(step, "InvalidGroovyEnvelope")
+        return None, rejected("InvalidGroovyEnvelope")
+    if writing and payload.get("status") != "passed":
+        state = write_contract.failure(payload, tool, mode)
+        return None, _step(step, "failed", **state) if state else rejected("InvalidGroovyEnvelope")
     if payload.get("status") == "error":
         error_type = payload.get("error_type")
         if not isinstance(error_type, str) or not _ERROR_TYPE_RE.fullmatch(error_type):
             return None, _failed(step, "InvalidGroovyEnvelope")
         return None, _failed(step, error_type, side_effects=payload.get("side_effects") is True)
     if payload.get("status") != "passed" or not isinstance(payload.get("result"), dict):
-        return None, _failed(step, "InvalidGroovyEnvelope")
+        return None, rejected("InvalidGroovyEnvelope")
     return payload, None
 
 
@@ -138,9 +150,19 @@ def _run(orchestrator: Any, script: str, params: Mapping[str, str], approved: ob
         return orchestrator.run_groovy(script, dict(params))
 
 
+def _target_owner(probe_params: Mapping[str, str]) -> str | None:
+    """The physical target owner of the validated target model, for the stable audit profile."""
+    owners = [owner for owner, model in scd2_builder.TARGET_MODEL_BY_OWNER.items()
+              if model == probe_params.get("odi.scd2.target_model")]
+    return owners[0] if len(owners) == 1 else None
+
+
 def probe(orchestrator: Any, probe_params: Mapping[str, str]) -> dict[str, Any]:
     """Read-only ODI readiness probe: booleans and counts only."""
-    params = {**_project_params(), **probe_params}
+    owner = _target_owner(probe_params)
+    if owner is None:
+        return _failed("odi_probe", "InvalidProbeParameters")
+    params = {**_project_params(), **probe_params, "odi.scd2.target_owner": owner}
     output = _run(orchestrator, SCRIPT_PROBE, params, approved=False)
     payload, failure = _parse_envelope(SCRIPT_PROBE, "odi_probe", output)
     if failure is not None:
@@ -190,6 +212,7 @@ _MAPPING_KEYS = frozenset(
         "access_point_count",
         "target_attribute_count",
         "mapped_attribute_count",
+        "audit_profile",
     }
 )
 
@@ -206,6 +229,31 @@ def _component(value: object) -> dict[str, str] | None:
     if not all(isinstance(value[key], str) and scd2_builder.IDENTIFIER_RE.fullmatch(value[key]) for key in ("model", "table")):
         return None
     return {"model": value["model"], "table": value["table"]}
+
+
+def _audit_profile(value: object) -> dict[str, Any] | None:
+    """Exact boolean/count shape of the probe's stable audit profile; anything else is rejected."""
+    if not isinstance(value, dict) or set(value) != set(_AUDIT_PROFILE_BOOLEANS + _AUDIT_PROFILE_COUNTS):
+        return None
+    if any(type(value[key]) is not bool for key in _AUDIT_PROFILE_BOOLEANS):
+        return None
+    if any(type(value[key]) is not int or value[key] < 0 for key in _AUDIT_PROFILE_COUNTS):
+        return None
+    return dict(value)
+
+
+def audit_profile_stable(mapping: Mapping[str, Any] | None) -> bool:
+    """True only for a complete, internally consistent stable audit profile."""
+    profile = mapping.get("audit_profile") if isinstance(mapping, Mapping) else None
+    return (
+        isinstance(profile, Mapping)
+        and profile.get("stable") is True
+        and profile.get("role_contract_valid") is True
+        and profile.get("source_alias_valid") is True
+        and profile.get("audit_attribute_count") == STABLE_AUDIT_COLUMN_COUNT
+        and profile.get("stable_expression_count") == STABLE_AUDIT_COLUMN_COUNT
+        and profile.get("audit_target_hint_count") == 0
+    )
 
 
 def _probe_details(result: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -253,9 +301,12 @@ def _probe_details(result: Mapping[str, Any]) -> dict[str, Any] | None:
             for key in ("target_count", "target_attribute_count", "mapped_attribute_count", "access_point_count")
         )
         text_ok = all(mapping[key] is None or isinstance(mapping[key], str) for key in ("target_table", "integration_type", "target_ikm"))
-        if lkms is None or sources is None or any(item is None for item in source_components) or not counts_ok or not text_ok:
+        profile = _audit_profile(mapping["audit_profile"])
+        if (lkms is None or sources is None or any(item is None for item in source_components) or not counts_ok
+                or not text_ok or profile is None):
             return None
-        mapping = {**mapping, "lkm_names": lkms, "source_tables": sources, "target_component": target_component, "source_components": source_components}
+        mapping = {**mapping, "lkm_names": lkms, "source_tables": sources, "target_component": target_component,
+                   "source_components": source_components, "audit_profile": profile}
     return {
         "scenario_versions": versions,
         "target_datastore": {"columns": clean_columns, "primary_key": pk, "alternate_key": ak},
@@ -314,6 +365,9 @@ def mapping_mismatches(
         expected_attributes is not None and mapping["target_attribute_count"] != expected_attributes
     ):
         found.append("mapping_coverage")
+    # A reused mapping must already carry the stable audit profile; it is never repaired here.
+    if not audit_profile_stable(mapping):
+        found.append("mapping_audit_profile")
     return found
 
 
@@ -395,6 +449,9 @@ def register_datastore(orchestrator: Any, plan: Mapping[str, Any], approved: obj
         return failure
     result = payload["result"]
     roles = result.get("scd_role_column_counts")
+    expected_roles = dict(surrogate_key=1, natural_key=len(plan["natural_key"]), start_date=1, end_date=1,
+                          current_flag=1, tracked_attributes=len(plan["tracked_attributes"]),
+                          overwrite_attributes=len(plan["overwrite_attributes"]) + 4)
     if (
         payload.get("side_effects") is not True
         or result.get("commit_completed") is not True
@@ -402,6 +459,9 @@ def register_datastore(orchestrator: Any, plan: Mapping[str, Any], approved: obj
         or not isinstance(roles, dict)
         or set(roles) != set(_ROLE_COUNT_KEYS)
         or not _counts_ok(roles, _ROLE_COUNT_KEYS)
+        or roles != expected_roles
+        or result["primary_key_column_count"] != 1
+        or result["natural_key_column_count"] != len(plan["natural_key"])
         or result["target_column_count"] != len(plan["target_columns"])
     ):
         return _failed("odi_datastore_register", "InvalidGroovyEnvelope", side_effects=True)
@@ -430,6 +490,10 @@ def create_mapping(orchestrator: Any, plan: Mapping[str, Any], approved: object)
         or not _counts_ok(result, _MAPPING_COUNT_KEYS)
         or result["target_attribute_count"] != expected
         or result["mapped_attribute_count"] != expected
+        or result["source_component_count"] != 1
+        or result["target_component_count"] != 1
+        or result["access_point_count"] != result["lkm_assigned_count"]
+        or result["stable_audit_expression_count"] != STABLE_AUDIT_COLUMN_COUNT
     ):
         return _failed("odi_mapping_create", "InvalidGroovyEnvelope", side_effects=True)
     return _step(
@@ -442,6 +506,7 @@ def create_mapping(orchestrator: Any, plan: Mapping[str, Any], approved: object)
         mapped_attribute_count=result["mapped_attribute_count"],
         access_point_count=result["access_point_count"],
         lkm_assigned_count=result["lkm_assigned_count"],
+        stable_audit_expression_count=result["stable_audit_expression_count"],
     )
 
 
@@ -455,10 +520,12 @@ def import_ikm(orchestrator: Any, approved: object) -> dict[str, Any]:
     try:
         normalized = normalize_dim_product_odi_scd2_ikm_import(json.loads(str(output)))
     except (TypeError, ValueError):
-        return _failed("odi_ikm_import", "InvalidGroovyOutput")
+        return _step("odi_ikm_import", "failed", **write_contract.unverified("InvalidGroovyOutput"))
     if normalized.get("status") == "passed":
         return _step("odi_ikm_import", "passed", side_effects=True)
     error_type = normalized.get("error_type")
+    if normalized.get("status") != "error":
+        return _step("odi_ikm_import", "failed", **write_contract.unverified("InvalidImportOutput"))
     return _failed(
         "odi_ikm_import",
         error_type if isinstance(error_type, str) else "IkmImportFailed",
@@ -483,7 +550,10 @@ def generate_scenario(
         return _step("odi_scenario_generate", "skipped_exists", side_effects=False)
     error_type = result.get("error_type") if isinstance(result, Mapping) else None
     safe = error_type if isinstance(error_type, str) and _ERROR_TYPE_RE.fullmatch(error_type) else "ScenarioGenerationFailed"
-    return _failed("odi_scenario_generate", safe, side_effects=status != "blocked_until_approval")
+    if status == "blocked_until_approval":
+        return _failed("odi_scenario_generate", safe)
+    state = write_contract.failure(result, "odi.generate_scenario_metadata", "scenario_metadata_generation", generator=True)
+    return _step("odi_scenario_generate", "failed", **(state or write_contract.unverified(safe)))
 
 
 def run_scenario(

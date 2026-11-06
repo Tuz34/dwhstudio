@@ -41,8 +41,11 @@ import groovy.json.JsonOutput
 import oracle.odi.domain.root.RootIssue
 class MapPhysicalNode {
     String name; String lkmName; List events
+    Map options=[:]
     void setLKM(km) { lkmName = km.name; events << ("setLKM:" + name) }
     String getLKMName() { lkmName }
+    String getTargetComponentKMName() { 'IKM Oracle Slowly Changing Dimension' }
+    def getIKMOptionValue(String n) { options[n] }
 }
 class FakeMapping {
     List events; List results; List nodes; boolean materialize; boolean explode; int calls = 0
@@ -126,9 +129,29 @@ def mapping = new FakeMapping(events: events, results: {json.dumps(results)}, no
     materialize: {str(materialize).lower()}, explode: {str(explode).lower()},
     issuesByCall: {json.dumps(list(issues))})
 def design = new Expando(getAllAPNodes: {{ apNodes }})
-def attribute = new Expando(getExpression: {{ "EXPR" }})
-def targetComponent = new Expando(getAttributes: {{ [attribute] }})
-def target = new Expando(getColumns: {{ ["COL"] }})
+def AUDIT_OVERWRITE_COLUMNS = ["INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"]
+// The fragment rechecks every expression after the final validation; texts stay in the harness.
+def auditExpressions = AUDIT_OVERWRITE_COLUMNS.collectEntries {{ [(it): "STABLE_" + it] }}
+def expectedTexts = [COL: "EXPR"] + auditExpressions
+def attributes = expectedTexts.keySet().collect {{ n ->
+    new Expando(getName: {{ n }}, getExpression: {{ new Expando(getText: {{ expectedTexts[n] }}) }}, getExecuteOnHint: {{ null }})
+}}
+def targetComponent = new Expando(getAttributes: {{ attributes }})
+def target = new Expando(getColumns: {{ attributes }})
+boolean commitAttempted = false
+boolean commitAcknowledged = false
+def lockedOptions = [FLOW_CONTROL:false, STATIC_CONTROL:false, RECYCLE_ERRORS:false,
+    TRUNCATE:false, DELETE_ALL:false, CREATE_TARG_TABLE:false, COMMIT:true]
+def optionValues = lockedOptions.collectEntries {{ n, expected ->
+    def value = new Expando()
+    value.setValue = {{ v -> value.current = v }}
+    value.getOptionValue = {{ -> value.current }}
+    value.current = expected
+    [(n): value]
+}}
+def targetNode = new MapPhysicalNode(name:'TARGET', events:events, options:optionValues)
+def findTargetNode = {{ -> targetNode }}
+def writeOptions = {{ node -> lockedOptions.each {{ n, v -> node.getIKMOptionValue(n).setValue(v) }} }}
 '''
     return _run(tmp_path, header + setup + "try {\n" + body + "}\n")
 

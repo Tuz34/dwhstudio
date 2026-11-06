@@ -79,6 +79,13 @@ input.scenarios.each { id, spec ->
     if (spec.missing_expression) target.attributes[0].setExpressionText(null)
     def node = mapping.design.nodes.find { it.isTargetNode() }
     node.setTargetComponentKM(new OdiIKM(name: spec.wrong_ikm ? "OTHER" : "IKM Oracle Slowly Changing Dimension"))
+    [FLOW_CONTROL:false, STATIC_CONTROL:false, RECYCLE_ERRORS:false, TRUNCATE:false,
+     DELETE_ALL:false, CREATE_TARG_TABLE:false, COMMIT:true].each { n,v -> node.getIKMOptionValue(n)?.setValue(v) }
+    if (spec.bad_option) {
+        def option = node.getIKMOptionValue(spec.bad_option)
+        option.setValue(spec.bad_option != 'COMMIT')
+    }
+    if (spec.missing_option) node.options.remove(spec.missing_option)
     mapping.design.getAllAPNodes().eachWithIndex { ap, index ->
         boolean wrong = spec.wrong_lkm || (spec.mixed_lkm && index == 1)
         if (!spec.missing_lkm) ap.setLKM(new OdiLKM(name: wrong ? "LKM OTHER" : "LKM SQL to Oracle (Built-In)"))
@@ -97,6 +104,8 @@ print JsonOutput.toJson(results)
         "xkm_only": {"xkm_only": True}, "wrong_ikm": {"wrong_ikm": True},
         "missing_attribute": {"missing_attribute": True}, "missing_expression": {"missing_expression": True},
         "mixed_lkm": {"ap_count": 2, "mixed_lkm": True},
+        **{name: {"bad_option": name} for name in ("FLOW_CONTROL", "STATIC_CONTROL", "RECYCLE_ERRORS", "TRUNCATE", "DELETE_ALL", "CREATE_TARG_TABLE", "COMMIT")},
+        "missing_commit": {"missing_option": "COMMIT"},
     }
     return fake._run(java, os.pathsep.join([str(fake.GROOVY_JAR), str(classes)]), driver,
                      {"script": str(PROBE), "scenarios": scenarios}, root)
@@ -111,7 +120,8 @@ def test_probe_uses_real_lkm_not_extract_reference(probe_results, scenario, coun
     assert result["trace"] == []
 
 
-@pytest.mark.parametrize("scenario", ["wrong_lkm", "missing_lkm", "mixed_lkm", "xkm_only", "wrong_ikm", "missing_attribute", "missing_expression"])
+@pytest.mark.parametrize("scenario", ["wrong_lkm", "missing_lkm", "mixed_lkm", "xkm_only", "wrong_ikm", "missing_attribute", "missing_expression",
+    "FLOW_CONTROL", "STATIC_CONTROL", "RECYCLE_ERRORS", "TRUNCATE", "DELETE_ALL", "CREATE_TARG_TABLE", "COMMIT", "missing_commit"])
 def test_probe_never_certifies_wrong_or_incomplete_physical_contract(probe_results, scenario):
     result = probe_results[scenario]
     payload = json.loads(result["output"])
@@ -122,9 +132,11 @@ def test_probe_never_certifies_wrong_or_incomplete_physical_contract(probe_resul
 
 def test_generic_option_check_executes_public_accessor(java, tmp_path):
     source = GENERIC.read_text(encoding="utf-8")
-    start = source.index('    ["FLOW_CONTROL", "STATIC_CONTROL"].each')
+    start = source.index('    final Map<String, Boolean> lockedOptions =')
     end = source.index('    // Access-point nodes', start)
     block = source[start:end]
+    final_checks = source.index('    lockedOptions.each', source.index('// Validation can materialize'))
+    block += '\n' + source[final_checks:source.index('    List<MapPhysicalNode> finalAccessPoints', final_checks)].replace('finalTarget.', 'targetNode.')
     driver = tmp_path / "option_driver.groovy"
     driver.write_text('''
 import groovy.json.JsonOutput
@@ -140,7 +152,8 @@ class Node {
 }
 def results = [:]
 ["good", "missing", "sticky"].each { mode ->
-    def node = new Node(values: [FLOW_CONTROL: new Option(sticky: mode == "sticky"), STATIC_CONTROL: new Option()])
+    def node = new Node(values: ["FLOW_CONTROL", "STATIC_CONTROL", "RECYCLE_ERRORS", "TRUNCATE",
+        "DELETE_ALL", "CREATE_TARG_TABLE", "COMMIT"].collectEntries { n -> [(n): new Option(sticky: mode == "sticky" && n == "FLOW_CONTROL")] })
     if (mode == "missing") node.values.remove("FLOW_CONTROL")
     try {
         new GroovyShell(new Binding(targetNode: node)).evaluate(''' + json.dumps(block) + ''')

@@ -45,7 +45,11 @@ class World {
     static List trace = []
     static Object mapping = null
     static boolean committed = false
-    static void reset(Map s) { spec = s; trace = []; mapping = null; committed = false }
+    // Expression texts set by the script and the attribute objects, kept in the harness only.
+    static Map expressions = [:]
+    static Map attributes = [:]
+    static void reset(Map s) { spec = s; trace = []; mapping = null; committed = false; expressions = [:]; attributes = [:] }
+    static void attributeSet(Object attribute, String text) { attributes[attribute.getName()] = attribute; expressions[attribute.getName()] = text }
     static void log(String event) { trace << event }
     static class FailingOut {
         Writer writer
@@ -277,6 +281,13 @@ class Mapping {
         boolean finalCall = validateCalls >= (World.spec.final_validate_call ?: 2)
         Map outcome = finalCall ? (World.spec.final_validate ?: [:]) : (World.spec.first_validate ?: [:])
         if (outcome.raises) throw new RuntimeException("''' + RAISE_TOKEN + r'''")
+        if (finalCall && World.spec.tamper_expression) {
+            // Simulates validation silently rewriting an expression after the builder set it.
+            World.attributes[World.spec.tamper_expression]?.expression = "CURRENT_TIMESTAMP"
+        }
+        if (finalCall && World.spec.tamper_hint) {
+            World.attributes[World.spec.tamper_hint]?.hint = oracle.odi.domain.mapping.expression.MapExpression.ExecuteOnLocation.TARGET
+        }
         (outcome.levels ?: []).each { issues << new RootIssue(RootIssue.Level.valueOf(it), "''' + ISSUE_TOKEN + r'''") }
         return outcome.flag == true
     }
@@ -287,12 +298,18 @@ class Mapping {
 import oracle.odi.domain.mapping.expression.MapExpression
 import oracle.odi.domain.mapping.Mapping
 import oracle.odi.domain.model.OdiDataStore
+class FakeExpression {
+    String text
+    String getText() { text }
+}
 class FakeAttribute {
-    String name; String expression
+    String name; String expression; MapExpression.ExecuteOnLocation hint
     String getName() { name }
-    String getExpression() { expression }
-    void setExpressionText(String t) { expression = t }
-    void setExecuteOnHint(MapExpression.ExecuteOnLocation l) {}
+    // Like the SDK MapAttribute, the expression is an object whose text is read with getText().
+    FakeExpression getExpression() { expression == null ? null : new FakeExpression(text: expression) }
+    void setExpressionText(String t) { expression = t; fake.World.attributeSet(this, t) }
+    void setExecuteOnHint(MapExpression.ExecuteOnLocation l) { hint = l }
+    MapExpression.ExecuteOnLocation getExecuteOnHint() { hint }
     void setCheckNotNullIndicator(boolean b) {}
     void setUpdateIndicator(boolean b) {}
 }
@@ -418,7 +435,7 @@ input.scenarios.each { String id, Map spec ->
         options: World.mapping.design.nodes.find { it.isTargetNode() }.options.collectEntries { n, o -> [n, o.getOptionValue()] },
     ]
     results[id] = [output: captured.toString(), trace: World.trace, committed: World.committed,
-                   state: state, script_raised: scriptRaised]
+                   state: state, script_raised: scriptRaised, expressions: World.expressions]
 }
 print JsonOutput.toJson(results)
 '''

@@ -146,7 +146,9 @@ def _invalid_generation(error_type: str = "InvalidGenerationOutput") -> dict[str
         "tool": "odi.dim_product_scd2_scenario_generation",
         "status": "blocked_invalid_generation_output",
         "mode": "normalized_fixed_absent_only_scenario_generation",
-        "side_effects": False,
+        "side_effects": None,
+        "repository_outcome": "unverified",
+        "manual_recovery_review_required": True,
         "repository_connection_attempted": True,
         "raw_rows_included": False,
         "pk_values_included": False,
@@ -163,6 +165,13 @@ def normalize_dim_product_scd2_scenario_generation(
     try:
         if not isinstance(payload, Mapping):
             return _invalid_generation()
+        if payload.get("status") in {"error", "outcome_unknown", "committed_report_incomplete"}:
+            from repository_write_contract import failure
+            state = failure(payload, "odi.generate_scenario_metadata", "scenario_metadata_generation", generator=True)
+            if state is None:
+                return _invalid_generation()
+            return {**_invalid_generation(), **state, "status": payload["status"],
+                    "error": "ODI scenario generation did not produce a verified success report."}
         allowed_root = {
             "tool",
             "status",
@@ -182,7 +191,10 @@ def normalize_dim_product_scd2_scenario_generation(
             or payload.get("side_effects") is not True
             or payload.get("repository_connection_attempted") is not True
             or not isinstance(scenario, Mapping)
-            or set(scenario) != {"name", "version"}
+            or set(scenario) not in ({"name", "version"}, {"name", "version", "latest_version"})
+            or ("latest_version" in scenario and (
+                not isinstance(scenario["latest_version"], str)
+                or not re.fullmatch(r"[A-Za-z0-9._-]{1,12}", scenario["latest_version"])))
             or scenario.get("name") != SCENARIO_NAME
             or scenario.get("version") != SCENARIO_VERSION
             or not isinstance(checks, list)

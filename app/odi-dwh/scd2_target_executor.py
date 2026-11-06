@@ -103,6 +103,8 @@ def _base(status: str, plan: Mapping[str, Any], *, approved: object) -> dict[str
         "write_operations_attempted": [],
         "target_created": False,
         "sequence_created": False,
+        "outcome_unknown": False,
+        "manual_review_required": False,
         "grants_applied": 0,
         "grants_failed": 0,
         "cleanup_attempted": False,
@@ -186,6 +188,8 @@ def _recover_existing(
             result["status"] = "blocked_target_incomplete"
             result["missing"] = ["sequence"]
             result["error_type"] = type(exc).__name__
+            result.update(outcome_unknown=True, manual_review_required=True,
+                          cleanup_requires_separate_approval=True)
             return result
         result["sequence_created"] = True
         repaired.append("sequence")
@@ -328,10 +332,13 @@ def execute_target_ddl(
         return result
     except oracledb.Error as exc:
         created_any = result["target_created"] or result["sequence_created"]
+        unacknowledged = any(operation in result["write_operations_attempted"] and not result[flag]
+                             for operation, flag in (("create_sequence", "sequence_created"), ("create_target", "target_created")))
         result["status"] = "partial_failure" if created_any else _error_status(exc)
         result["stage"] = stage
         result["error_type"] = type(exc).__name__
-        if created_any:
+        result.update(outcome_unknown=unacknowledged, manual_review_required=created_any or unacknowledged)
+        if created_any or unacknowledged:
             result["cleanup_requires_separate_approval"] = True
         return result
     finally:

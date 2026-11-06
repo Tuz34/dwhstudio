@@ -783,6 +783,76 @@ def test_capture_predictions_treats_empty_content_as_failed_not_captured():
     assert "private reasoning text" not in payload
 
 
+@pytest.mark.parametrize("body", [None, [], {}, {"choices": []}, {"choices": None}, {"choices": [None]}])
+def test_chat_extractors_handle_malformed_json_shapes_without_widening_errors(body):
+    class Response:
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return body
+
+    assert evals._extract_chat_content(Response()) == ""
+    assert evals._extract_chat_metadata(Response()) == {"finish_reason": None, "has_reasoning_content": False}
+
+
+@pytest.mark.parametrize("name", ["_extract_chat_content", "_extract_chat_metadata"])
+def test_chat_extractors_handle_invalid_json_but_not_unexpected_callback_failures(name):
+    class Response:
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            raise ValueError("synthetic invalid JSON")
+
+    fallback = "" if name == "_extract_chat_content" else {"finish_reason": None, "has_reasoning_content": False}
+    assert getattr(evals, name)(Response()) == fallback
+
+    class Broken(Response):
+        def json(self):
+            raise RuntimeError("synthetic private callback diagnostic")
+
+    with pytest.raises(RuntimeError):
+        getattr(evals, name)(Broken())
+
+
+@pytest.mark.parametrize("failure_on", [1, 2])
+def test_unexpected_json_callback_failure_is_redacted_by_capture_boundary(failure_on):
+    class Response:
+        headers = {"content-type": "application/json"}
+        status_code = 200
+        calls = 0
+
+        def json(self):
+            self.calls += 1
+            if self.calls == failure_on:
+                raise RuntimeError("synthetic private callback diagnostic")
+            return {"choices": [{"message": {"content": "synthetic safe output"}}]}
+
+    response = Response()
+    pack = {"prompts": evals.build_prompt_pack()["prompts"][:1]}
+    report = evals.capture_predictions(prompt_pack=pack, base_url="http://localhost:1234/v1",
+        model="synthetic-model", http_post=lambda *args, **kwargs: response)
+    assert report["captured"] == 0 and report["failed"] == 1 and report["outputs"] == {}
+    assert report["results"][0]["status"] == "http_error"
+    assert report["results"][0]["error_type"] == "RuntimeError"
+    assert "synthetic private" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("content", [None, 0, False, [], {}, {"text": "synthetic"}])
+def test_capture_null_or_nontext_content_is_not_a_model_answer(content):
+    class Response:
+        headers = {"content-type": "application/json"}
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+
+    report = evals.capture_predictions(prompt_pack={"prompts": evals.build_prompt_pack()["prompts"][:1]},
+        base_url="http://localhost:1234/v1", model="synthetic-model", http_post=lambda *args, **kwargs: Response())
+    assert report["captured"] == 0 and report["outputs"] == {}
+    assert report["failed"] == 1 and report["empty"] == 1
+    assert report["results"][0]["status"] == "empty_output"
+
+
 def test_capture_predictions_blocks_sensitive_model_output():
     prompt_pack = {
         "prompts": [evals.build_prompt_pack()["prompts"][0]],
