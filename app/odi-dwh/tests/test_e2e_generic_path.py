@@ -569,6 +569,7 @@ def _register_generator(monkeypatch, *, tgt_exists, register_output):
     monkeypatch.setattr(
         generator, "_get_source_columns_oracle", lambda _t: _source_columns("EMPLOYEE_ID")
     )
+    monkeypatch.setattr(target_table_service, "read_table_schema", lambda *_args: _schema_frame())
     calls = []
 
     def fake_register(self, **kwargs):
@@ -628,6 +629,7 @@ def test_primary_kind_registers_primary_key_type(monkeypatch):
     monkeypatch.setattr(
         generator, "_get_source_columns_oracle", lambda _t: _source_columns("EMPLOYEE_ID")
     )
+    monkeypatch.setattr(target_table_service, "read_table_schema", lambda *_args: _schema_frame())
     calls = []
     monkeypatch.setattr(
         OdiOrchestrator,

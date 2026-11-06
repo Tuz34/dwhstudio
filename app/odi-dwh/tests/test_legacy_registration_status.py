@@ -6,6 +6,7 @@ import pytest
 
 from mapping_generator import MappingGenerator
 from mapping_graph import _repository_step_status
+import target_table_service
 
 
 @pytest.mark.parametrize("error", [
@@ -27,6 +28,7 @@ def test_graph_does_not_hide_errors_behind_existing_token(error, side):
     "HATA: registration failed; already exists",
 ])
 def test_classic_registration_does_not_log_error_as_success(monkeypatch, side, error):
+    monkeypatch.setattr(target_table_service, "read_table_schema", lambda *_args: None)
     outputs = ["Datastore already exists", "Registered"]
     outputs[side] = error
     iterator = iter(outputs)
@@ -40,6 +42,7 @@ def test_classic_registration_does_not_log_error_as_success(monkeypatch, side, e
         _resolved_odi_source_model_code=lambda params: "SOURCE_MODEL",
         _resolved_odi_target_model_code=lambda params: "TARGET_MODEL",
         _get_source_columns_oracle=lambda table: [],
+        _source_schema_df_to_legacy_columns=lambda frame, connector: [],
         _add_log=lambda *entry: logs.append(entry),
     )
     result = MappingGenerator._register_odi_datastores(generator, {

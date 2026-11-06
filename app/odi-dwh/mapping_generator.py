@@ -831,7 +831,11 @@ class MappingGenerator:
             scale = self._positive_int(col.get("NUMERIC_SCALE") or col.get("scale"))
 
             col_def = {"name": col_name, "type": dt}
-            if max_len:
+            if dt == "NUMBER":
+                # Oracle DATA_LENGTH is storage bytes, not declared precision.
+                if prec:
+                    col_def["length"] = prec
+            elif max_len:
                 col_def["length"] = max_len
             elif prec:
                 col_def["length"] = prec
@@ -1455,7 +1459,12 @@ class MappingGenerator:
 
         try:
             # Read target Oracle columns
-            tgt_columns = self._get_source_columns_oracle(f"{tgt_owner}.{tgt_table}")
+            from target_table_service import read_table_schema
+
+            target_schema = read_table_schema(tgt_owner, tgt_table)
+            tgt_columns = self._source_schema_df_to_legacy_columns(
+                target_schema, get_source_connector("oracle")
+            )
             tgt_col_defs = self._odi_register_column_defs(tgt_columns)
 
             # Resolve the ODI model/datastore name from repository tables.
