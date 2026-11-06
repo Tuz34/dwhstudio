@@ -105,7 +105,7 @@ def test_same_schema_iu_builds_executable_null_safe_cases():
     assert set(expressions) == {"INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID"}
     for expression in expressions.values():
         assert "ROWNUM" not in expression and "TARGET." not in expression and "MAX(" not in expression
-        assert 'SRC."ENTITY_ID"' in expression and '"DWH"."ODS_ODI81_F1"' in expression
+        assert 'SRC."ENTITY_ID"' in expression and '"DWH"."ODS_ODI81N_F1"' in expression
     assert "TO_NUMBER('AMBIGUOUS')" in expressions["INSERT_DATE"]
     assert "CURRENT_TIMESTAMP" in expressions["UPDATE_DATE"]
     assert _SESSION_BATCH_SQL in expressions["ETL_BATCH_ID"]
@@ -118,14 +118,14 @@ def test_f2_cross_schema_and_join_keep_the_existing_mode():
     assert f2["qualified"] is False and f2["expressions"] == {}
     denied = build_same_schema_audit_expressions(
         integration_type="IU", src_owner="DWH", tgt_owner="ODS", src_model="ORACLE_DWH",
-        tgt_model="ORACLE_ODS", tgt_table="ODS_ODI81_F1", update_key_columns=["ENTITY_ID"],
+        tgt_model="ORACLE_ODS", tgt_table="ODS_ODI81N_F1", update_key_columns=["ENTITY_ID"],
         source_columns=["ENTITY_ID", "ATTR_TEXT"], target_columns=["ENTITY_ID", "ATTR_TEXT", "INSERT_DATE"],
         source_system_literal="ORACLE_SAMPLE_SCHEMAS",
     )
     assert denied["qualified"] is False and denied["expressions"] == {}
     joined = build_same_schema_audit_expressions(
         integration_type="IU", src_owner="DWH", tgt_owner="DWH", src_model="ORACLE_DWH",
-        tgt_model="ORACLE_ODS", tgt_table="ODS_ODI81_F1", update_key_columns=["ENTITY_ID"],
+        tgt_model="ORACLE_ODS", tgt_table="ODS_ODI81N_F1", update_key_columns=["ENTITY_ID"],
         source_columns=["ENTITY_ID", "ATTR_TEXT"], target_columns=["ENTITY_ID", "ATTR_TEXT", "UPDATE_DATE"],
         source_system_literal="ORACLE_SAMPLE_SCHEMAS", join_table="OTHER",
     )
@@ -154,10 +154,10 @@ def test_executed_sql_preserves_nulls_and_fails_closed_on_ambiguity():
          ("102", "OLD", None, "OLD_INS", None, None, "OLD_BATCH")],
     )
     # The qualified SQL names the real F1 table. Point this execution at that name.
-    main.execute('ALTER TABLE "TGT_F1" RENAME TO "ODS_ODI81_F1"')
-    main.execute('ALTER TABLE "SRC_F1" RENAME TO "ODI81_SRC_F1"')
+    main.execute('ALTER TABLE "TGT_F1" RENAME TO "ODS_ODI81N_F1"')
+    main.execute('ALTER TABLE "SRC_F1" RENAME TO "ODI81N_SRC_F1"')
     rows = evaluate_audit_rows(
-        main, "DWH", "ODI81_SRC_F1", "ODS_ODI81_F1", expressions, source_columns,
+        main, "DWH", "ODI81N_SRC_F1", "ODS_ODI81N_F1", expressions, source_columns,
     )
     by_id = {row[0]: row for row in rows}
     unchanged = by_id["101"]
@@ -171,17 +171,17 @@ def test_executed_sql_preserves_nulls_and_fails_closed_on_ambiguity():
     assert created[3] is not None and created[4] == created[3]
     assert created[6] == _BATCH_VALUE
     main.execute(
-        'INSERT INTO "ODS_ODI81_F1" VALUES (?,?,?,?,?,?,?)',
+        'INSERT INTO "ODS_ODI81N_F1" VALUES (?,?,?,?,?,?,?)',
         ("101", "SAME", "10", "SECOND", "SECOND", "SECOND", "SECOND"),
     )
     with pytest.raises(sqlite3.OperationalError, match="user-defined function raised exception"):
-        evaluate_audit_rows(main, "DWH", "ODI81_SRC_F1", "ODS_ODI81_F1", expressions, source_columns)
+        evaluate_audit_rows(main, "DWH", "ODI81N_SRC_F1", "ODS_ODI81N_F1", expressions, source_columns)
 
 
 def test_composite_null_key_matches_only_the_same_nulls():
     expressions = build_same_schema_audit_expressions(
         integration_type="IU", src_owner="DWH", tgt_owner="DWH", src_model="ORACLE_DWH",
-        tgt_model="ORACLE_DWH", tgt_table="DWH_ODI81_F3", update_key_columns=["ENTITY_ID", "ATTR_TEXT"],
+        tgt_model="ORACLE_DWH", tgt_table="DWH_ODI81N_F3", update_key_columns=["ENTITY_ID", "ATTR_TEXT"],
         source_columns=["ENTITY_ID", "ATTR_TEXT", "VALUE_AMT"],
         target_columns=["ENTITY_ID", "ATTR_TEXT", "VALUE_AMT", "INSERT_DATE", "UPDATE_DATE",
                         "CURRENT_FLAG", "SOURCE_SYSTEM", "ETL_BATCH_ID"],
@@ -201,10 +201,10 @@ def test_composite_null_key_matches_only_the_same_nulls():
         [("7", None, "1", "KEEP_INS", None, "Y", "KEEP_SRC", None),
          ("7", "B", "1", "KEEP_B", "OLD_UPD", "Y", "KEEP_SRC", "OLD_BATCH")],
     )
-    main.execute('ALTER TABLE "TGT3" RENAME TO "DWH_ODI81_F3"')
-    main.execute('ALTER TABLE "SRC3" RENAME TO "ODI81_SRC_F3"')
+    main.execute('ALTER TABLE "TGT3" RENAME TO "DWH_ODI81N_F3"')
+    main.execute('ALTER TABLE "SRC3" RENAME TO "ODI81N_SRC_F3"')
     rows = evaluate_audit_rows(
-        main, "DWH", "ODI81_SRC_F3", "DWH_ODI81_F3", expressions["expressions"], columns,
+        main, "DWH", "ODI81N_SRC_F3", "DWH_ODI81N_F3", expressions["expressions"], columns,
     )
     null_key = next(row for row in rows if row[0] == "7" and row[1] is None)
     changed = next(row for row in rows if row[0] == "7" and row[1] == "B")
@@ -237,8 +237,8 @@ def test_mapping_builder_transports_counts_without_the_expression_body(monkeypat
         "_odi_repository": {"mapping_exists": False},
         "_odi_src_model_code": "ORACLE_DWH",
         "_odi_tgt_model_code": "ORACLE_DWH",
-        "_odi_src_datastore_name": "ODI81_SRC_F3",
-        "_odi_tgt_datastore_name": "DWH_ODI81_F3",
+        "_odi_src_datastore_name": "ODI81N_SRC_F3",
+        "_odi_tgt_datastore_name": "DWH_ODI81N_F3",
     })
     monkeypatch.setattr(generator, "_ensure_odi_repository_bindings", lambda _params: validated["_odi_repository"])
     created = generator._create_odi_mapping(validated)
@@ -295,7 +295,7 @@ def test_actual_run_service_success_still_satisfies_the_classic_driver(monkeypat
     monkeypatch.setattr(odi_orchestrator, "OdiOrchestrator", Orchestrator)
     monkeypatch.setattr(service, "_persist_run_state", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(service, "_create_failure_alert", lambda *_args, **_kwargs: None)
-    options = service.MappingRunOptions("MAP_ODI81_F1", "001", "GLOBAL", False)
+    options = service.MappingRunOptions("MAP_ODI81N_F1", "001", "GLOBAL", False)
     with odi_orchestrator.groovy_approval_context(True):
         outcome = service.execute_mapping_run(SimpleNamespace(), options)
     assert outcome.status_code == 200 and outcome.payload["context"] == "GLOBAL"

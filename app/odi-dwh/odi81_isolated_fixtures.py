@@ -8,10 +8,12 @@ from decimal import Decimal
 from typing import Any
 
 Factory = Callable[[], Any]
+# Fixed fresh acceptance namespace; never caller-selected and never an existing ODI81_* alias.
+NAMESPACE = "ODI81N"
 _FLOWS = {
-    "F1": ("ODI81_SRC_F1", "ODS_ODI81_F1"),
-    "F2": ("ODI81_SRC_F2", "ODS_ODI81_F2"),
-    "F3": ("ODI81_SRC_F3", "DWH_ODI81_F3"),
+    "F1": ("ODI81N_SRC_F1", "ODS_ODI81N_F1"),
+    "F2": ("ODI81N_SRC_F2", "ODS_ODI81N_F2"),
+    "F3": ("ODI81N_SRC_F3", "DWH_ODI81N_F3"),
 }
 _BUSINESS = ("ENTITY_ID", "ATTR_TEXT", "VALUE_AMT")
 _ODS_EXTRA = ("INSERT_DATE", "UPDATE_DATE", "SOURCE_SYSTEM", "ETL_BATCH_ID")
@@ -31,6 +33,25 @@ _ERRORS = frozenset({"InvalidCount", "AutocommitNotDisabled", "CleanupFailed", "
 
 class _Blocked(RuntimeError):
     pass
+
+
+def backup_table(flow: str, kind: str, run: int) -> str:
+    """Retained checkpoint name in the fixed fresh acceptance namespace."""
+    return f"{NAMESPACE}_{flow}_{'S' if kind == 'source' else 'T'}_R{run}_BKP"
+
+
+def _freeze_namespace() -> None:
+    # Historical ODI81_* objects stay untouched; acceptance owns only fresh ODI81N names.
+    if NAMESPACE != "ODI81N":
+        raise RuntimeError("namespace")
+    for flow, names in _FLOWS.items():
+        backups = [backup_table(flow, "source", 2), *(backup_table(flow, "target", r) for r in (1, 2, 3))]
+        for name in (*names, *backups):
+            if f"{NAMESPACE}_" not in name or len(name) > 30:
+                raise RuntimeError("namespace")
+
+
+_freeze_namespace()
 
 
 def _report(action: str) -> dict[str, Any]:
@@ -240,7 +261,7 @@ def _no_source_triggers(cursor: Any, name: str) -> None:
 
 def _backup(cursor: Any, flow: str, *, source: bool, run: int, state: str, compare_current: bool) -> str:
     original = _FLOWS[flow][0 if source else 1]
-    backup = f"ODI81_{flow}_{'S' if source else 'T'}_R{run}_BKP"
+    backup = backup_table(flow, 'source' if source else 'target', run)
     columns = _BUSINESS if source else _BUSINESS + (_EDW_EXTRA if flow == "F3" else _ODS_EXTRA)
     # No PK constraint is required on a CTAS backup; key uniqueness is counted instead.
     _permanent_table(cursor, backup)
@@ -373,7 +394,7 @@ def create_retained_backup(flow: str, kind: str, run: int, writer_factory: Facto
         _owner(cursor)
         source_name, target_name = _FLOWS[flow]
         original = source_name if kind == "source" else target_name
-        backup = f"ODI81_{flow}_{'S' if kind == 'source' else 'T'}_R{run}_BKP"
+        backup = backup_table(flow, kind, run)
         state = _checkpoint_state(kind, run)
         _permanent_table(cursor, original)
         cursor.execute(f"LOCK TABLE {_table(original)} IN EXCLUSIVE MODE NOWAIT")
@@ -423,11 +444,12 @@ def mutate_source(flow: str, writer_factory: Factory, source_reader_factory: Fac
         _owner(cursor)
         source, target = _FLOWS[flow]
         # Reject views/synonyms before any lock could reach their underlying objects.
-        for name in (source, target, f"ODI81_{flow}_S_R2_BKP", f"ODI81_{flow}_T_R2_BKP"):
+        retained = (backup_table(flow, "source", 2), backup_table(flow, "target", 2))
+        for name in (source, target, *retained):
             _permanent_table(cursor, name)
         # Keep the source, target and retained checkpoints stable through this transaction.
         cursor.execute(f"LOCK TABLE {_table(source)} IN EXCLUSIVE MODE NOWAIT")
-        for name in (target, f"ODI81_{flow}_S_R2_BKP", f"ODI81_{flow}_T_R2_BKP"):
+        for name in (target, *retained):
             cursor.execute(f"LOCK TABLE {_table(name)} IN SHARE MODE NOWAIT")
         _business_metadata(cursor, source, source=True, flow=flow)
         _no_source_triggers(cursor, source)

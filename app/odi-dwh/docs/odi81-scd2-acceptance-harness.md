@@ -10,8 +10,8 @@ classic call is not a native ODI load.
 
 | Flow | Source | Target | Surrogate | Mapping |
 | --- | --- | --- | --- | --- |
-| F4 | DWH.ODS_ODI81_F4 | DWH.DIM_ODI81_F4 | ODI81_F4_SK | MAP_ODI81_F4 |
-| F5 | DWH.DWH_ODI81_F5 | DM.DIM_ODI81_F5 | ODI81_F5_SK | MAP_ODI81_F5 |
+| F4 | DWH.ODS_ODI81N_F4 | DWH.DIM_ODI81N_F4 | ODI81N_F4_SK | MAP_ODI81N_F4 |
+| F5 | DWH.DWH_ODI81N_F5 | DM.DIM_ODI81N_F5 | ODI81N_F5_SK | MAP_ODI81N_F5 |
 
 The surrogate names are `surrogate_key_name` of the target table. They are the
 same `*_SK` family the generic planner emits. They are not `PRODUCT_SK`.

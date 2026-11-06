@@ -360,15 +360,15 @@ def test_missing_run3_approval_and_non_global_context_call_nothing(db):
 
 def test_preexisting_backup_drift_is_left_untouched(db):
     db.provision("F1", state="seed", run=2)
-    db.db.execute('UPDATE "ODI81_F1_T_R2_BKP" SET "ATTR_TEXT"=? WHERE "ENTITY_ID"=101', ("DRIFT",))
-    before = db.db.execute('SELECT "ATTR_TEXT" FROM "ODI81_F1_T_R2_BKP" WHERE "ENTITY_ID"=101').fetchone()[0]
+    db.db.execute('UPDATE "ODI81N_F1_T_R2_BKP" SET "ATTR_TEXT"=? WHERE "ENTITY_ID"=101', ("DRIFT",))
+    before = db.db.execute('SELECT "ATTR_TEXT" FROM "ODI81N_F1_T_R2_BKP" WHERE "ENTITY_ID"=101').fetchone()[0]
     result = isolated.create_retained_backup(
         "F1", "target", 2, db.factory("writer"), approved=True,
         approval_scope="odi81_f1_backup_target_r2",
     )
     assert result["status"] != "passed"
     assert result.get("created") is not True
-    after = db.db.execute('SELECT "ATTR_TEXT" FROM "ODI81_F1_T_R2_BKP" WHERE "ENTITY_ID"=101').fetchone()[0]
+    after = db.db.execute('SELECT "ATTR_TEXT" FROM "ODI81N_F1_T_R2_BKP" WHERE "ENTITY_ID"=101').fetchone()[0]
     assert after == before
     assert "DRIFT" not in json.dumps(result)
 
@@ -404,7 +404,7 @@ def test_classic_generate_route_forwards_params_and_redacts(app_client, monkeypa
     assert response.status_code == 200
     assert seen["params"]["integration_type"] == "IU"
     assert seen["params"]["update_key_columns"] == ["ENTITY_ID"]
-    assert seen["params"]["tgt_table"] == "ODS_ODI81_F1"
+    assert seen["params"]["tgt_table"] == "ODS_ODI81N_F1"
     assert seen["params"]["context"] == "GLOBAL"
     blob = json.dumps(payload)
     assert "password" not in blob and "101" not in blob and "SELECT" not in blob
@@ -427,18 +427,18 @@ def test_classic_run_route_passes_version_context_and_truncate(app_client, monke
         }, 200)
 
     monkeypatch.setattr(mapping_write, "execute_mapping_run", fake_execute)
-    denied = app_client.post("/api/mapping/run", json={"mapping_name": "MAP_ODI81_F2", "truncate_target_table": True})
+    denied = app_client.post("/api/mapping/run", json={"mapping_name": "MAP_ODI81N_F2", "truncate_target_table": True})
     assert denied.status_code == 400 and seen == {}
     response = app_client.post("/api/mapping/run", json=driver.classic_run_body("F2", "GLOBAL"))
     assert response.status_code == 200
     assert seen["options"].version == "001"
     assert seen["options"].context == "GLOBAL"
     assert seen["options"].truncate_target_table is True
-    assert seen["options"].mapping_name == "MAP_ODI81_F2"
+    assert seen["options"].mapping_name == "MAP_ODI81N_F2"
     incremental = app_client.post("/api/mapping/run", json=driver.classic_run_body("F3", "GLOBAL"))
     assert incremental.status_code == 200
     assert seen["options"].truncate_target_table is False
-    assert seen["options"].mapping_name == "MAP_ODI81_F3"
+    assert seen["options"].mapping_name == "MAP_ODI81N_F3"
 
 
 def test_actual_run_service_success_satisfies_classic_driver_contract(monkeypatch):
@@ -454,7 +454,7 @@ def test_actual_run_service_success_satisfies_classic_driver_contract(monkeypatc
     monkeypatch.setattr(odi_orchestrator, "OdiOrchestrator", Orchestrator)
     monkeypatch.setattr(service, "_persist_run_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(service, "_create_failure_alert", lambda *args, **kwargs: None)
-    options = service.MappingRunOptions("MAP_ODI81_F1", "001", "GLOBAL", False)
+    options = service.MappingRunOptions("MAP_ODI81N_F1", "001", "GLOBAL", False)
     with odi_orchestrator.groovy_approval_context(True):
         outcome = service.execute_mapping_run(SimpleNamespace(), options)
     assert outcome.status_code == 200 and outcome.payload["status"] == "SUCCESS"

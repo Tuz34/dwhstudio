@@ -9,16 +9,16 @@ remains a later phase.
 
 | Flow | Target | Mode | Run truncate |
 | --- | --- | --- | --- |
-| F1 | DWH.ODS_ODI81_F1 | IU, primary key ENTITY_ID | false |
-| F2 | DWH.ODS_ODI81_F2 | CONTROL_APPEND full reload | true |
-| F3 | DWH.DWH_ODI81_F3 | IU, primary key ENTITY_ID, one row per key | false |
+| F1 | DWH.ODS_ODI81N_F1 | IU, primary key ENTITY_ID | false |
+| F2 | DWH.ODS_ODI81N_F2 | CONTROL_APPEND full reload | true |
+| F3 | DWH.DWH_ODI81N_F3 | IU, primary key ENTITY_ID, one row per key | false |
 
 `POST /api/mapping/generate` uses `engine=classic`, literal `approved=true`,
 and `context=GLOBAL`. `POST /api/mapping/run` uses scenario version `001` and
 the same context. The role-only SCD2 routes are not used. `drop_target_if_exists`
 and `replace_existing_mapping` stay false. No surrogate key is requested.
 
-The source model is the internal `ORACLE_DWH` model for `DWH.ODI81_SRC_Fn`.
+The source model is the internal `ORACLE_DWH` model for `DWH.ODI81N_SRC_Fn`.
 The builder resolves the approved IKM from the integration type before DDL.
 F1 and F3 require a primary key on `ENTITY_ID`. F2 has no update key. An
 existing target with a missing column or the wrong key blocks without `ALTER`.

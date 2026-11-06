@@ -18,6 +18,7 @@ import scd2_builder
 import source_model_policy
 
 Factory = Callable[[], Any]
+NAMESPACE = isolated.NAMESPACE
 BUSINESS: tuple[str, ...] = ("ENTITY_ID", "ATTR_TEXT", "VALUE_AMT")
 AUDIT: tuple[str, ...] = tuple(name for name, _data_type, _nullable in scd2_builder.SCD2_COLUMNS)
 OPEN_ENDED_DATE_SQL = "DATE '2400-01-01'"
@@ -26,17 +27,17 @@ HISTORICAL_FLAG = "0"
 FLOWS: dict[str, dict[str, str]] = {
     "F4": {
         "source_owner": "DWH",
-        "source_table": "ODS_ODI81_F4",
+        "source_table": "ODS_ODI81N_F4",
         "target_owner": "DWH",
-        "target_table": "DIM_ODI81_F4",
-        "mapping_name": "MAP_ODI81_F4",
+        "target_table": "DIM_ODI81N_F4",
+        "mapping_name": "MAP_ODI81N_F4",
     },
     "F5": {
         "source_owner": "DWH",
-        "source_table": "DWH_ODI81_F5",
+        "source_table": "DWH_ODI81N_F5",
         "target_owner": "DM",
-        "target_table": "DIM_ODI81_F5",
-        "mapping_name": "MAP_ODI81_F5",
+        "target_table": "DIM_ODI81N_F5",
+        "mapping_name": "MAP_ODI81N_F5",
     },
 }
 SK: dict[str, str] = {
@@ -95,8 +96,14 @@ def _freeze_contract() -> None:
         raise RuntimeError("open_ended_date")
     if (CURRENT_FLAG, HISTORICAL_FLAG) != (stock.STOCK_CURRENT_FLAG, stock.STOCK_HISTORICAL_FLAG):
         raise RuntimeError("stock_flags")
-    if SK != {"F4": "ODI81_F4_SK", "F5": "ODI81_F5_SK"}:
+    if SK != {"F4": "ODI81N_F4_SK", "F5": "ODI81N_F5_SK"}:
         raise RuntimeError("surrogate_key")
+    if NAMESPACE != "ODI81N":
+        raise RuntimeError("namespace")
+    for spec in FLOWS.values():
+        for key in ("source_table", "target_table", "mapping_name"):
+            if f"{NAMESPACE}_" not in spec[key] or len(spec[key] + "_SCN") > 30:
+                raise RuntimeError("namespace")
 
 
 _freeze_contract()
@@ -151,8 +158,7 @@ def target_catalog(flow: str) -> tuple[tuple[Any, ...], ...]:
 
 def backup_name(flow: str, kind: str, run: int) -> str:
     """Retained checkpoint name. Source checkpoints are run 2 only."""
-    marker = "S" if kind == "source" else "T"
-    return f"ODI81_{flow}_{marker}_R{run}_BKP"
+    return isolated.backup_table(flow, kind, run)
 
 
 def table_kind(name: str) -> tuple[str, str] | None:

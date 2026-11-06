@@ -5,13 +5,30 @@ was made during implementation. Main must independently review this slice.
 No SCD2, F4/F5, existing metadata repair, cleanup, restore, grants, automatic
 retry, or source-owner fallback is implemented.
 
+## Fixed fresh namespace
+
+All acceptance objects use the literal namespace `ODI81N`. A native read-only
+inventory found the historical `ODI81_*` sources and targets already present,
+so acceptance never reuses, alters, or drops them. Mappings are
+`MAP_ODI81N_Fn` with scenario `MAP_ODI81N_Fn_SCN` version `001`. Retained
+backups are `ODI81N_Fn_S_R2_BKP` and `ODI81N_Fn_T_R{1,2,3}_BKP`. The name is
+frozen at import in the driver and both helper modules; there is no caller
+override. A fresh source that already exists blocks before DDL. A fresh
+backup or target that exists is kept only when its dictionary and checkpoint
+match; any other collision stops the step without DDL or DML.
+
+Native preflight requirement (not provable offline): before live use, a
+read-only inventory must show every `ODI81N_*` source, target, backup and
+`MAP_ODI81N_*` mapping/scenario absent, and the target models must resolve
+the new tables.
+
 ## Fixed manifest
 
 | Flow | DWH source | DWH target | Later classic behavior |
 | --- | --- | --- | --- |
-| F1 | ODI81_SRC_F1 | ODS_ODI81_F1 | IU / primary ENTITY_ID |
-| F2 | ODI81_SRC_F2 | ODS_ODI81_F2 | CONTROL_APPEND / truncate each run |
-| F3 | ODI81_SRC_F3 | DWH_ODI81_F3 | IU / primary ENTITY_ID / Type 1 |
+| F1 | ODI81N_SRC_F1 | ODS_ODI81N_F1 | IU / primary ENTITY_ID |
+| F2 | ODI81N_SRC_F2 | ODS_ODI81N_F2 | CONTROL_APPEND / truncate each run |
+| F3 | ODI81N_SRC_F3 | DWH_ODI81N_F3 | IU / primary ENTITY_ID / Type 1 |
 
 Each source has exactly ENTITY_ID NUMBER(10) NOT NULL with one enabled,
 validated primary key; ATTR_TEXT VARCHAR2(40 BYTE) NOT NULL; VALUE_AMT
@@ -74,8 +91,8 @@ dropped. Missing backups still block mutation and verification. A comparison
 that runs after the catalog reader opens and then disagrees is failed. A
 factory error before that open stays blocked.
 
-Before source mutation, require `DWH.ODI81_Fn_S_R2_BKP` and
-`DWH.ODI81_Fn_T_R2_BKP`, both matching the three-row seed checkpoint. The source
+Before source mutation, require `DWH.ODI81N_Fn_S_R2_BKP` and
+`DWH.ODI81N_Fn_T_R2_BKP`, both matching the three-row seed checkpoint. The source
 is locked EXCLUSIVE and target/backups SHARE NOWAIT through commit. Metadata,
 unique/non-null business keys, counts, and bidirectional full-projection
 comparisons must pass before either DML statement.
@@ -87,7 +104,7 @@ This is not a general database/schema-trigger audit. Concurrent object DDL must
 remain excluded by the operator; a kind precheck is not an atomic namespace lock.
 
 Before **every** target run, including all F2 truncations, use `verify_flow`
-with `before_run` and require `DWH.ODI81_Fn_T_R1_BKP` (empty), T_R2_BKP (3 seed
+with `before_run` and require `DWH.ODI81N_Fn_T_R1_BKP` (empty), T_R2_BKP (3 seed
 rows), or T_R3_BKP (4 changed rows). It compares full target/backup projections
 at this checkpoint. No result authorizes a truncate itself. Backups must remain
 retained and unchanged; unknown execution stops, not retries. Another process

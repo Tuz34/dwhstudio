@@ -134,9 +134,9 @@ def test_classic_requests_do_not_use_the_scd2_contract(flow):
     run_request = driver.classic_run_body(flow, "GLOBAL")
     assert run_request["truncate_target_table"] is (flow == "F2")
     assert run_request["scenario_version"] == "001"
-    assert run_request["mapping_name"] == f"MAP_ODI81_{flow}"
+    assert run_request["mapping_name"] == f"MAP_ODI81N_{flow}"
     assert isolated._FLOWS[flow][0] == {
-        "F1": "ODI81_SRC_F1", "F2": "ODI81_SRC_F2", "F3": "ODI81_SRC_F3",
+        "F1": "ODI81N_SRC_F1", "F2": "ODI81N_SRC_F2", "F3": "ODI81N_SRC_F3",
     }[flow]
 
 
@@ -265,3 +265,58 @@ def test_missing_backup_stops_the_run(db):
     assert result["downstream_stopped"] is True
     assert "app_run_1" not in result["calls"]
     redacted(result)
+
+
+# ---- Fresh ODI81N acceptance namespace (native baseline: historical ODI81_* objects stay untouched).
+import re as _re
+from pathlib import Path as _Path
+
+_FRESH = {
+    "F1": ("DWH", "ODI81N_SRC_F1", "DWH", "ODS_ODI81N_F1", "MAP_ODI81N_F1"),
+    "F2": ("DWH", "ODI81N_SRC_F2", "DWH", "ODS_ODI81N_F2", "MAP_ODI81N_F2"),
+    "F3": ("DWH", "ODI81N_SRC_F3", "DWH", "DWH_ODI81N_F3", "MAP_ODI81N_F3"),
+    "F4": ("DWH", "ODS_ODI81N_F4", "DWH", "DIM_ODI81N_F4", "MAP_ODI81N_F4"),
+    "F5": ("DWH", "DWH_ODI81N_F5", "DM", "DIM_ODI81N_F5", "MAP_ODI81N_F5"),
+}
+_OLD = _re.compile(r"(?<![A-Z0-9])ODI81_(SRC_)?F\d|_ODI81_F\d|MAP_ODI81_F\d|ODI81_F\d_(S|T)_R\d|ODI81_F[45]_SK")
+
+
+def _fresh_names():
+    names = []
+    for flow, (src_owner, src, tgt_owner, tgt, mapping) in _FRESH.items():
+        names += [src, tgt, mapping, f"{mapping}_SCN"]
+        runs = [("source", 2)] + [("target", run) for run in (1, 2, 3)]
+        names += [fixtures.backup_name(flow, kind, run) if flow in fixtures.FLOWS
+                  else isolated.backup_table(flow, kind, run) for kind, run in runs]
+    return names + [fixtures.SK["F4"], fixtures.SK["F5"]]
+
+
+def test_fresh_namespace_is_one_frozen_contract_across_driver_helpers_and_backups():
+    assert isolated.NAMESPACE == fixtures.NAMESPACE == driver.NAMESPACE == "ODI81N"
+    for flow, (src_owner, src, tgt_owner, tgt, mapping) in _FRESH.items():
+        spec = driver.LEGACY[flow] if flow in driver.LEGACY else fixtures.FLOWS[flow]
+        assert (spec["source_owner"], spec["source_table"], spec["target_owner"],
+                spec["target_table"], spec["mapping_name"]) == (src_owner, src, tgt_owner, tgt, mapping)
+        if flow in driver.LEGACY:
+            assert isolated._FLOWS[flow] == (src, tgt)
+            assert driver.classic_params(flow)["mapping_name"] == mapping
+        else:
+            assert driver.generate_body(flow)["mapping_name"] == mapping
+    for flow in ("F1", "F2", "F3"):
+        assert isolated.backup_table(flow, "source", 2) == f"ODI81N_{flow}_S_R2_BKP"
+        assert [isolated.backup_table(flow, "target", r) for r in (1, 2, 3)] == [
+            f"ODI81N_{flow}_T_R{r}_BKP" for r in (1, 2, 3)]
+    for flow in ("F4", "F5"):
+        assert fixtures.backup_name(flow, "source", 2) == f"ODI81N_{flow}_S_R2_BKP"
+        assert fixtures.backup_name(flow, "target", 3) == f"ODI81N_{flow}_T_R3_BKP"
+    assert fixtures.SK == {"F4": "ODI81N_F4_SK", "F5": "ODI81N_F5_SK"}
+    for name in _fresh_names():
+        assert len(name) <= 30 and "ODI81N" in name and not _OLD.search(name), name
+
+
+def test_old_odi81_namespace_literals_are_absent_from_the_acceptance_modules():
+    root = _Path(__file__).resolve().parents[1]
+    for module in ("odi81_isolated_fixtures.py", "odi81_scd2_fixtures.py", "odi81_app_acceptance.py"):
+        text = (root / module).read_text(encoding="utf-8")
+        assert not _OLD.search(text), module
+        assert 'f"ODI81_{' not in text and "f'ODI81_{" not in text, module
