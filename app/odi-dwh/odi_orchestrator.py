@@ -680,7 +680,8 @@ class OdiOrchestrator:
                          required_update_key_type: str | None = None,
                          required_ikm_id: str | None = None,
                          source_identity: dict | None = None,
-                         audit_preservation_columns: list[str] | None = None):
+                         audit_preservation_columns: list[str] | None = None,
+                         audit_lookup_alias: str | None = None):
         """Creates a new ODI mapping with create_mapping.groovy.
 
         Args:
@@ -723,7 +724,12 @@ class OdiOrchestrator:
                     raise ValueError("Invalid audit preservation column")
                 if name not in names:
                     names.append(name)
+            if not isinstance(audit_lookup_alias, str) or not re.fullmatch(
+                r"[A-Z][A-Z0-9_]{0,127}", audit_lookup_alias,
+            ):
+                raise ValueError("Invalid audit preservation lookup alias")
             params["odi.audit_preservation_columns"] = ",".join(names)
+            params["odi.audit_lookup_alias"] = audit_lookup_alias
         if join_table and join_condition:
             params["odi.join_table"] = join_table
             params["odi.join_model"] = join_model or tgt_model

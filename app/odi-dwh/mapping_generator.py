@@ -114,18 +114,38 @@ def _oracle_physical_model(model: object) -> bool:
     return text.startswith("ORACLE_") or text in {"DWH", "ODS", "TGT_DWH"}
 
 
-def _null_safe_equal(column: str) -> str:
+def _audit_lookup_alias(reserved: set[str]) -> str:
+    """Return a subquery alias outside the reserved table, column, and component tokens."""
+    forbidden = {str(name).upper() for name in reserved if name}
+    forbidden.update({"SRC", "JOIN"})
+    candidate = "ODI_AUDIT_TARGET_ROW"
+    sequence = 2
+    while candidate in forbidden:
+        candidate = f"ODI_AUDIT_TARGET_ROW_{sequence}"
+        sequence += 1
+        if sequence > 100:
+            raise AuditPreservationRejected("Audit preservation lookup alias collides.")
+    return candidate
+
+
+def _null_safe_equal(alias: str, column: str) -> str:
     quoted = f'"{column}"'
-    return f'(TGT_ROW.{quoted}=SRC.{quoted} OR (TGT_ROW.{quoted} IS NULL AND SRC.{quoted} IS NULL))'
+    return (
+        f'({alias}.{quoted}=SRC.{quoted} OR '
+        f'({alias}.{quoted} IS NULL AND SRC.{quoted} IS NULL))'
+    )
 
 
-def _audit_case(table_sql: str, key_where: str, column: str, default_sql: str, change_where: str | None) -> str:
-    count_keys = f'(SELECT COUNT(*) FROM {table_sql} TGT_ROW WHERE {key_where})'
-    lookup = f'(SELECT TGT_ROW."{column}" FROM {table_sql} TGT_ROW WHERE {key_where})'
+def _audit_case(
+    table_sql: str, alias: str, key_where: str, column: str, default_sql: str,
+    change_where: str | None,
+) -> str:
+    count_keys = f'(SELECT COUNT(*) FROM {table_sql} {alias} WHERE {key_where})'
+    lookup = f'(SELECT {alias}."{column}" FROM {table_sql} {alias} WHERE {key_where})'
     # A multi-row scalar is ORA-01427 on Oracle. TO_NUMBER forces the same branch to
     # fail closed where a scalar subquery would otherwise return an arbitrary row.
     fail = (
-        f'(SELECT TGT_ROW."{column}" FROM {table_sql} TGT_ROW WHERE {key_where} '
+        f'(SELECT {alias}."{column}" FROM {table_sql} {alias} WHERE {key_where} '
         "AND TO_NUMBER('AMBIGUOUS') IS NOT NULL)"
     )
     lookup_fail = fail
@@ -134,7 +154,7 @@ def _audit_case(table_sql: str, key_where: str, column: str, default_sql: str, c
             f'CASE WHEN {count_keys}>1 THEN {lookup_fail} WHEN {count_keys}=0 THEN {default_sql} '
             f'ELSE {lookup} END'
         )
-    count_changed = f'(SELECT COUNT(*) FROM {table_sql} TGT_ROW WHERE {change_where})'
+    count_changed = f'(SELECT COUNT(*) FROM {table_sql} {alias} WHERE {change_where})'
     return (
         f'CASE WHEN {count_keys}>1 THEN {lookup_fail} WHEN {count_keys}=0 THEN {default_sql} '
         f'WHEN {count_changed}=1 THEN {default_sql} ELSE {lookup} END'
@@ -154,6 +174,7 @@ def build_same_schema_audit_expressions(
     target_columns: list[str],
     source_system_literal: str,
     join_table: object = None,
+    source_table: object = None,
 ) -> dict[str, object]:
     """Build null-safe audit CASE expressions for one qualified same-schema IU mapping.
 
@@ -185,6 +206,7 @@ def build_same_schema_audit_expressions(
         "expression_count": 0,
         "business_column_count": 0,
         "key_count": len(keys) if qualified else 0,
+        "lookup_alias": None,
     }
     if not qualified or owner is None or table is None:
         return public
@@ -219,11 +241,19 @@ def build_same_schema_audit_expressions(
         "SOURCE_SYSTEM": f"'{source_system_literal}'",
         "ETL_BATCH_ID": _SESSION_BATCH_SQL,
     }
-    key_where = " AND ".join(_null_safe_equal(name) for name in keys)
+    source_table_name = None
+    if str(source_table or "").strip():
+        source_table_name = _identifier_or_none(source_table)
+        if source_table_name is None:
+            raise AuditPreservationRejected("Audit preservation source table is not an identifier.")
+    alias = _audit_lookup_alias({
+        table, source_table_name, *keys, *source_names, *target_names,
+    })
+    key_where = " AND ".join(_null_safe_equal(alias, name) for name in keys)
     change_where = None
     if business:
         differ = " OR ".join(
-            f'CASE WHEN {_null_safe_equal(name)} THEN 0 ELSE 1 END=1' for name in business
+            f'CASE WHEN {_null_safe_equal(alias, name)} THEN 0 ELSE 1 END=1' for name in business
         )
         change_where = f"{key_where} AND ({differ})"
     table_sql = f'"{owner}"."{table}"'
@@ -233,7 +263,9 @@ def build_same_schema_audit_expressions(
             continue
         default_sql = defaults[column]
         use_change = change_where if column in _AUDIT_REFRESH_ON_CHANGE else None
-        expressions[column] = _audit_case(table_sql, key_where, column, default_sql, use_change)
+        expressions[column] = _audit_case(
+            table_sql, alias, key_where, column, default_sql, use_change,
+        )
     from odi_orchestrator import _EXPR_VAL_RE
 
     if expressions:
@@ -243,6 +275,7 @@ def build_same_schema_audit_expressions(
     public["expressions"] = expressions
     public["expression_count"] = len(expressions)
     public["business_column_count"] = len(business)
+    public["lookup_alias"] = alias
     return public
 _ERROR_TYPE_ASSIGN_RE = re.compile(r"\berror_type=([A-Za-z][A-Za-z0-9_$]{0,127})\b")
 
@@ -435,6 +468,7 @@ class MappingGenerator:
         self._log_entries = []
         self._odi_repo_reader = None
         self._audit_preservation_expressions: dict[str, str] = {}
+        self._audit_lookup_alias: str | None = None
         self._audit_preservation_public = {
             "qualified": False, "expression_count": 0, "business_column_count": 0, "key_count": 0,
         }
@@ -981,9 +1015,11 @@ class MappingGenerator:
             target_columns=target_columns,
             source_system_literal=_SOURCE_SYSTEM_LITERAL,
             join_table=params.get("join_table"),
+            source_table=params.get("src_table"),
         )
         expressions = dict(profile["expressions"])
         self._audit_preservation_expressions = expressions
+        self._audit_lookup_alias = profile.get("lookup_alias") if expressions else None
         self._audit_preservation_public = {
             "qualified": profile["qualified"] is True,
             "expression_count": profile["expression_count"],
@@ -1581,6 +1617,7 @@ class MappingGenerator:
                 "PRIMARY_KEY" if params.get("update_key_kind") == "primary" else "ALTERNATE_KEY"
             ) if update_key_columns else None,
             audit_preservation_columns=audit_columns or None,
+            audit_lookup_alias=self._audit_lookup_alias if audit_columns else None,
         )
 
         # OdiOrchestrator returns "KOMUT HAZIRLANDI: ..." in stub mode.

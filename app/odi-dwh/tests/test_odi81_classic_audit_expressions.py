@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -254,17 +256,21 @@ def test_mapping_builder_transports_counts_without_the_expression_body(monkeypat
         validated["mapping_name"], validated["src_model"], validated["src_table"],
         validated["tgt_model"], validated["tgt_table"], expressions=captured["expressions"],
         integration_type="IU", audit_preservation_columns=captured["audit_preservation_columns"],
+        audit_lookup_alias=profile["lookup_alias"],
         required_update_key_columns=["ENTITY_ID"], required_update_key_type="PRIMARY_KEY",
     )
     params = calls[0][1]
     assert calls[0][0] == "create_mapping.groovy"
     assert _EXPR_VAL_RE.fullmatch(params["odi.expressions"])
     assert params["odi.audit_preservation_columns"].split(",") == captured["audit_preservation_columns"]
+    assert params["odi.audit_lookup_alias"] == profile["lookup_alias"]
     assert "ROWNUM" not in params["odi.expressions"]
     script = Path(mapping_generator.__file__).resolve().parent / "odi_automation" / "create_mapping.groovy"
     text = script.read_text(encoding="utf-8")
     assert "AUDIT PRESERVATION: applied count=" in text
-    assert "AUDIT PRESERVATION: skipped count=" in text
+    assert "Audit preservation logical schema does not match the selected profile" in text
+    assert "Audit preservation source alias collides with the lookup alias" in text
+    assert "customExpressions.remove(auditName)" not in text
     assert "CUSTOM EXPRESSIONS: ${customExpressions}" not in text
 
 
@@ -294,3 +300,269 @@ def test_actual_run_service_success_still_satisfies_the_classic_driver(monkeypat
         outcome = service.execute_mapping_run(SimpleNamespace(), options)
     assert outcome.status_code == 200 and outcome.payload["context"] == "GLOBAL"
     driver._accept_classic_run("F1", "GLOBAL", outcome.status_code, outcome.payload)
+
+
+def _mapping_script() -> str:
+    return (
+        Path(mapping_generator.__file__).resolve().parent / "odi_automation" / "create_mapping.groovy"
+    ).read_text(encoding="utf-8")
+
+
+def _between(text: str, start: str, end: str) -> str:
+    at = text.index(start)
+    return text[at:text.index(end, at)]
+
+
+def _groovy_literal(value: str) -> str:
+    if "'''" in value:
+        raise AssertionError("expression fixture is not embeddable")
+    return "'''" + value + "'''"
+
+
+def _run_mapping_assignment(tmp_path: Path, spec: dict) -> dict:
+    """Execute the real rewrite, qualification, and setExpressionText block."""
+    from tests import dim_product_mapping_fake_sdk as sdk
+
+    java = sdk.java_binary()
+    if java is None or not sdk.GROOVY_JAR.is_file():
+        pytest.fail("Local Java/Groovy runtime is required for the classic audit block")
+    source = _mapping_script()
+    schema = _between(source, "def sameLogicalSchema = { a, b ->", "// Bounded, redacted projection")
+    block = _between(
+        source,
+        '    String expressionsStr = System.getProperty("odi.expressions")',
+        "    // Physical Design & KM Setting",
+    )
+    properties = []
+    for key in ("odi.expressions", "odi.audit_preservation_columns", "odi.audit_lookup_alias"):
+        value = spec.get(key)
+        if value is None:
+            properties.append(f'System.clearProperty("{key}")')
+        else:
+            properties.append(f'System.setProperty("{key}", {_groovy_literal(value)})')
+    source_attributes = ", ".join(
+        f'new Attr(name: "{name}")' for name in spec.get("source_attributes", ("ENTITY_ID", "ATTR_TEXT"))
+    )
+    target_attributes = ", ".join(
+        f'new Attr(name: "{name}")' for name in spec.get("target_attributes", ("ENTITY_ID", "INSERT_DATE"))
+    )
+    keys = ", ".join(f'"{key}"' for key in spec.get("keys", ("ENTITY_ID",)))
+    harness = f'''
+import groovy.json.JsonOutput
+class LogicalSchema {{
+    Object internalId
+    String schemaName
+    Object getInternalId() {{ internalId }}
+    String getName() {{ schemaName }}
+}}
+class ModelHolder {{
+    LogicalSchema logical
+    LogicalSchema getLogicalSchema() {{ logical }}
+}}
+class StoreHolder {{
+    ModelHolder model
+    ModelHolder getModel() {{ model }}
+}}
+class Attr {{
+    String name
+    String expression
+    String getName() {{ name }}
+    void setExpressionText(String text) {{ expression = text }}
+    void setUpdateIndicator(boolean value) {{}}
+    void setIsUpdate(boolean value) {{}}
+    void setAllowsUpdate(boolean value) {{}}
+}}
+class Comp {{
+    String name
+    List attributes = []
+    String getName() {{ name }}
+    List getAttributes() {{ attributes }}
+}}
+{schema}
+def makeStore = {{ id, name ->
+    new StoreHolder(model: new ModelHolder(logical: new LogicalSchema(internalId: id, schemaName: name)))
+}}
+def srcDS = makeStore({spec["src_schema"][0]}, "{spec["src_schema"][1]}")
+def tgtDS = makeStore({spec["tgt_schema"][0]}, "{spec["tgt_schema"][1]}")
+def srcComp = new Comp(name: "{spec["source_name"]}", attributes: [{source_attributes}])
+def tgtComp = new Comp(name: "TARGET_COMP", attributes: [{target_attributes}])
+def joinSrcComp = null
+def integrationTypeParam = "{spec["integration"]}"
+def ukColNames = [{keys}] as Set
+def sourceSystemName = "ORACLE_SAMPLE_SCHEMAS"
+{chr(10).join(properties)}
+boolean rejected = false
+String errorClass = ""
+String errorText = ""
+try {{
+{block}
+}} catch (Throwable raised) {{
+    rejected = raised instanceof IllegalStateException
+    errorClass = raised.getClass().getSimpleName()
+    errorText = String.valueOf(raised.getMessage())
+}}
+def assigned = [:]
+tgtComp.attributes.each {{ assigned[it.name] = it.expression }}
+println JsonOutput.toJson([rejected: rejected, error_class: errorClass, error_text: errorText, assigned: assigned])
+'''
+    path = tmp_path / "audit_assignment.groovy"
+    path.write_text(harness, encoding="utf-8")
+    environment = {key: os.environ[key] for key in ("SYSTEMROOT", "TEMP", "TMP", "PATH") if key in os.environ}
+    done = subprocess.run(
+        [java, "-cp", str(sdk.GROOVY_JAR), "groovy.ui.GroovyMain", str(path)],
+        capture_output=True, text=True, timeout=60, check=False, env=environment,
+    )
+    if done.returncode != 0:
+        raise AssertionError(done.stderr[-2000:] or done.stdout[-2000:])
+    lines = [line for line in done.stdout.splitlines() if line.strip()]
+    report = json.loads(lines[-1])
+    report["operator_output"] = "\n".join(lines[:-1])
+    return report
+
+
+def _new_key_value(expression: str, source_name: str) -> object:
+    connection = sqlite3.connect(":memory:")
+    try:
+        _register(connection)
+        connection.execute("ATTACH DATABASE ':memory:' AS DWH")
+        connection.execute('CREATE TABLE DWH.TGT_SYNTHETIC (ENTITY_ID, ATTR_TEXT, INSERT_DATE)')
+        connection.execute("INSERT INTO DWH.TGT_SYNTHETIC VALUES (1,'OLD','OLD_AUDIT')")
+        connection.execute(f'CREATE TABLE DWH."{source_name}" (ENTITY_ID, ATTR_TEXT)')
+        connection.execute(f'INSERT INTO DWH."{source_name}" VALUES (2,\'NEW\')')
+        return connection.execute(
+            f'SELECT {expression} FROM DWH."{source_name}" {source_name}'
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+
+def _profile_for(source_table: str | None) -> dict:
+    return build_same_schema_audit_expressions(
+        integration_type="IU", src_owner="DWH", tgt_owner="DWH", src_model="ORACLE_DWH",
+        tgt_model="ORACLE_DWH", tgt_table="TGT_SYNTHETIC", update_key_columns=["ENTITY_ID"],
+        source_columns=["ENTITY_ID", "ATTR_TEXT"],
+        target_columns=["ENTITY_ID", "ATTR_TEXT", "INSERT_DATE"],
+        source_system_literal="SYNTHETIC", source_table=source_table,
+    )
+
+
+def test_tgt_row_source_alias_keeps_the_creation_default_for_a_new_key(tmp_path):
+    profile = _profile_for("TGT_ROW")
+    alias = profile["lookup_alias"]
+    assert alias != "TGT_ROW"
+    report = _run_mapping_assignment(tmp_path, {
+        "source_name": "TGT_ROW",
+        "src_schema": (11, "LOGICAL_A"),
+        "tgt_schema": (11, "LOGICAL_A"),
+        "integration": "IU",
+        "target_attributes": ("ENTITY_ID", "SKEY", "INSERT_DATE"),
+        "odi.expressions": f'SKEY=NVL(SRC.SKEY,-1);INSERT_DATE={profile["expressions"]["INSERT_DATE"]}',
+        "odi.audit_preservation_columns": "INSERT_DATE",
+        "odi.audit_lookup_alias": alias,
+    })
+    assert report["rejected"] is False, report["error_text"]
+    assert "CASE" not in report["operator_output"] and "SELECT" not in report["operator_output"]
+    assigned = report["assigned"]["INSERT_DATE"]
+    assert assigned == profile["expressions"]["INSERT_DATE"].replace("SRC.", "TGT_ROW.")
+    assert report["assigned"]["SKEY"] == "NVL(TGT_ROW.SKEY,-1)"
+    assert _new_key_value(assigned, "TGT_ROW") != "OLD_AUDIT"
+
+
+def test_emitted_alias_collision_refuses_before_assignment(tmp_path):
+    profile = _profile_for("SRC_PLAIN")
+    alias = profile["lookup_alias"]
+    report = _run_mapping_assignment(tmp_path, {
+        "source_name": alias,
+        "src_schema": (11, "LOGICAL_A"),
+        "tgt_schema": (11, "LOGICAL_A"),
+        "integration": "IU",
+        "odi.expressions": f'INSERT_DATE={profile["expressions"]["INSERT_DATE"]}',
+        "odi.audit_preservation_columns": "INSERT_DATE",
+        "odi.audit_lookup_alias": alias,
+    })
+    assert report["rejected"] is True
+    assert report["error_class"] == "IllegalStateException"
+    assert report["assigned"]["INSERT_DATE"] is None
+    assert "CASE" not in report["error_text"] and "SELECT" not in report["error_text"]
+    assert "CASE" not in report["operator_output"] and "SELECT" not in report["operator_output"]
+
+
+def test_source_table_name_moves_the_lookup_alias_and_still_defaults_a_new_key(tmp_path):
+    profile = _profile_for("ODI_AUDIT_TARGET_ROW")
+    assert profile["lookup_alias"] == "ODI_AUDIT_TARGET_ROW_2"
+    report = _run_mapping_assignment(tmp_path, {
+        "source_name": "ODI_AUDIT_TARGET_ROW",
+        "src_schema": (11, "LOGICAL_A"),
+        "tgt_schema": (11, "LOGICAL_A"),
+        "integration": "IU",
+        "odi.expressions": f'INSERT_DATE={profile["expressions"]["INSERT_DATE"]}',
+        "odi.audit_preservation_columns": "INSERT_DATE",
+        "odi.audit_lookup_alias": profile["lookup_alias"],
+    })
+    assert report["rejected"] is False, report["error_text"]
+    assigned = report["assigned"]["INSERT_DATE"]
+    assert _new_key_value(assigned, "ODI_AUDIT_TARGET_ROW") != "OLD_AUDIT"
+
+
+def test_distinct_logical_schema_ids_reject_a_selected_profile(tmp_path):
+    profile = _profile_for("SRC_ROW")
+    report = _run_mapping_assignment(tmp_path, {
+        "source_name": "SRC_ROW",
+        "src_schema": (11, "LOGICAL_A"),
+        "tgt_schema": (22, "LOGICAL_B"),
+        "integration": "IU",
+        "target_attributes": ("ENTITY_ID", "SKEY", "INSERT_DATE"),
+        "odi.expressions": f'SKEY=NVL(SRC.SKEY,-1);INSERT_DATE={profile["expressions"]["INSERT_DATE"]}',
+        "odi.audit_preservation_columns": "INSERT_DATE",
+        "odi.audit_lookup_alias": profile["lookup_alias"],
+    })
+    assert report["rejected"] is True
+    assert report["error_class"] == "IllegalStateException"
+    assert report["assigned"]["INSERT_DATE"] is None
+    assert report["assigned"]["SKEY"] is None
+    assert "CASE" not in report["error_text"] and "SELECT" not in report["error_text"]
+
+
+def test_matching_logical_schema_ids_assign_the_exact_rewritten_text(tmp_path):
+    profile = _profile_for("SRC_ROW")
+    report = _run_mapping_assignment(tmp_path, {
+        "source_name": "SRC_ROW",
+        "src_schema": (11, "LOGICAL_A"),
+        "tgt_schema": (11, "LOGICAL_A"),
+        "integration": "IU",
+        "target_attributes": ("ENTITY_ID", "SKEY", "INSERT_DATE"),
+        "odi.expressions": f'SKEY=NVL(SRC.SKEY,-1);INSERT_DATE={profile["expressions"]["INSERT_DATE"]}',
+        "odi.audit_preservation_columns": "INSERT_DATE",
+        "odi.audit_lookup_alias": profile["lookup_alias"],
+    })
+    assert report["rejected"] is False, report["error_text"]
+    assert report["assigned"]["INSERT_DATE"] == profile["expressions"]["INSERT_DATE"].replace("SRC.", "SRC_ROW.")
+    assert report["assigned"]["SKEY"] == "NVL(SRC_ROW.SKEY,-1)"
+    assert "CASE" not in report["operator_output"] and "SELECT" not in report["operator_output"]
+    assert "AUDIT PRESERVATION: applied count=1" in report["operator_output"]
+
+
+def test_unqualified_mappings_without_a_profile_keep_the_timestamp_default(tmp_path):
+    report = _run_mapping_assignment(tmp_path, {
+        "source_name": "SRC_ROW",
+        "src_schema": (11, "LOGICAL_A"),
+        "tgt_schema": (22, "LOGICAL_B"),
+        "integration": "CONTROL_APPEND",
+        "keys": (),
+        "odi.expressions": None,
+        "odi.audit_preservation_columns": None,
+        "odi.audit_lookup_alias": None,
+    })
+    assert report["rejected"] is False, report["error_text"]
+    assert report["assigned"]["INSERT_DATE"] == "CURRENT_TIMESTAMP"
+    iu = _run_mapping_assignment(tmp_path, {
+        "source_name": "SRC_ROW",
+        "src_schema": (11, "LOGICAL_A"),
+        "tgt_schema": (22, "LOGICAL_B"),
+        "integration": "IU",
+        "odi.expressions": None,
+        "odi.audit_preservation_columns": None,
+        "odi.audit_lookup_alias": None,
+    })
+    assert iu["rejected"] is False, iu["error_text"]
+    assert iu["assigned"]["INSERT_DATE"] == "CURRENT_TIMESTAMP"

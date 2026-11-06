@@ -489,9 +489,26 @@ try {
     }
     boolean auditQualified = integrationTypeParam == "IU" && !ukColNames.isEmpty() && sameLogicalSchema(srcDS, tgtDS)
     if (!auditColumns.isEmpty() && !auditQualified) {
-        auditColumns.each { auditName -> customExpressions.remove(auditName) }
-        println "AUDIT PRESERVATION: skipped count=${auditColumns.size()}"
-    } else if (!auditColumns.isEmpty()) {
+        throw new IllegalStateException("Audit preservation logical schema does not match the selected profile")
+    }
+    if (!auditColumns.isEmpty()) {
+        String auditLookupAlias = System.getProperty("odi.audit_lookup_alias")
+        if (auditLookupAlias == null || !(auditLookupAlias ==~ /[A-Z][A-Z0-9_]{0,127}/)) {
+            throw new IllegalStateException("Audit preservation lookup alias is missing")
+        }
+        String sourceAlias = srcComp == null ? null : srcComp.getName()
+        if (sourceAlias != null && sourceAlias.equalsIgnoreCase(auditLookupAlias)) {
+            throw new IllegalStateException("Audit preservation source alias collides with the lookup alias")
+        }
+        boolean aliasMissing = false
+        auditColumns.each { auditName ->
+            String text = customExpressions[auditName]
+            boolean usesAlias = text != null && (text =~ /(?<![A-Z0-9_])${auditLookupAlias}\./).find()
+            if (!usesAlias) aliasMissing = true
+        }
+        if (aliasMissing) {
+            throw new IllegalStateException("Audit preservation expression does not use the lookup alias")
+        }
         println "AUDIT PRESERVATION: applied count=${auditColumns.size()}"
     }
     if (!customExpressions.isEmpty()) {

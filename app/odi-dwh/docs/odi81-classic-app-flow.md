@@ -49,11 +49,14 @@ expressions before DDL. An existing key keeps `INSERT_DATE` and
 `SOURCE_SYSTEM`. `UPDATE_DATE` and the session batch change only when a
 non-audit business column changes. An unchanged row keeps every audit value,
 including null. A new key gets the creation default. More than one target row for the key
-fails that expression instead of keeping the first match. `CONTROL_APPEND`, a different
-owner, a non-Oracle source, or a join keeps the previous default expressions.
-The Groovy step applies those columns only after the SDK reports the same
-logical schema. Operator output records expression counts, not the SQL text.
-This is not a native ODI execution proof.
+fails that expression instead of keeping the first match. The lookup alias is
+chosen outside the known source table, target table, and column names. The
+Groovy step rejects the mapping before commit when the source component name
+matches that alias, or when a selected profile disagrees with the SDK logical
+schema. It does not replace a selected profile with the timestamp defaults.
+`CONTROL_APPEND`, a different owner, a non-Oracle source, or a join sends no
+profile and keeps the previous default expressions. Operator output records
+expression counts, not the SQL text. This is not a native ODI execution proof.
 
 A non-200 response, a skipped or blocked generation, a version or context
 mismatch, a bad truncate flag, or a failed verification stops every later
