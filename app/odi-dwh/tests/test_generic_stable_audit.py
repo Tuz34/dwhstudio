@@ -161,7 +161,7 @@ def test_expression_texts_are_case_guards_with_null_safe_tracked_comparisons(tex
             assert "DECODE(SCD2_CUR.ATTR_TEXT, " in text and "DECODE(SCD2_CUR.VALUE_AMT, " in text
             for forbidden in ("ROWNUM", "MAX(", "MIN(", "COALESCE", "NVL(", "FETCH FIRST"):
                 assert forbidden not in text
-    assert texts["F5"]["INSERT_DATE"].count(" FROM DM.DIM_ODI81_F5 SCD2_CUR ") == 2
+    assert texts["F5"]["INSERT_DATE"].count(" FROM DM.DIM_ODI81N_F5 SCD2_CUR ") == 2
     # Sorted identifiers make the text independent of plan versus datastore-role order.
     assert texts["COMPOSITE"] == texts["COMPOSITE_REORDERED"]
     assert "DECODE(SCD2_CUR.OW1, SRC_COMPOSITE.OW1, 0, 1) = 0" in texts["COMPOSITE"]["UPDATE_DATE"]
@@ -309,7 +309,7 @@ def _probe_case(texts_for_plan, **change):
                {"name": "VALUE_AMT", "role": "ADD_ROW_ON_CHANGE"}, {"name": "CURRENT_FLAG", "role": "CURRENT_RECORD_FLAG"},
                *({"name": name, "role": "OVERWRITE_ON_CHANGE"} for name in AUDITS)]
     attributes = [{"name": name, "text": texts_for_plan[name], "hint": None} for name in AUDITS]
-    case = {"owner": "DWH", "table": "DIM_ODI81_F4", "sources": ["ODS_ODI81_F4"], "columns": columns, "attributes": attributes}
+    case = {"owner": "DWH", "table": "DIM_ODI81N_F4", "sources": ["ODS_ODI81N_F4"], "columns": columns, "attributes": attributes}
     for key, value in change.items():
         case[key] = value(case) if callable(value) else value
     return case
@@ -324,7 +324,7 @@ def test_probe_reports_only_booleans_and_counts_for_the_stable_profile(texts, tm
         "missing_audit": _probe_case(plan, attributes=lambda c: c["attributes"][:3]),
         "target_hint": _probe_case(plan, attributes=lambda c: [{**c["attributes"][0], "hint": "TARGET"}, *c["attributes"][1:]]),
         "alias_collides": _probe_case(plan, sources=["SCD2_CUR"]),
-        "two_sources": _probe_case(plan, sources=["ODS_ODI81_F4", "OTHER"]),
+        "two_sources": _probe_case(plan, sources=["ODS_ODI81N_F4", "OTHER"]),
         "audit_role_missing": _probe_case(plan, columns=lambda c: [x for x in c["columns"] if x["name"] != "ETL_BATCH_ID"]),
         "no_natural_key": _probe_case(plan, columns=lambda c: [x for x in c["columns"] if x["role"] != "NATURAL_KEY"]),
         "other_owner": _probe_case(plan, owner="DM"),

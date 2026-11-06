@@ -15,6 +15,7 @@ import odi81_scd2_fixtures as fixtures
 
 HttpClient = Callable[[str, Mapping[str, Any]], Any]
 Factory = fixtures.Factory
+NAMESPACE = isolated.NAMESPACE
 GENERATE_PATH = "/api/scd2/generate"
 RUN_PATH = "/api/scd2/run"
 CLASSIC_GENERATE_PATH = "/api/mapping/generate"
@@ -60,32 +61,49 @@ LEGACY_CALLS = (
 LEGACY: dict[str, dict[str, str]] = {
     "F1": {
         "source_owner": "DWH",
-        "source_table": "ODI81_SRC_F1",
+        "source_table": "ODI81N_SRC_F1",
         "target_owner": "DWH",
-        "target_table": "ODS_ODI81_F1",
-        "mapping_name": "MAP_ODI81_F1",
+        "target_table": "ODS_ODI81N_F1",
+        "mapping_name": "MAP_ODI81N_F1",
         "integration_type": "IU",
         "load_mode": "incremental",
     },
     "F2": {
         "source_owner": "DWH",
-        "source_table": "ODI81_SRC_F2",
+        "source_table": "ODI81N_SRC_F2",
         "target_owner": "DWH",
-        "target_table": "ODS_ODI81_F2",
-        "mapping_name": "MAP_ODI81_F2",
+        "target_table": "ODS_ODI81N_F2",
+        "mapping_name": "MAP_ODI81N_F2",
         "integration_type": "CONTROL_APPEND",
         "load_mode": "full_reload",
     },
     "F3": {
         "source_owner": "DWH",
-        "source_table": "ODI81_SRC_F3",
+        "source_table": "ODI81N_SRC_F3",
         "target_owner": "DWH",
-        "target_table": "DWH_ODI81_F3",
-        "mapping_name": "MAP_ODI81_F3",
+        "target_table": "DWH_ODI81N_F3",
+        "mapping_name": "MAP_ODI81N_F3",
         "integration_type": "IU",
         "load_mode": "type1",
     },
 }
+def _freeze_namespace() -> None:
+    # Driver, helpers and backups share one fixed fresh namespace; no override path exists.
+    if NAMESPACE != "ODI81N" or set(LEGACY) != set(isolated._FLOWS):
+        raise RuntimeError("namespace")
+    for flow, spec in LEGACY.items():
+        if (spec["source_table"], spec["target_table"]) != isolated._FLOWS[flow]:
+            raise RuntimeError("namespace")
+        if spec["mapping_name"] != f"MAP_{NAMESPACE}_{flow}" or len(spec["mapping_name"] + "_SCN") > 30:
+            raise RuntimeError("namespace")
+    for flow, spec in fixtures.FLOWS.items():
+        if spec["mapping_name"] != f"MAP_{NAMESPACE}_{flow}":
+            raise RuntimeError("namespace")
+
+
+_freeze_namespace()
+
+
 _WRITE_FLAGS = (
     "connection_attempted",
     "ddl_attempted",

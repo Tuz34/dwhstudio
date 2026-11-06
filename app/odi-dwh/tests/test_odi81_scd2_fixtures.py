@@ -88,19 +88,19 @@ def redacted(report):
 
 
 def test_frozen_manifest_and_surrogate_names():
-    assert fixture.SK["F4"] == "ODI81_F4_SK"
-    assert fixture.SK["F5"] == "ODI81_F5_SK"
-    assert fixture.SK["F4"] == scd2_builder.surrogate_key_name("DIM_ODI81_F4", fixture.BUSINESS)
-    assert fixture.SK["F5"] == scd2_builder.surrogate_key_name("DIM_ODI81_F5", fixture.BUSINESS)
-    assert fixture.FLOWS["F4"]["source_table"] == "ODS_ODI81_F4"
-    assert fixture.FLOWS["F4"]["target_table"] == "DIM_ODI81_F4"
-    assert fixture.FLOWS["F5"]["source_table"] == "DWH_ODI81_F5"
+    assert fixture.SK["F4"] == "ODI81N_F4_SK"
+    assert fixture.SK["F5"] == "ODI81N_F5_SK"
+    assert fixture.SK["F4"] == scd2_builder.surrogate_key_name("DIM_ODI81N_F4", fixture.BUSINESS)
+    assert fixture.SK["F5"] == scd2_builder.surrogate_key_name("DIM_ODI81N_F5", fixture.BUSINESS)
+    assert fixture.FLOWS["F4"]["source_table"] == "ODS_ODI81N_F4"
+    assert fixture.FLOWS["F4"]["target_table"] == "DIM_ODI81N_F4"
+    assert fixture.FLOWS["F5"]["source_table"] == "DWH_ODI81N_F5"
     assert fixture.FLOWS["F5"]["target_owner"] == "DM"
-    assert fixture.FLOWS["F5"]["target_table"] == "DIM_ODI81_F5"
+    assert fixture.FLOWS["F5"]["target_table"] == "DIM_ODI81N_F5"
     assert len(fixture.target_catalog("F4")) == 11
     assert fixture.SOURCE_CATALOG[0] == (1, "ENTITY_ID", "NUMBER", 22, 10, 0, None, None, "N")
     assert fixture.SOURCE_CATALOG[1][1:8] == ("ATTR_TEXT", "VARCHAR2", 40, None, None, "B", 40)
-    assert fixture.target_catalog("F4")[0][1] == "ODI81_F4_SK"
+    assert fixture.target_catalog("F4")[0][1] == "ODI81N_F4_SK"
     update_date = next(row for row in fixture.target_catalog("F4") if row[1] == "UPDATE_DATE")
     assert update_date[2] == "TIMESTAMP(6)"
     assert update_date[8] == "Y"
@@ -111,7 +111,7 @@ def test_frozen_manifest_and_surrogate_names():
         '"UPDATE_DATE" TIMESTAMP)' in fixture.backup_create_sql("F4", "target", 1)
     )
     for flow, (source, target) in isolated._FLOWS.items():
-        assert source.startswith("ODI81_SRC_")
+        assert source.startswith("ODI81N_SRC_")
         assert flow in {"F1", "F2", "F3"}
 
 
@@ -288,7 +288,7 @@ def test_source_backup_and_mutate_are_one_update_and_one_insert(db):
 def test_retained_backup_mismatch_is_not_replaced(db):
     assert prepare(db)["status"] == "passed"
     assert backup(db, kind="source", run=2)["status"] == "passed"
-    db.db.execute('UPDATE "ODS_ODI81_F4" SET "ATTR_TEXT"=?', ("OTHER",))
+    db.db.execute('UPDATE "ODS_ODI81N_F4" SET "ATTR_TEXT"=?', ("OTHER",))
     result = backup(db, kind="source", run=2)
     assert result["status"] != "passed"
     assert result["error_code"] in {"InvalidCheckpoint", "FixtureStateMismatch", "BackupMetadataMismatch"}
@@ -302,8 +302,8 @@ def test_f5_target_backup_uses_dm_writer(db):
     result = backup(db, "F5", "target", 1)
     assert result["status"] == "passed", result
     sql = "\n".join(item for _role, item in db.events if isinstance(item, str))
-    assert '"DM"."DIM_ODI81_F5"' in sql
-    assert '"DWH"."DIM_ODI81_F5"' not in sql
+    assert '"DM"."DIM_ODI81N_F5"' in sql
+    assert '"DWH"."DIM_ODI81N_F5"' not in sql
     assert any(role == "dm" and item == "connect" for role, item in db.events)
 
 
@@ -354,7 +354,7 @@ def test_run3_full_snapshot_witness(db):
 def test_metadata_drift_fails_closed(db):
     _ready(db)
     db.db.execute(
-        "UPDATE ALL_TAB_COLUMNS SET DATA_LENGTH=1 WHERE TABLE_NAME='DIM_ODI81_F4' AND COLUMN_NAME='ATTR_TEXT'"
+        "UPDATE ALL_TAB_COLUMNS SET DATA_LENGTH=1 WHERE TABLE_NAME='DIM_ODI81N_F4' AND COLUMN_NAME='ATTR_TEXT'"
     )
     result = verify(db, run=3)
     assert result["error_code"] == "ColumnContractMismatch"
@@ -364,7 +364,7 @@ def test_metadata_drift_fails_closed(db):
 
 def test_null_audit_is_not_a_witness(db):
     _ready(db)
-    db.db.execute('UPDATE "DIM_ODI81_F4" SET "UPDATE_DATE"=NULL WHERE "ODI81_F4_SK"=1')
+    db.db.execute('UPDATE "DIM_ODI81N_F4" SET "UPDATE_DATE"=NULL WHERE "ODI81N_F4_SK"=1')
     result = verify(db, run=3)
     assert result["error_code"] == "NullAuditWitness"
     assert result["full_target_snapshot_equal"] is False
@@ -373,7 +373,7 @@ def test_null_audit_is_not_a_witness(db):
 
 def test_same_count_wrong_business_rows_fail(db):
     _ready(db)
-    db.db.execute('UPDATE "DIM_ODI81_F4" SET "ATTR_TEXT"=? WHERE "ODI81_F4_SK"=2', ("OTHER",))
+    db.db.execute('UPDATE "DIM_ODI81N_F4" SET "ATTR_TEXT"=? WHERE "ODI81N_F4_SK"=2', ("OTHER",))
     result = verify(db, run=3)
     assert result["error_code"] == "BusinessParityMismatch"
     assert result["full_target_snapshot_equal"] is False
@@ -382,7 +382,7 @@ def test_same_count_wrong_business_rows_fail(db):
 
 def test_duplicate_surrogate_fails(db):
     _ready(db)
-    db.db.execute('UPDATE "DIM_ODI81_F4" SET "ODI81_F4_SK"=1 WHERE "ODI81_F4_SK"=2')
+    db.db.execute('UPDATE "DIM_ODI81N_F4" SET "ODI81N_F4_SK"=1 WHERE "ODI81N_F4_SK"=2')
     result = verify(db, run=3)
     assert result["error_code"] == "DuplicateSurrogate"
     assert result["full_target_snapshot_equal"] is False
@@ -390,10 +390,10 @@ def test_duplicate_surrogate_fails(db):
 
 def test_duplicate_natural_key_fails(db):
     _ready(db)
-    row = db.db.execute('SELECT * FROM "DIM_ODI81_F4" WHERE "ODI81_F4_SK"=2').fetchone()
+    row = db.db.execute('SELECT * FROM "DIM_ODI81N_F4" WHERE "ODI81N_F4_SK"=2').fetchone()
     values = (9, *row[1:])
     placeholders = ",".join("?" for _ in values)
-    db.db.execute(f'INSERT INTO "DIM_ODI81_F4" VALUES ({placeholders})', values)
+    db.db.execute(f'INSERT INTO "DIM_ODI81N_F4" VALUES ({placeholders})', values)
     result = verify(db, run=3)
     assert result["error_code"] == "DuplicateNaturalKey"
     assert result["full_target_snapshot_equal"] is False
@@ -402,7 +402,7 @@ def test_duplicate_natural_key_fails(db):
 def test_history_mismatch_fails(db):
     _ready(db)
     db.db.execute(
-        'UPDATE "DIM_ODI81_F4" SET "EFFECTIVE_TO"=? WHERE "CURRENT_FLAG"=? AND "ENTITY_ID"=101',
+        'UPDATE "DIM_ODI81N_F4" SET "EFFECTIVE_TO"=? WHERE "CURRENT_FLAG"=? AND "ENTITY_ID"=101',
         ("2024-07-01", "0"),
     )
     result = verify(db, run=3)
@@ -412,11 +412,11 @@ def test_history_mismatch_fails(db):
 
 def test_invalid_flag_and_date_range_fail(db):
     _ready(db)
-    db.db.execute('UPDATE "DIM_ODI81_F4" SET "CURRENT_FLAG"=? WHERE "ODI81_F4_SK"=2', ("Y",))
+    db.db.execute('UPDATE "DIM_ODI81N_F4" SET "CURRENT_FLAG"=? WHERE "ODI81N_F4_SK"=2', ("Y",))
     assert verify(db, run=3)["error_code"] == "CurrentFlagInvalid"
-    db.db.execute('UPDATE "DIM_ODI81_F4" SET "CURRENT_FLAG"=? WHERE "ODI81_F4_SK"=2', ("1",))
+    db.db.execute('UPDATE "DIM_ODI81N_F4" SET "CURRENT_FLAG"=? WHERE "ODI81N_F4_SK"=2', ("1",))
     db.db.execute(
-        'UPDATE "DIM_ODI81_F4" SET "EFFECTIVE_TO"=? WHERE "ODI81_F4_SK"=2',
+        'UPDATE "DIM_ODI81N_F4" SET "EFFECTIVE_TO"=? WHERE "ODI81N_F4_SK"=2',
         ("2099-01-01",),
     )
     result = verify(db, run=3)
@@ -428,7 +428,7 @@ def test_invalid_flag_and_date_range_fail(db):
 def test_stale_backup_snapshot_is_not_a_pass(db):
     _ready(db, backup="changed")
     db.install_backup("F4", "target", 2, "seed")
-    db.db.execute('UPDATE "DIM_ODI81_F4" SET "UPDATE_DATE"=? WHERE "ODI81_F4_SK"=2', ("2024-07-01T00:00:00",))
+    db.db.execute('UPDATE "DIM_ODI81N_F4" SET "UPDATE_DATE"=? WHERE "ODI81N_F4_SK"=2', ("2024-07-01T00:00:00",))
     result = verify(db, run=3)
     assert result["status"] == "failed"
     assert result["error_code"] == "SnapshotMismatch"
@@ -457,3 +457,25 @@ def test_read_failure_stops_without_leaking(db):
     assert result["error_code"] == "OperationFailed"
     assert result["full_target_snapshot_equal"] is False
     redacted(result)
+
+
+_OLD_NAMESPACE = re.compile(r"(?<![A-Z0-9])ODI81_F\d|_ODI81_F\d|MAP_ODI81_F\d")
+
+
+@pytest.mark.parametrize("flow", ["F4", "F5"])
+def test_fresh_scd2_namespace_reaches_sql_and_old_names_never_do(db, flow):
+    assert prepare(db, flow)["status"] == "passed"
+    assert backup(db, flow, kind="source", run=2)["status"] == "passed"
+    sql = [s for _, s in db.events if isinstance(s, str)]
+    assert any(fixture.FLOWS[flow]["source_table"] in s for s in sql)
+    assert any(f"ODI81N_{flow}_S_R2_BKP" in s for s in sql)
+    assert not any(_OLD_NAMESPACE.search(s) for s in sql)
+
+
+@pytest.mark.parametrize("flow", ["F4", "F5"])
+def test_preexisting_fresh_scd2_source_blocks_before_any_write(db, flow):
+    assert prepare(db, flow)["status"] == "passed"
+    db.events.clear()
+    result = prepare(db, flow)
+    assert result["error_code"] == "SourceAlreadyExists" and result["ddl_attempted"] is False
+    assert not any(isinstance(s, str) and s.startswith(("CREATE", "INSERT", "UPDATE")) for _, s in db.events)

@@ -53,9 +53,9 @@ class Database:
             before = {1: (), 2: fixture._SEED, 3: fixture._CHANGED}[run]
             self.create(target_name, fixture._BUSINESS + extra, before)
             if backups:
-                self.copy(target_name, f"ODI81_{flow}_T_R{run}_BKP")
+                self.copy(target_name, f"ODI81N_{flow}_T_R{run}_BKP")
         if backups:
-            self.create(f"ODI81_{flow}_S_R2_BKP", fixture._BUSINESS, fixture._SEED)
+            self.create(f"ODI81N_{flow}_S_R2_BKP", fixture._BUSINESS, fixture._SEED)
 
     def create(self, name, columns, rows, *, types=None):
         column_types = {"ENTITY_ID": "INTEGER", "ATTR_TEXT": "TEXT", "VALUE_AMT": "NUMERIC"}
@@ -267,7 +267,7 @@ def test_ddl_or_seed_failure_is_not_claimed_rolled_back(db, failure):
     assert result["manual_review_required"] and not result["commit_completed"]
     assert not result["automatic_ddl_rollback_performed"]
     if failure == "INSERT INTO":
-        assert db.db.execute('SELECT COUNT(*) FROM "ODI81_SRC_F1"').fetchone()[0] == 0
+        assert db.db.execute('SELECT COUNT(*) FROM "ODI81N_SRC_F1"').fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("committed", [False, True])
@@ -276,7 +276,7 @@ def test_commit_exception_is_unknown_even_if_rollback_succeeds(db, committed):
     result = prepare(db)
     assert result["outcome_unknown"] and result["commit_attempted"] and not result["commit_completed"]
     assert result["manual_review_required"]
-    assert db.db.execute('SELECT COUNT(*) FROM "ODI81_SRC_F1"').fetchone()[0] == (3 if committed else 0)
+    assert db.db.execute('SELECT COUNT(*) FROM "ODI81N_SRC_F1"').fetchone()[0] == (3 if committed else 0)
 
 
 @pytest.mark.parametrize("flow", ["F1", "F2", "F3"])
@@ -293,7 +293,7 @@ def test_one_transaction_mutation_requires_backups_and_cannot_repeat(db, flow):
     no_mutation(db)
 
 
-@pytest.mark.parametrize("missing", ["ODI81_F1_S_R2_BKP", "ODI81_F1_T_R2_BKP"])
+@pytest.mark.parametrize("missing", ["ODI81N_F1_S_R2_BKP", "ODI81N_F1_T_R2_BKP"])
 def test_missing_backup_blocks_source_mutation(db, missing):
     db.provision("F1")
     db.db.execute(f'DROP TABLE "{missing}"')
@@ -316,8 +316,8 @@ def test_mutation_rolls_back_update_if_insert_or_affected_count_fails(db, failur
     db.bad_rowcount = 0 if failure == "AffectedCountMismatch" else None
     result = mutate(db)
     assert result["status"] == "failed" and not result["commit_attempted"]
-    assert db.db.execute('SELECT COUNT(*) FROM "ODI81_SRC_F1"').fetchone()[0] == 3
-    assert db.db.execute('SELECT ATTR_TEXT FROM "ODI81_SRC_F1" WHERE ENTITY_ID=101').fetchone()[0] == "FIXTURE_A"
+    assert db.db.execute('SELECT COUNT(*) FROM "ODI81N_SRC_F1"').fetchone()[0] == 3
+    assert db.db.execute('SELECT ATTR_TEXT FROM "ODI81N_SRC_F1" WHERE ENTITY_ID=101').fetchone()[0] == "FIXTURE_A"
 
 
 @pytest.mark.parametrize("flow", ["F1", "F2", "F3"])
@@ -426,19 +426,19 @@ def test_cleanup_failure_cannot_preserve_a_full_snapshot_success(db, monkeypatch
 def test_corrupt_source_or_snapshot_never_proves_readiness(db, corruption):
     db.provision("F1")
     if corruption == "duplicate":
-        db.db.execute('INSERT INTO ODI81_SRC_F1 SELECT * FROM ODI81_SRC_F1 WHERE ENTITY_ID=101')
+        db.db.execute('INSERT INTO ODI81N_SRC_F1 SELECT * FROM ODI81N_SRC_F1 WHERE ENTITY_ID=101')
     elif corruption == "null":
-        db.db.execute('UPDATE ODI81_SRC_F1 SET ATTR_TEXT=NULL WHERE ENTITY_ID=101')
+        db.db.execute('UPDATE ODI81N_SRC_F1 SET ATTR_TEXT=NULL WHERE ENTITY_ID=101')
     elif corruption == "value":
-        db.db.execute('UPDATE ODI81_SRC_F1 SET ATTR_TEXT="DRIFT" WHERE ENTITY_ID=101')
+        db.db.execute('UPDATE ODI81N_SRC_F1 SET ATTR_TEXT="DRIFT" WHERE ENTITY_ID=101')
     elif corruption == "backup":
-        db.db.execute('UPDATE ODI81_F1_T_R2_BKP SET ATTR_TEXT="DRIFT" WHERE ENTITY_ID=101')
+        db.db.execute('UPDATE ODI81N_F1_T_R2_BKP SET ATTR_TEXT="DRIFT" WHERE ENTITY_ID=101')
     elif corruption == "metadata":
         db.bad_metadata = True
     elif corruption == "pk":
         db.bad_pk = True
     else:
-        db.views.add("ODI81_F1_T_R2_BKP")
+        db.views.add("ODI81N_F1_T_R2_BKP")
     result = mutate(db)
     assert result["status"] == "blocked", result
     no_mutation(db)
@@ -524,7 +524,7 @@ def test_reader_post_mutation_failure_does_not_conceal_commit(db, monkeypatch):
     result = mutate(db)
     assert result["status"] == "failed" and result["commit_completed"]
     assert not result["source_reader_verified"] and result["manual_review_required"]
-    assert db.db.execute('SELECT COUNT(*) FROM ODI81_SRC_F1').fetchone()[0] == 4
+    assert db.db.execute('SELECT COUNT(*) FROM ODI81N_SRC_F1').fetchone()[0] == 4
 
 
 def test_forged_exception_message_is_not_an_error_code(db):
@@ -553,7 +553,7 @@ def test_trigger_attached_at_create_blocks_before_seed(db, monkeypatch):
     def execute(self, sql, params=None):
         original(self, sql, params)
         if sql.startswith("CREATE TABLE"):
-            db.enabled_triggers.add("ODI81_SRC_F1")
+            db.enabled_triggers.add("ODI81N_SRC_F1")
     monkeypatch.setattr(Cursor, "execute", execute)
     result = prepare(db)
     assert result["status"] == "failed" and result["error_code"] == "SourceTriggersPresent"
@@ -562,7 +562,7 @@ def test_trigger_attached_at_create_blocks_before_seed(db, monkeypatch):
     assert not any(sql.startswith("INSERT") for _, sql in db.events)
 
 
-@pytest.mark.parametrize("name", ["ODI81_SRC_F1", "ODS_ODI81_F1", "ODI81_F1_S_R2_BKP", "ODI81_F1_T_R2_BKP"])
+@pytest.mark.parametrize("name", ["ODI81N_SRC_F1", "ODS_ODI81N_F1", "ODI81N_F1_S_R2_BKP", "ODI81N_F1_T_R2_BKP"])
 def test_non_table_rejected_before_any_lock(db, name):
     db.provision("F1")
     db.views.add(name)
@@ -601,7 +601,7 @@ def test_unexpected_cleanup_errors_do_not_escape_or_skip_remaining_resources(db,
 def test_trigger_added_after_reader_preflight_is_rejected_under_lock(db):
     db.provision("F1")
     def writer():
-        db.enabled_triggers.add("ODI81_SRC_F1")
+        db.enabled_triggers.add("ODI81N_SRC_F1")
         return db.factory("writer")()
     result = fixture.mutate_source("F1", writer, db.factory("source"), approved=True,
                                     approval_scope="odi81_f1_mutate_source")
@@ -614,14 +614,14 @@ def test_all_kind_prechecks_precede_locks_and_recheck_after_them(db, monkeypatch
     db.provision("F1")
     original = Cursor.execute
     checked = set()
-    expected = {"ODI81_SRC_F1", "ODS_ODI81_F1", "ODI81_F1_S_R2_BKP", "ODI81_F1_T_R2_BKP"}
+    expected = {"ODI81N_SRC_F1", "ODS_ODI81N_F1", "ODI81N_F1_S_R2_BKP", "ODI81N_F1_T_R2_BKP"}
     def execute(self, sql, params=None):
         if self.connection.role == "writer" and "FROM ALL_TABLES" in sql:
             checked.add(params["name"])
         if sql.startswith("LOCK"):
             assert checked == expected
-            if '"ODI81_F1_T_R2_BKP"' in sql:
-                db.views.add("ODS_ODI81_F1")
+            if '"ODI81N_F1_T_R2_BKP"' in sql:
+                db.views.add("ODS_ODI81N_F1")
         return original(self, sql, params)
     monkeypatch.setattr(Cursor, "execute", execute)
     result = mutate(db)
@@ -717,3 +717,35 @@ def test_process_control_not_suppressed_but_acquired_resources_cleaned(db, error
             fixture._open(db.factory("source"), report, resources, readonly=True)
             raise error_type()
     assert resources == [] and all(c.closed for c in db.connections)
+
+
+_OLD_NAMESPACE = re.compile(r"(?<![A-Z0-9])ODI81_(SRC_)?F\d|_ODI81_F\d|ODI81_F\d_(S|T)_R\d")
+
+
+@pytest.mark.parametrize("flow", ["F1", "F2", "F3"])
+def test_fresh_namespace_only_reaches_sql_and_old_names_never_do(db, flow):
+    assert prepare(db, flow)["status"] == "passed"
+    sql = [s for _, s in db.events if isinstance(s, str)]
+    assert any(f"ODI81N_SRC_{flow}" in s for s in sql)
+    assert not any(_OLD_NAMESPACE.search(s) for s in sql)
+
+
+@pytest.mark.parametrize("flow", ["F1", "F2", "F3"])
+def test_preexisting_fresh_source_blocks_before_any_write(db, flow):
+    db.create(fixture._FLOWS[flow][0], fixture._BUSINESS, fixture._SEED)
+    db.events.clear()
+    result = prepare(db, flow)
+    assert result["error_code"] == "SourceAlreadyExists" and result["ddl_attempted"] is False
+    no_mutation(db)
+
+
+def test_conflicting_fresh_backup_is_kept_and_blocks_without_ddl_or_dml(db):
+    db.provision("F1", target=False, backups=False)
+    db.create(fixture.backup_table("F1", "source", 2), fixture._BUSINESS, fixture._CHANGED)
+    db.events.clear()
+    result = fixture.create_retained_backup("F1", "source", 2, db.factory("writer"), approved=True,
+                                            approval_scope="odi81_f1_backup_source")
+    assert result["status"] != "passed" and result["ddl_attempted"] is False
+    assert result["dml_attempted"] is False
+    no_mutation(db)
+    assert db.db.execute('SELECT COUNT(*) FROM "ODI81N_F1_S_R2_BKP"').fetchone()[0] == 4
