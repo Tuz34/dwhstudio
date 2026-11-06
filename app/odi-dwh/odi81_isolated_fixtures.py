@@ -139,7 +139,8 @@ def _fail(report: dict, exc: Exception) -> None:
     # Only our internal fixed codes are emitted, never an exception class/message.
     code = exc.args[0] if type(exc) is _Blocked and exc.args else None
     report["error_code"] = code if isinstance(code, str) and code in _ERRORS else "OperationFailed"
-    report["status"] = "failed" if report["ddl_attempted"] or report["dml_attempted"] else "blocked"
+    wrote = report["ddl_attempted"] or report["dml_attempted"] or report.get("verification_failed") is True
+    report["status"] = "failed" if wrote else "blocked"
     report["manual_review_required"] |= report["ddl_attempted"] or report["dml_attempted"]
     report["outcome_unknown"] |= report["commit_attempted"] and not report["commit_completed"]
 
@@ -322,6 +323,91 @@ def prepare_source(flow: str, writer_factory: Factory, source_reader_factory: Fa
     return report
 
 
+def _checkpoint_state(kind: str, run: int) -> str:
+    if kind == "source":
+        return "seed"
+    return {1: "empty", 2: "seed", 3: "changed"}[run]
+
+
+def _backup_columns(flow: str, *, source: bool) -> tuple[str, ...]:
+    if source:
+        return _BUSINESS
+    return _BUSINESS + (_EDW_EXTRA if flow == "F3" else _ODS_EXTRA)
+
+
+def _backup_ddl(flow: str, *, source: bool) -> str:
+    """Explicit column DDL so a retained copy keeps the frozen nullability."""
+    business = ('"ENTITY_ID" NUMBER(10) NOT NULL, "ATTR_TEXT" VARCHAR2(40 BYTE) NOT NULL, '
+                '"VALUE_AMT" NUMBER(10,2) NOT NULL')
+    if source:
+        return business
+    if flow == "F3":
+        extra = ('"INSERT_DATE" TIMESTAMP, "UPDATE_DATE" TIMESTAMP, "CURRENT_FLAG" VARCHAR2(1), '
+                 '"EFFECTIVE_FROM" DATE, "EFFECTIVE_TO" DATE, "SOURCE_SYSTEM" VARCHAR2(50), '
+                 '"ETL_BATCH_ID" NUMBER')
+    else:
+        extra = ('"INSERT_DATE" TIMESTAMP, "UPDATE_DATE" TIMESTAMP, "SOURCE_SYSTEM" VARCHAR2(50), '
+                 '"ETL_BATCH_ID" NUMBER')
+    return f"{business}, {extra}"
+
+
+def create_retained_backup(flow: str, kind: str, run: int, writer_factory: Factory, *,
+                           approved: object = False, approval_scope: object = None) -> dict[str, Any]:
+    """Copy one absent checkpoint. An existing object is kept only when it already matches."""
+    report = _report("create_retained_backup")
+    if approved is not True or not isinstance(flow, str) or flow not in _FLOWS:
+        return report
+    if kind not in {"source", "target"} or type(run) is not int:
+        report["error_code"] = "InvalidCheckpoint"
+        return report
+    if (kind == "source" and run != 2) or (kind == "target" and run not in (1, 2, 3)):
+        report["error_code"] = "InvalidCheckpoint"
+        return report
+    suffix = "backup_source" if kind == "source" else f"backup_target_r{run}"
+    if not _authorize(report, flow, approved, approval_scope, suffix):
+        return report
+    resources: list = []
+    with _operation(report, resources):
+        report["stage"] = "backup_preflight"
+        cursor = _open(writer_factory, report, resources, readonly=False)
+        _owner(cursor)
+        source_name, target_name = _FLOWS[flow]
+        original = source_name if kind == "source" else target_name
+        backup = f"ODI81_{flow}_{'S' if kind == 'source' else 'T'}_R{run}_BKP"
+        state = _checkpoint_state(kind, run)
+        _permanent_table(cursor, original)
+        cursor.execute(f"LOCK TABLE {_table(original)} IN EXCLUSIVE MODE NOWAIT")
+        _business_metadata(cursor, original, source=kind == "source", flow=flow)
+        _state(cursor, original, state)
+        if _exists(cursor, backup) != 0:
+            report.update(stage="retain_backup", preexisting=True)
+            _permanent_table(cursor, backup)
+            cursor.execute(f"LOCK TABLE {_table(backup)} IN SHARE MODE NOWAIT")
+            _backup(cursor, flow, source=kind == "source", run=run, state=state, compare_current=True)
+            report["counts"] = {"rows": _state(cursor, backup, state)["rows"]}
+            report.update(status="passed", stage="completed", error_code=None, created=False)
+        else:
+            columns = _backup_columns(flow, source=kind == "source")
+            report.update(stage="create_backup", ddl_attempted=True, object_may_exist=True)
+            cursor.execute(f"CREATE TABLE {_table(backup)} ({_backup_ddl(flow, source=kind == 'source')})")
+            _permanent_table(cursor, backup)
+            cursor.execute(f"LOCK TABLE {_table(backup)} IN EXCLUSIVE MODE NOWAIT")
+            report.update(stage="copy_backup", dml_attempted=True)
+            projection = _columns(columns)
+            cursor.execute(
+                f"INSERT INTO {_table(backup)} ({projection}) SELECT {projection} FROM {_table(original)}"
+            )
+            expected = {"empty": 0, "seed": 3, "changed": 4}[state]
+            _need(type(cursor.rowcount) is int and cursor.rowcount == expected, "AffectedCountMismatch")
+            _backup(cursor, flow, source=kind == "source", run=run, state=state, compare_current=True)
+            report["counts"] = {"rows": expected}
+            report.update(stage="commit", commit_attempted=True)
+            resources[0][0].commit()
+            report["commit_completed"] = True
+            report.update(status="passed", stage="completed", error_code=None, created=True)
+    return report
+
+
 def mutate_source(flow: str, writer_factory: Factory, source_reader_factory: Factory, *,
                   approved: object = False, approval_scope: object = None) -> dict[str, Any]:
     """Exactly one update + insert, after fixed source/target R2 backup comparisons."""
@@ -371,10 +457,16 @@ def verify_flow(flow: str, run: int, phase: str, reader_factory: Factory, source
                 approved: object = False, approval_scope: object = None) -> dict[str, Any]:
     """Read-only before/after evidence; never authorizes or invokes a target run."""
     report = _report("verify_flow")
-    if not _authorize(report, flow, approved, approval_scope, "verify_flow"):
+    if approved is not True or not isinstance(flow, str) or flow not in _FLOWS:
         return report
     if type(run) is not int or run not in (1, 2, 3) or phase not in ("before_run", "after_run"):
         report["error_code"] = "InvalidCheckpoint"
+        return report
+    label = "before" if phase == "before_run" else "after"
+    suffix = "verify_flow"
+    if approval_scope == f"odi81_{flow.lower()}_verify_{label}_r{run}":
+        suffix = f"verify_{label}_r{run}"
+    if not _authorize(report, flow, approved, approval_scope, suffix):
         return report
     resources: list = []
     with _operation(report, resources):
@@ -383,6 +475,8 @@ def verify_flow(flow: str, run: int, phase: str, reader_factory: Factory, source
         _reader_check(source_reader_factory, flow, report, state=state)
         report["stage"] = "snapshot_verification"
         cursor = _open(reader_factory, report, resources, readonly=True)
+        # A disagreement after the reader opens is a failed witness, not a preflight block.
+        report["verification_failed"] = True
         source, target = _FLOWS[flow]
         _business_metadata(cursor, source, source=True, flow=flow)
         _business_metadata(cursor, target, source=False, flow=flow)

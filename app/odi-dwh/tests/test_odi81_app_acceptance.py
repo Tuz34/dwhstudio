@@ -124,17 +124,20 @@ def test_cli_does_not_run_live_on_import():
 
 
 @pytest.mark.parametrize("flow", ["F1", "F2", "F3"])
-def test_legacy_flow_stops_at_the_app_contract_gap(db, flow):
-    _client, result = run(db, flow)
-    assert result["calls"] == ["prepare_source", "app_generate"]
-    assert result["error_code"] == "app_target_contract_gap"
-    assert result["downstream_stopped"] is True
-    assert result["http_log"] == []
-    assert result["full_target_snapshot_equal"] is False
+def test_classic_requests_do_not_use_the_scd2_contract(flow):
+    body = driver.classic_generate_body(flow)
+    assert body["engine"] == "classic" and body["approved"] is True
+    assert body["params"]["context"] == "GLOBAL"
+    assert "natural_key" not in body["params"] and "exec_user" not in body
+    assert driver.CLASSIC_GENERATE_PATH == "/api/mapping/generate"
+    assert driver.CLASSIC_GENERATE_PATH != driver.GENERATE_PATH
+    run_request = driver.classic_run_body(flow, "GLOBAL")
+    assert run_request["truncate_target_table"] is (flow == "F2")
+    assert run_request["scenario_version"] == "001"
+    assert run_request["mapping_name"] == f"MAP_ODI81_{flow}"
     assert isolated._FLOWS[flow][0] == {
         "F1": "ODI81_SRC_F1", "F2": "ODI81_SRC_F2", "F3": "ODI81_SRC_F3",
     }[flow]
-    redacted(result)
 
 
 @pytest.mark.parametrize("flow", ["F4", "F5"])
