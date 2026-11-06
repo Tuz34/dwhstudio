@@ -313,6 +313,27 @@ def encode_image(image: Mapping[str, str]) -> str:
     return ",".join(f"{column}={image[column]}" for column in AUDIT_COLUMNS)
 
 
+def decode_image(text: object) -> dict[str, str] | None:
+    """Strict inverse of ``encode_image``; any non-canonical text is ``None``.
+
+    Exactly the four audit columns in their fixed order, each with one of the two
+    role values, and byte-for-byte the canonical encoding (no whitespace, case or
+    separator variants).
+    """
+    if type(text) is not str:
+        return None
+    pairs = text.split(",")
+    if len(pairs) != len(AUDIT_COLUMNS):
+        return None
+    image: dict[str, str] = {}
+    for column, pair in zip(AUDIT_COLUMNS, pairs):
+        name, separator, role = pair.partition("=")
+        if separator != "=" or name != column or role not in _ROLE_VALUES:
+            return None
+        image[column] = role
+    return image if encode_image(image) == text else None
+
+
 def _base(action: object, status: str) -> dict[str, Any]:
     return {
         "tool": TOOL,
