@@ -243,11 +243,11 @@ def run_configured_stock_cutover(*, live: object = False, approvals: object = No
         return _base()
     import oracledb
 
-    from config import ORACLE_DSN, ORACLE_PASSWORD, ORACLE_USER
+    from config import TARGET_ORACLE_DSN, TARGET_ORACLE_PASSWORD, TARGET_ORACLE_USER
     from odi_orchestrator import OdiOrchestrator
 
     def factory() -> Any:
-        return oracledb.connect(user=ORACLE_USER, password=ORACLE_PASSWORD, dsn=ORACLE_DSN)
+        return oracledb.connect(user=TARGET_ORACLE_USER, password=TARGET_ORACLE_PASSWORD, dsn=TARGET_ORACLE_DSN)
 
     return execute_stock_cutover(connection_factory=factory, orchestrator=OdiOrchestrator(), live=live,
         approvals=approvals, reviews=reviews, exclusive_operator_attested=exclusive_operator_attested, receipt_dir=receipt_dir)

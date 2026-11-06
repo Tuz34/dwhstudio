@@ -78,17 +78,18 @@ class Cursor:
     def execute(self, sql, params=None):
         world = self.connection.world
         world.log.append(sql)
+        assert re.search(r":table\b", sql, re.IGNORECASE) is None, "ORA-01745 reserved bind name"
         assert not re.search(r'\b(DROP|DELETE|TRUNCATE|ALTER|INSERT|UPDATE)\b', sql)
         if sql == "SET TRANSACTION READ ONLY":
             return
         if "SYS_CONTEXT" in sql:
             self.rows = [(0 if world.fail == "owner" else 1,)]
         elif "FROM ALL_OBJECTS" in sql or "FROM ALL_TABLES" in sql:
-            self.rows = [(world.exists(params["table"]),)]
+            self.rows = [(world.exists(params["table_name"]),)]
         elif "FROM ALL_CONSTRAINTS" in sql:
             self.rows = [(0 if world.fail == "pk" else 1,)]
         elif "FROM ALL_TAB_COLUMNS" in sql:
-            table = params["table"]
+            table = params["table_name"]
             if sql.startswith("SELECT COUNT(*)"):
                 self.rows = [(24 if table == "ODI68_ODS_PRODUCTS_BKP" else 26,)]
             else:
@@ -164,6 +165,14 @@ def test_create_then_retained_verify_full_snapshot(world):
     assert report["created_absent_only"] is False and report["full_snapshot_equal"] is True
     assert report["counts"]["backup_rows"] == 72
     assert all(connection.events == ["rollback", "cursor_close", "connection_close"] for connection in world.connections)
+
+
+def test_checkpoint_create_and_verify_avoid_oracle_reserved_bind_names(world):
+    assert create(world)["status"] == "passed"
+    assert checkpoint.verify_stock_checkpoint(world.factory)["status"] == "passed"
+    assert any("FROM ALL_OBJECTS" in sql for sql in world.log)
+    assert any("FROM ALL_TABLES" in sql for sql in world.log)
+    assert any("FROM ALL_TAB_COLUMNS" in sql for sql in world.log)
 
 
 def test_creator_does_not_replace_an_existing_backup(world):
