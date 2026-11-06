@@ -157,6 +157,36 @@ def test_configured_adapter_must_gate_before_constructing_orchestrator(monkeypat
     assert result["status"] == "blocked" and calls == []
 
 
+def test_configured_adapter_uses_target_connection_not_default_pool(monkeypatch, tmp_path):
+    import config
+    import oracledb
+
+    target = {name: object() for name in ("user", "password", "dsn")}
+    for name, value in target.items():
+        monkeypatch.setattr(config, "TARGET_ORACLE_" + name.upper(), value)
+        monkeypatch.setattr(config, "ORACLE_" + name.upper(), object())
+    calls = []
+    connection = object()
+
+    def connect(**kwargs):
+        calls.append(kwargs)
+        return connection
+
+    def execute(**kwargs):
+        assert kwargs["connection_factory"]() is connection
+        return {"status": "passed"}
+
+    monkeypatch.setattr(oracledb, "connect", connect)
+    monkeypatch.setattr(odi_orchestrator, "OdiOrchestrator", lambda: object())
+    monkeypatch.setattr(cutover, "execute_stock_cutover", execute)
+    result = cutover.run_configured_stock_cutover(
+        live=True, approvals=cutover.full_approvals(), reviews=dict.fromkeys(cutover.REVIEWS, "approved"),
+        exclusive_operator_attested=True, receipt_dir=tmp_path,
+    )
+    assert result["status"] == "passed"
+    assert calls == [target]
+
+
 def test_unproven_execution_identity_blocks_before_any_database_connection(integration, tmp_path):
     state, orchestrator = integration
     state.fault = "identity"

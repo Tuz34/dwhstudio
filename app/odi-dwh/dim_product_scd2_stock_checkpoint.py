@@ -34,20 +34,20 @@ def _count(cursor: Any, sql: str, params: dict | None = None) -> int:
 
 def _exists(cursor: Any, table: str) -> int:
     _table(table)
-    return _count(cursor, "SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER='DWH' AND OBJECT_NAME=:table", {"table": table})
+    return _count(cursor, "SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER='DWH' AND OBJECT_NAME=:table_name", {"table_name": table})
 
 
 def _permanent(cursor: Any, table: str) -> None:
     _need(_exists(cursor, table) == 1)
-    _need(_count(cursor, "SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER='DWH' AND TABLE_NAME=:table AND TEMPORARY='N'",
-                 {"table": table}) == 1)
+    _need(_count(cursor, "SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER='DWH' AND TABLE_NAME=:table_name AND TEMPORARY='N'",
+                 {"table_name": table}) == 1)
 
 
 def _metadata(cursor: Any, table: str) -> list[tuple]:
     _table(table)
     cursor.execute("SELECT COLUMN_ID,COLUMN_NAME,DATA_TYPE,DATA_TYPE_OWNER,DATA_LENGTH,DATA_PRECISION,"
                    "DATA_SCALE,CHAR_USED,CHAR_LENGTH,NULLABLE FROM ALL_TAB_COLUMNS "
-                   "WHERE OWNER='DWH' AND TABLE_NAME=:table ORDER BY COLUMN_ID", {"table": table})
+                   "WHERE OWNER='DWH' AND TABLE_NAME=:table_name ORDER BY COLUMN_ID", {"table_name": table})
     rows = [tuple(row) for row in cursor.fetchall()]
     expected = expected_column_metadata_rows()
     _need(len(rows) == len(expected) == 26)
@@ -66,8 +66,8 @@ def _stock(cursor: Any) -> dict[str, int]:
     for table in ("DIM_PRODUCT", "ODS_SH_PRODUCTS", "ODI68_ODS_PRODUCTS_BKP"):
         _permanent(cursor, table)
     _metadata(cursor, "DIM_PRODUCT")
-    _need(_count(cursor, "SELECT COUNT(*) FROM ALL_TAB_COLUMNS WHERE OWNER='DWH' AND TABLE_NAME=:table",
-                 {"table": "ODI68_ODS_PRODUCTS_BKP"}) == 24)
+    _need(_count(cursor, "SELECT COUNT(*) FROM ALL_TAB_COLUMNS WHERE OWNER='DWH' AND TABLE_NAME=:table_name",
+                 {"table_name": "ODI68_ODS_PRODUCTS_BKP"}) == 24)
     _need(_count(cursor, 'SELECT COUNT(*) FROM "DWH"."ODI68_ODS_PRODUCTS_BKP"') == 0)
     _need(_count(cursor, """SELECT COUNT(*) FROM ALL_CONSTRAINTS c WHERE c.OWNER='DWH'
         AND c.TABLE_NAME='DIM_PRODUCT' AND c.CONSTRAINT_TYPE='P' AND c.STATUS='ENABLED'
