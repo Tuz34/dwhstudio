@@ -54,7 +54,11 @@ def _metadata(cursor: Any, table: str) -> list[tuple]:
     for ordinal, (row, column) in enumerate(zip(rows, expected), 1):
         _need(len(row) == 10 and type(row[0]) is int and row[0] == ordinal)
         _need(row[3] is None and row[9] in {"Y", "N"})
-        _need((row[1], row[2], row[4], row[5], row[6]) == column[:5])
+        # Logical unspecified sizes differ from Oracle's physical dictionary dimensions.
+        storage_length = column[2] if column[2] is not None else {"NUMBER": 22, "DATE": 7, "TIMESTAMP(6)": 11}[column[1]]
+        storage_scale = 6 if column[1] == "TIMESTAMP(6)" else column[4]
+        _need((row[1], row[2], row[4], row[5], row[6]) ==
+              (column[0], column[1], storage_length, column[3], storage_scale))
         if table == "DIM_PRODUCT":
             _need(row[9] == column[5])
         if row[2] in {"VARCHAR2", "CHAR"}:

@@ -96,6 +96,8 @@ class Cursor:
                 self.rows = []
                 for ordinal, row in enumerate(expected_column_metadata_rows(), 1):
                     name, kind, length, precision, scale, nullable = row
+                    length = {"NUMBER": 22, "DATE": 7, "TIMESTAMP(6)": 11}.get(kind, length)
+                    scale = 6 if kind == "TIMESTAMP(6)" else scale
                     used, chars = ("B", length) if kind in {"VARCHAR2", "CHAR"} else (None, 0)
                     self.rows.append((ordinal, name, kind, None, length, precision, scale, used, chars, nullable))
                 if world.drift and table == checkpoint.BACKUP_TABLE:
@@ -173,6 +175,45 @@ def test_checkpoint_create_and_verify_avoid_oracle_reserved_bind_names(world):
     assert any("FROM ALL_OBJECTS" in sql for sql in world.log)
     assert any("FROM ALL_TABLES" in sql for sql in world.log)
     assert any("FROM ALL_TAB_COLUMNS" in sql for sql in world.log)
+
+
+def test_native_oracle_storage_dimensions_create_and_verify(world):
+    rows = checkpoint._metadata(world.factory().cursor(), "DIM_PRODUCT")
+    columns = {row[1]: row for row in rows}
+    assert columns["PRODUCT_SK"][4] == 22
+    assert columns["EFFECTIVE_FROM"][4] == 7
+    assert (columns["INSERT_DATE"][4], columns["INSERT_DATE"][6]) == (11, 6)
+    assert create(world)["status"] == "passed"
+    assert checkpoint.verify_stock_checkpoint(world.factory)["full_snapshot_equal"] is True
+
+
+@pytest.mark.parametrize("column,field,value", [
+    ("PRODUCT_SK", 4, 23),
+    ("EFFECTIVE_FROM", 4, 8),
+    ("INSERT_DATE", 4, 12),
+    ("INSERT_DATE", 6, 5),
+    ("PROD_ID", 5, 7),
+    ("PROD_LIST_PRICE", 6, 3),
+    ("PROD_NAME", 7, "C"),
+    ("PROD_NAME", 8, 51),
+    ("PRODUCT_SK", 9, "Y"),
+    ("PRODUCT_SK", 3, "OTHER"),
+])
+def test_physical_metadata_drift_blocks_before_checkpoint_ddl(world, monkeypatch, column, field, value):
+    original = Cursor.execute
+
+    def execute(cursor, sql, params=None):
+        original(cursor, sql, params)
+        if sql.startswith("SELECT COLUMN_ID") and params["table_name"] == "DIM_PRODUCT":
+            cursor.rows = [
+                (*row[:field], value, *row[field + 1:]) if row[1] == column else row
+                for row in cursor.rows
+            ]
+
+    monkeypatch.setattr(Cursor, "execute", execute)
+    report = create(world)
+    assert report["status"] != "passed" and report["ddl_attempted"] is False
+    assert not any(sql.startswith("CREATE TABLE") for sql in world.log)
 
 
 def test_creator_does_not_replace_an_existing_backup(world):
