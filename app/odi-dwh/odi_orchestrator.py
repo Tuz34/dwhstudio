@@ -130,6 +130,17 @@ _PARAM_KEY_RE   = re.compile(r'^[a-zA-Z0-9._-]+$')
 _PARAM_VAL_RE   = re.compile(r'^[a-zA-Z0-9._\-/\\ :,()#]+$')
 # Extended regex for expression values (=, ;, ', ||, CASE WHEN, LIKE '%X%', !=, &, [], etc.)
 _EXPR_VAL_RE    = re.compile(r"^[a-zA-Z0-9._\-/\\ :,()#=;'|*+<>%!&\[\]{}\"]+$")
+# ODI-87: the only COLUMN=ROLE transport. One script, one key, strict canonical decode.
+_AUDIT_ROLE_IMAGE_SCRIPT = "dim_product_audit_role_repair.groovy"
+_AUDIT_ROLE_IMAGE_KEY = "odi.audit.expected_before"
+
+
+def _audit_role_image_valid(value: object) -> bool:
+    from dim_product_audit_role_repair import decode_image
+
+    return decode_image(value) is not None
+
+
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
 _SCD2_ERROR_KEYS = frozenset(
     {
@@ -579,6 +590,10 @@ class OdiOrchestrator:
                 return "Hata: ODI Groovy action blocked. error_type=SecretTransportRejected"
             if not _PARAM_KEY_RE.match(key_text):
                 return "Hata: ODI Groovy action blocked. error_type=InvalidParameterKey"
+            if script_name == _AUDIT_ROLE_IMAGE_SCRIPT and type(key) is str and key == _AUDIT_ROLE_IMAGE_KEY:
+                if not _audit_role_image_valid(val):
+                    return "Hata: ODI Groovy action blocked. error_type=InvalidParameterValue"
+                continue
             val_regex = (
                 _EXPR_VAL_RE
                 if key in ("odi.expressions", "odi.join_condition", "odi.filter", "odi.filter_condition")
