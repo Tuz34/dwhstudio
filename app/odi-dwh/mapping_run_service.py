@@ -6,7 +6,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, TypedDict
 
+import oracledb
+
 import remote_run_contract
+import repository_write_contract
 
 
 class MappingRunSuccess(TypedDict):
@@ -47,13 +50,30 @@ class MappingRunOutcome:
 
 @dataclass
 class RemoteRunPhase:
-    """Set by the remote scenario call. An exception is not evidence of this phase."""
+    """Request-local phase. A repository write and the remote call set it explicitly."""
 
     attempted: bool = False
+    kind: str = ""
     batch_id: str = ""
     scenario_name: str = ""
     remote: dict[str, Any] | None = None
     persist_failed: bool = False
+    options: MappingRunOptions | None = None
+
+    def response_for_escape(self, exc: BaseException) -> MappingRunOutcome | None:
+        if self.options is None:
+            return None
+        return preserved_remote_outcome(self.options, self, exc)
+
+
+_AUDIT_WRITE_ERRORS = (oracledb.Error, OSError)
+_PROGRAMMING_FAULTS = (AttributeError, KeyError, TypeError)
+_HISTORY_WARNINGS = {
+    "SUCCESS": "The run completed but its history record could not be saved.",
+    "failed": "The run failed but its history record could not be saved.",
+    "blocked": "The run was blocked but its history record could not be saved.",
+    "unknown": "The run outcome is unknown but its history record could not be saved.",
+}
 
 
 # ODI-87: temporary gate on this generic entry only. Low-level runners are not covered.
@@ -143,6 +163,19 @@ def _state_payload(
     }
 
 
+def _explicitly_committed(result: Any) -> bool:
+    return getattr(result, "committed", None) is True
+
+
+def _log_persist_failure(app_module: Any, batch_id: str, options: MappingRunOptions, exc: BaseException) -> None:
+    app_module.logger.error(
+        "Mapping run state persist failed (batch=%s mapping=%s): %s",
+        batch_id,
+        options.mapping_name,
+        type(exc).__name__,
+    )
+
+
 def _persist_run_state(
     app_module: Any,
     options: MappingRunOptions,
@@ -155,27 +188,36 @@ def _persist_run_state(
     *,
     surface: bool = False,
 ) -> bool:
-    # Pre-run callers keep today's escape if redaction itself fails. Post-run
-    # callers pass surface=True so that failure stays on the known outcome.
+    """Return True only when the audit row was committed.
+
+    Post-run callers pass surface=True. A database or OS failure then returns
+    False. Building or redacting the state lets programming faults propagate.
+    A close error after COMMIT still counts as committed.
+    """
     safe_error = None
+    result = None
     try:
         safe_error = app_module.redact_sensitive_text(str(error or ""), max_len=2000)
         state = _state_payload(
             options, batch_id, scenario_name, current_step, overall_status, completed_steps, safe_error
         )
         with app_module.MappingStateManager() as manager:
-            manager.upsert_state(state, thread_id=batch_id)
-    except Exception as exc:
-        if safe_error is None and not surface:
-            raise
-        app_module.logger.error(
-            "Mapping run state persist failed (batch=%s mapping=%s): %s",
-            batch_id,
-            options.mapping_name,
-            type(exc).__name__,
-        )
+            result = manager.upsert_state(state, thread_id=batch_id)
+    except _AUDIT_WRITE_ERRORS as exc:
+        if _explicitly_committed(result):
+            return True
+        _log_persist_failure(app_module, batch_id, options, exc)
         return False
-    return True
+    except Exception as exc:
+        if _explicitly_committed(result):
+            return True
+        if surface or safe_error is None or isinstance(exc, _PROGRAMMING_FAULTS):
+            raise
+        _log_persist_failure(app_module, batch_id, options, exc)
+        return False
+    if result is None:
+        return True
+    return _explicitly_committed(result)
 
 
 def _create_failure_alert(
@@ -291,6 +333,7 @@ def _begin_remote_run(
     """Mark the remote call, then invoke it. The marker is not inferred later."""
     from odi_orchestrator import groovy_is_approved
 
+    phase.kind = "remote"
     phase.attempted = True
     phase.batch_id = batch_id
     phase.scenario_name = scenario_name
@@ -326,28 +369,52 @@ def _remote_run_payload(
         code = 504 if remote.get("error_code") == "RemoteTimeout" else 502
     if persist_failed:
         payload["state_persist_failed"] = True
+        payload["warning"] = _HISTORY_WARNINGS[str(payload["status"])]
     return payload, code
 
 
-def preserved_remote_outcome(options: MappingRunOptions, phase: RemoteRunPhase) -> MappingRunOutcome | None:
-    """Return the known remote outcome when post-run work raises after the call."""
-    if not phase.attempted:
-        return None
-    remote = phase.remote
-    if isinstance(remote, dict):
-        payload, code = _remote_run_payload(
-            options, phase.batch_id, phase.scenario_name, remote, persist_failed=phase.persist_failed,
+def preserved_remote_outcome(
+    options: MappingRunOptions,
+    phase: RemoteRunPhase,
+    exc: BaseException | None = None,
+) -> MappingRunOutcome | None:
+    """Keep a marked outcome when later work raises. Unmarked calls return None."""
+    if phase.attempted:
+        remote = phase.remote
+        if isinstance(remote, dict):
+            payload, code = _remote_run_payload(
+                options, phase.batch_id, phase.scenario_name, remote, persist_failed=phase.persist_failed,
+            )
+            return MappingRunOutcome(payload, code)
+        return MappingRunOutcome(
+            {
+                "status": "unknown",
+                "batch_id": phase.batch_id,
+                "run_may_have_started": True,
+                "outcome_unknown": True,
+            },
+            502,
         )
-        return MappingRunOutcome(payload, code)
-    return MappingRunOutcome(
-        {
-            "status": "unknown",
-            "batch_id": phase.batch_id,
-            "run_may_have_started": True,
-            "outcome_unknown": True,
-        },
-        502,
-    )
+    if phase.kind == "repository" and exc is not None:
+        return MappingRunOutcome(
+            {
+                "batch_id": phase.batch_id,
+                "status": "repository_outcome_unknown",
+                "repository_write_may_have_happened": True,
+                "run_may_have_started": False,
+                "outcome_unknown": True,
+                "error": "mapping run failed.",
+                "error_type": type(exc).__name__,
+            },
+            500,
+        )
+    return None
+
+
+def _mark_repository_write(phase: RemoteRunPhase, batch_id: str, scenario_name: str) -> None:
+    phase.kind = "repository"
+    phase.batch_id = batch_id
+    phase.scenario_name = scenario_name
 
 
 def execute_mapping_run(
@@ -355,6 +422,8 @@ def execute_mapping_run(
 ) -> MappingRunOutcome:
     if phase is None:
         phase = RemoteRunPhase()
+    phase.options = options
+    repository_write_contract.bind_request_phase(phase)
     # Same normalization as the route. Runs before any import, construction or state write.
     if str(options.mapping_name).strip().upper() == _CUTOVER_GATED_MAPPING:
         return MappingRunOutcome({"status": _CUTOVER_GATE_STATUS, "error": _CUTOVER_GATE_ERROR}, 409)
@@ -372,6 +441,7 @@ def execute_mapping_run(
         return MappingRunOutcome({"status": "blocked", "remote": health},
                                  400 if health["error_code"] == "ApprovalRequired" else 503)
 
+    _mark_repository_write(phase, batch_id, scenario_name)
     option_result = orchestrator.update_mapping(
         mapping_name=options.mapping_name,
         operation="update_km",
@@ -389,6 +459,7 @@ def execute_mapping_run(
         )
     completed_steps.append("update_km")
 
+    _mark_repository_write(phase, batch_id, scenario_name)
     generation_result = orchestrator.generate_scenario_metadata(
         approved=groovy_is_approved(), scenario_name=scenario_name,
         mapping_name=options.mapping_name, version=options.version,

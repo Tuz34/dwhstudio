@@ -230,7 +230,7 @@ def api_mapping_run():
             outcome = execute_mapping_run(app_module, options, phase)
         return jsonify(outcome.payload), outcome.status_code
     except Exception as exc:
-        preserved = preserved_remote_outcome(options, phase)
+        preserved = preserved_remote_outcome(options, phase, exc)
         if preserved is None:
             return redacted_write_error("mapping run", exc)
         app_module.logger.error("mapping run outcome preserved: %s", type(exc).__name__)

@@ -16,6 +16,7 @@ import oracledb
 
 import execution_identity
 import remote_run_contract
+import repository_write_contract
 import scd2_builder
 import scd2_odi
 import scd2_postflight
@@ -120,12 +121,14 @@ def plan_preview(body: Mapping[str, Any], services: Scd2Services) -> tuple[dict[
 
 
 _EFFECT_FLAGS = ("side_effects", "target_created", "sequence_created")
-_EFFECT_COUNTER_SUFFIXES = ("_applied", "_created", "_changed")
+# Integer counters that mean this flow applied a write. Read counts are not included.
+_EFFECT_COUNTERS = frozenset({"grants_applied"})
 
 
 def _positive_effect_counter(step: Mapping[str, Any]) -> bool:
-    for key, value in step.items():
-        if type(value) is int and value > 0 and str(key).endswith(_EFFECT_COUNTER_SUFFIXES):
+    for key in _EFFECT_COUNTERS:
+        value = step.get(key)
+        if type(value) is int and value > 0:
             return True
     return False
 
@@ -202,6 +205,7 @@ def generate(
     body: Mapping[str, Any], services: Scd2Services, *, approved: object, phase: Any = None,
 ) -> tuple[dict[str, Any], int]:
     """Approved flow: probe -> target DDL -> datastore -> mapping -> scenario."""
+    repository_write_contract.bind_request_phase(phase)
     if approved is not True:
         return {"status": "blocked_until_approval"}, 400
     plan, _origin, error = _build_plan(body, services, allow_request_columns=False)
@@ -372,6 +376,7 @@ def run(
     body: Mapping[str, Any], services: Scd2Services, *, approved: object, phase: Any = None,
 ) -> tuple[dict[str, Any], int]:
     """Approved flow: guards -> scenario run -> count-only postflight."""
+    repository_write_contract.bind_request_phase(phase)
     if approved is not True:
         return {"status": "blocked_until_approval"}, 400
     try:

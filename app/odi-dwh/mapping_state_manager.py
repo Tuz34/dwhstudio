@@ -8,6 +8,7 @@ in-memory LangGraph checkpoints.
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -16,6 +17,14 @@ import oracledb
 from config import ORACLE_DSN, ORACLE_PASSWORD, ORACLE_USER
 
 logger = logging.getLogger("mapping_state_manager")
+
+
+@dataclass(frozen=True)
+class StateWriteResult:
+    """Whether the audit row was committed. Close errors do not change it."""
+
+    persisted: bool
+    committed: bool
 
 
 _SENSITIVE_PATTERNS = [
@@ -289,10 +298,10 @@ class MappingStateManager:
         finally:
             cursor.close()
 
-    def upsert_state(self, state: dict[str, Any], thread_id: str | None = None) -> None:
+    def upsert_state(self, state: dict[str, Any], thread_id: str | None = None) -> StateWriteResult:
         batch_id = str(state.get("batch_id") or "").strip()
         if not batch_id:
-            return
+            return StateWriteResult(persisted=False, committed=False)
 
         self.ensure_table()
         conn = self._get_conn()
@@ -319,6 +328,7 @@ class MappingStateManager:
             "error_message": persisted_error,
             "state_json": _state_json(persisted_state),
         }
+        committed = False
         try:
             cursor.execute("""
                 MERGE INTO AUDIT_USER.MAPPING_RUN_STATE t
@@ -344,14 +354,22 @@ class MappingStateManager:
                 )
             """, payload)
             conn.commit()
+            committed = True
             logger.info("MAPPING_RUN_STATE written: batch=%s mapping=%s status=%s step=%s",
                         batch_id, mapping_name, normalized_status, state.get("current_step"))
-        except Exception as exc:
+        except (oracledb.Error, OSError) as exc:
             # Include the full error for diagnosis — do not hide permission/connection/schema issues
             logger.error("MAPPING_RUN_STATE write failed (batch=%s mapping=%s): %s",
                          batch_id, mapping_name, exc, exc_info=True)
         finally:
-            cursor.close()
+            try:
+                cursor.close()
+            except (oracledb.Error, OSError) as exc:
+                # A committed row stays committed when only the cursor close fails.
+                logger.warning(
+                    "MAPPING_RUN_STATE cursor close failed (batch=%s): %s",
+                    batch_id, type(exc).__name__,
+                )
 
         # Write to RAG: error_patterns on failure, mapping_runs on success (best effort)
         try:
@@ -362,6 +380,7 @@ class MappingStateManager:
                 _push_success_to_rag(state, normalized_status, batch_id, completed_text)
         except Exception as exc:
             logger.debug("RAG write skipped: %s", exc)
+        return StateWriteResult(persisted=committed, committed=committed)
 
     def get_by_mapping(self, mapping_name: str) -> dict[str, Any] | None:
         conn = self._get_conn()

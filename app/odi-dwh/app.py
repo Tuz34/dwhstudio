@@ -462,6 +462,27 @@ from ai_helpers import (
     _truncate_mapping_intent_answer,
 )
 
+def _request_write_phase() -> object:
+    from flask import g
+
+    if not has_request_context():
+        return None
+    return getattr(g, "write_outcome_phase", None)
+
+
+def _escaped_write_outcome(phase: object, exc: BaseException) -> object:
+    responder = getattr(phase, "response_for_escape", None)
+    if not callable(responder):
+        return None
+    return responder(exc)
+
+
+def _phase_needs_outcome_unknown(phase: object) -> bool:
+    if phase is None or callable(getattr(phase, "response_for_escape", None)):
+        return False
+    return getattr(phase, "attempted", False) is True
+
+
 @app.errorhandler(404)
 @app.errorhandler(500)
 def catch_all(e):
@@ -471,10 +492,19 @@ def catch_all(e):
         error_type = type(original_error).__name__
         logger.error("Unhandled request failed: %s", error_type)
         if request.path.startswith("/api/"):
-            return jsonify({
+            phase = _request_write_phase()
+            escaped = _escaped_write_outcome(phase, original_error)
+            if escaped is not None:
+                return jsonify(escaped.payload), escaped.status_code
+            body = {
                 "error": "Internal server error.",
                 "error_type": error_type,
-            }), 500
+            }
+            if _phase_needs_outcome_unknown(phase):
+                body["status"] = "outcome_unknown"
+                body["outcome_unknown"] = True
+                body["manual_review_required"] = True
+            return jsonify(body), 500
         return "Internal server error.", 500
 
     # Unknown non-API paths fall back to the React application for client-side routing.
