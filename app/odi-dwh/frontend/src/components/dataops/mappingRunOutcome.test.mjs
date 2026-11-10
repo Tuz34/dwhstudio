@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   HISTORY_CHECK_TEXT,
+  HISTORY_NOT_SAVED_TEXT,
   MAY_HAVE_RUN_TEXT,
   NOT_REPORTED,
   WITHHELD_ERROR,
@@ -87,7 +88,7 @@ const TIMEOUT_REMOTE = {
 };
 
 const OUTCOME_KEYS = [
-  'batchId', 'context', 'counts', 'error', 'failedStep', 'generation', 'mapping',
+  'batchId', 'context', 'counts', 'error', 'failedStep', 'generation', 'historyNotSaved', 'mapping',
   'outcomeClass', 'overallStatus', 'requestedMapping', 'requestedRunMode', 'runMode',
   'scenarioName', 'scenarioVersion', 'sessionId', 'successful',
 ];
@@ -1071,4 +1072,97 @@ test('a contradictory body is unknown and a dropped session guard would misclass
   assert.equal(savedOk.outcomeClass, 'succeeded');
   assert.equal(savedOk.successful, true);
   assert.equal(savedOk.overallStatus, 'SUCCEEDED');
+});
+
+const SERVER_WARNING = 'not successful failed server warning that must stay hidden';
+
+function withPersistFlag(payload, flag = true) {
+  return { ...payload, state_persist_failed: flag, warning: SERVER_WARNING };
+}
+
+function assertNoPersistLeak(outcome, label) {
+  const badge = mappingRunBadge(outcome);
+  const toast = mappingRunToast(outcome, REQUEST.mapping_name);
+  const text = [rendered(outcome), badge.notice, badge.historyNotice, toast.message].join('\n');
+  assert.equal(text.includes(SERVER_WARNING), false, label);
+  assert.equal(text.includes('state_persist_failed'), false, label);
+}
+
+test('a true persist flag keeps a success and shows the fixed history notice', () => {
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: withPersistFlag(SUCCESS_PAYLOAD),
+    request: REQUEST_TRUNCATE,
+  });
+  assert.equal(outcome.outcomeClass, 'succeeded');
+  assert.equal(outcome.successful, true);
+  assert.equal(outcome.historyNotSaved, true);
+  const badge = mappingRunBadge(outcome);
+  assert.equal(badge.label, 'successful');
+  assert.equal(badge.notice, null);
+  assert.equal(badge.historyNotice, HISTORY_NOT_SAVED_TEXT);
+  const toast = mappingRunToast(outcome, REQUEST_TRUNCATE.mapping_name);
+  assert.equal(toast.type, 'success');
+  assert.equal(
+    toast.message,
+    'MAP_HR_EMPLOYEES_TO_ODS scenario ran successfully, but its history record could not be saved.',
+  );
+  assertNoPersistLeak(outcome, 'success');
+});
+
+test('a true persist flag leaves an unknown outcome unknown and still shows the notice', () => {
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: withPersistFlag({ status: 'unknown', remote: UNKNOWN_REMOTE, batch_id: 'RUN-UNK1' }),
+    request: REQUEST,
+  });
+  assertUnknownWording(outcome, REQUEST.mapping_name);
+  assert.equal(outcome.historyNotSaved, true);
+  const badge = mappingRunBadge(outcome);
+  assert.equal(badge.notice, MAY_HAVE_RUN_TEXT);
+  assert.equal(badge.historyNotice, HISTORY_NOT_SAVED_TEXT);
+  assert.equal(mappingRunToast(outcome, REQUEST.mapping_name).message, MAY_HAVE_RUN_TEXT);
+  assertNoPersistLeak(outcome, 'unknown');
+});
+
+test('a true persist flag leaves a resolved ERROR failed and still shows the notice', () => {
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: withPersistFlag({ status: 'failed', remote: FAILED_REMOTE, batch_id: 'RUN-001' }),
+    request: REQUEST,
+  });
+  assertFailedClass(outcome);
+  assert.equal(outcome.historyNotSaved, true);
+  assert.equal(outcome.error, 'ScenarioRunFailed');
+  assert.equal(mappingRunBadge(outcome).historyNotice, HISTORY_NOT_SAVED_TEXT);
+  const toast = mappingRunToast(outcome, REQUEST.mapping_name);
+  assert.equal(toast.type, 'error');
+  assert.equal(toast.message.includes('Scenario run failed'), true);
+  assert.equal(toast.message.includes('could not be saved'), false);
+  assertNoPersistLeak(outcome, 'resolved');
+});
+
+test('an absent, false, or string persist flag adds no history notice', () => {
+  const cases = [
+    ['absent', SUCCESS_PAYLOAD],
+    ['false', { ...SUCCESS_PAYLOAD, state_persist_failed: false, warning: SERVER_WARNING }],
+    ['string', { ...SUCCESS_PAYLOAD, state_persist_failed: 'true', warning: SERVER_WARNING }],
+    ['nested', { ...SUCCESS_PAYLOAD, remote: { ...DONE_REMOTE, state_persist_failed: true }, warning: SERVER_WARNING }],
+  ];
+  for (const [label, payload] of cases) {
+    const outcome = projectMappingRunOutcome({ httpStatus: 200, payload, request: REQUEST });
+    assert.equal(outcome.outcomeClass, 'succeeded', label);
+    assert.equal(outcome.successful, true, label);
+    assert.equal(outcome.historyNotSaved, false, label);
+    const badge = mappingRunBadge(outcome);
+    assert.equal(badge.historyNotice, null, label);
+    assert.equal(badge.notice, null, label);
+    assert.equal(
+      mappingRunToast(outcome, REQUEST.mapping_name).message,
+      'MAP_HR_EMPLOYEES_TO_ODS scenario ran successfully without target truncate.',
+      label,
+    );
+    assert.equal(rendered(outcome).includes(HISTORY_NOT_SAVED_TEXT), false, label);
+    assertNoPersistLeak(outcome, label);
+  }
 });

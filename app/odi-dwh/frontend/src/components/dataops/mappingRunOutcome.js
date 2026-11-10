@@ -16,6 +16,10 @@ export const WITHHELD_ERROR = 'The server reported an error; details are withhel
 export const HISTORY_CHECK_TEXT =
   'Check the run history for this mapping before trying again.';
 
+// Fixed panel copy. The server warning sentence is not shown.
+export const HISTORY_NOT_SAVED_TEXT =
+  'The run history record for this run could not be saved. The outcome shown here is what the server reported.';
+
 const SUCCESS_STATUSES = new Set(['SUCCESS', 'SUCCEEDED']);
 
 // Closed set from remote_run_contract.ERRORS.
@@ -483,6 +487,8 @@ export function projectMappingRunOutcome({
   return {
     outcomeClass,
     successful: outcomeClass === 'succeeded',
+    // Only a top-level boolean true. It does not change the class.
+    historyNotSaved: body?.state_persist_failed === true,
     generation: Number.isInteger(generation) ? generation : null,
     requestedMapping: requested.requestedMapping,
     requestedRunMode: requested.requestedRunMode,
@@ -530,21 +536,28 @@ export function mappingRunOutcomeLines(outcome) {
 }
 
 export function mappingRunBadge(outcome) {
+  const historyNotice = outcome?.historyNotSaved === true ? HISTORY_NOT_SAVED_TEXT : null;
   if (outcome?.outcomeClass === 'succeeded') {
-    return { label: 'successful', tone: 'success', notice: null };
+    return { label: 'successful', tone: 'success', notice: null, historyNotice };
   }
   if (outcome?.outcomeClass === 'unknown') {
-    return { label: 'unconfirmed', tone: 'warning', notice: MAY_HAVE_RUN_TEXT };
+    return { label: 'unconfirmed', tone: 'warning', notice: MAY_HAVE_RUN_TEXT, historyNotice };
   }
-  return { label: 'not successful', tone: 'failure', notice: null };
+  return { label: 'not successful', tone: 'failure', notice: null, historyNotice };
 }
 
 export function mappingRunToast(outcome, mappingName) {
   if (outcome?.outcomeClass === 'succeeded') {
-    const mode = outcome.requestedRunMode === 'truncated' ? 'with target truncate' : 'without target truncate';
     const name = typeof mappingName === 'string' && mappingName.trim()
       ? mappingName.trim()
       : outcome.requestedMapping;
+    if (outcome.historyNotSaved === true) {
+      return {
+        type: 'success',
+        message: `${name} scenario ran successfully, but its history record could not be saved.`,
+      };
+    }
+    const mode = outcome.requestedRunMode === 'truncated' ? 'with target truncate' : 'without target truncate';
     return { type: 'success', message: `${name} scenario ran successfully ${mode}.` };
   }
   if (outcome?.outcomeClass === 'unknown') {

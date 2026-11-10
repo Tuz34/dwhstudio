@@ -51,6 +51,9 @@ function LastRunPanel({ outcome, onClose, onRefresh }) {
           {badge.label}
         </span>
       </div>
+      {badge.historyNotice && (
+        <p className="mb-3 text-[10px] font-semibold leading-4 text-amber-800">{badge.historyNotice}</p>
+      )}
       {badge.notice && (
         <p className="mb-3 text-[10px] font-semibold leading-4 text-amber-800">{badge.notice}</p>
       )}
