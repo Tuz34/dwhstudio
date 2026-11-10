@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  HISTORY_CHECK_TEXT,
   MAY_HAVE_RUN_TEXT,
   NOT_REPORTED,
   WITHHELD_ERROR,
@@ -200,7 +201,7 @@ test('an HTTP failure body names the remote error code and not a session id', ()
   assert.equal(rendered(outcome).includes('ERROR'), false);
 });
 
-test('HTTP 200 with a non-success status is not successful', () => {
+test('HTTP 200 with an unrecognised status is unknown, including partial and an empty body', () => {
   const outcome = projectMappingRunOutcome({
     httpStatus: 200,
     payload: {
@@ -213,13 +214,20 @@ test('HTTP 200 with a non-success status is not successful', () => {
       current_step: 'generate_scenario',
       batch_id: 'RUN-PARTIAL1',
     },
+    request: REQUEST,
   });
-  assert.equal(outcome.successful, false);
+  assertUnknownWording(outcome, REQUEST.mapping_name);
   assert.equal(outcome.overallStatus, 'partial');
   assert.equal(outcome.failedStep, 'generate_scenario');
   assert.equal(outcome.runMode, 'kept rows');
   assert.equal(outcome.error, NOT_REPORTED);
-  assert.equal(rendered(outcome).includes('not successful'), true);
+  assert.equal(rendered(outcome).includes('not successful'), false);
+
+  const empty = projectMappingRunOutcome({ httpStatus: 200, payload: {}, request: REQUEST });
+  assertUnknownWording(empty, REQUEST.mapping_name);
+  assert.equal(empty.overallStatus, NOT_REPORTED);
+  assert.equal(mappingRunBadge(empty).label, 'unconfirmed');
+  assert.equal(mappingRunToast(empty, REQUEST.mapping_name).type, 'warning');
 });
 
 test('a success status still wins when an error string is also present', () => {
@@ -501,8 +509,9 @@ test('anomalous error text and arbitrary count keys are withheld', () => {
     request: REQUEST_TRUNCATE,
   });
   const text = rendered(outcome);
-  assert.equal(outcome.outcomeClass, 'failed');
+  assertUnknownWording(outcome, REQUEST_TRUNCATE.mapping_name);
   assert.equal(outcome.error, WITHHELD_ERROR);
+  assert.equal(outcome.error.includes(HISTORY_CHECK_TEXT), false);
   assert.equal(outcome.counts, NOT_REPORTED);
   for (const secret of ['customer_id', '123456', 'Loader.java', 'db.example.local', 'row_count', 'insert_count']) {
     assert.equal(text.includes(secret), false, secret);
@@ -513,7 +522,8 @@ test('anomalous error text and arbitrary count keys are withheld', () => {
     httpStatus: 500,
     payload: { error: leak, error_type: 'ValueError', status: 'RUN_FAILED' },
   });
-  assert.equal(typed.error, `${WITHHELD_ERROR} error_type=ValueError`);
+  assert.equal(typed.outcomeClass, 'unknown');
+  assert.equal(typed.error, `${WITHHELD_ERROR} ${HISTORY_CHECK_TEXT} error_type=ValueError`);
   assert.equal(rendered(typed).includes('customer_id'), false);
   assert.equal(rendered(typed).includes('Loader.java'), false);
 
@@ -521,6 +531,7 @@ test('anomalous error text and arbitrary count keys are withheld', () => {
     httpStatus: 502,
     payload: { status: 'failed', remote: { error_code: leak }, batch_id: 'RUN-LEAK2' },
   });
+  assert.equal(coded.outcomeClass, 'unknown');
   assert.equal(coded.error, WITHHELD_ERROR);
   assert.equal(rendered(coded).includes('customer_id'), false);
 });
@@ -638,4 +649,278 @@ test('a panel whose mapping is no longer in the list is removed', () => {
   assert.deepEqual(Object.keys(next), ['MAP_KEEP']);
   assert.equal(next.MAP_KEEP, keep);
   assert.equal(reconcileLastRuns(panels, ['MAP_KEEP', 'MAP_GONE']), panels);
+});
+
+function blockedRemote(errorCode, overrides = {}) {
+  return {
+    status: 'blocked',
+    error_code: errorCode,
+    run_may_have_started: false,
+    side_effects: false,
+    outcome_unknown: false,
+    session_status: null,
+    ...overrides,
+  };
+}
+
+function assertFailedClass(outcome) {
+  assert.equal(outcome.outcomeClass, 'failed');
+  assert.equal(outcome.successful, false);
+  const badge = mappingRunBadge(outcome);
+  const toast = mappingRunToast(outcome, 'MAP_HR_EMPLOYEES_TO_ODS');
+  assert.equal(badge.label, 'not successful');
+  assert.equal(badge.tone, 'failure');
+  assert.equal(badge.notice, null);
+  assert.equal(toast.type, 'error');
+  assert.equal(toast.message.includes(MAY_HAVE_RUN_TEXT), false);
+  assert.equal(rendered(outcome).includes(MAY_HAVE_RUN_TEXT), false);
+}
+
+test('a redacted 500 is unknown in the panel, badge and toast', () => {
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 500,
+    payload: { error: 'mapping run failed.', error_type: 'RuntimeError' },
+    thrown: { message: 'Service request failed.', status: 500 },
+    request: REQUEST,
+  });
+  assertUnknownWording(outcome, REQUEST.mapping_name);
+  assert.equal(mappingRunBadge(outcome).label, 'unconfirmed');
+  assert.equal(mappingRunToast(outcome, REQUEST.mapping_name).message, MAY_HAVE_RUN_TEXT);
+  assert.equal(outcome.batchId, NOT_REPORTED);
+  assert.equal(outcome.error, `${WITHHELD_ERROR} ${HISTORY_CHECK_TEXT} error_type=RuntimeError`);
+  const text = rendered(outcome);
+  assert.equal(text.includes('mapping run failed.'), false);
+  assert.equal(text.includes('Service request failed.'), false);
+  assert.equal(text.includes(HISTORY_CHECK_TEXT), true);
+});
+
+test('a withheld message with no batch id says to check run history', () => {
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 400,
+    payload: { error: 'Invalid context!' },
+    request: REQUEST,
+  });
+  assertUnknownWording(outcome, REQUEST.mapping_name);
+  assert.equal(outcome.batchId, NOT_REPORTED);
+  assert.equal(outcome.error, `${WITHHELD_ERROR} ${HISTORY_CHECK_TEXT}`);
+  assert.equal(rendered(outcome).includes('Invalid context!'), false);
+});
+
+test('each closed failed shape is failed, and a near-miss of each is unknown', () => {
+  const validation = [
+    'mapping_name is required.',
+    'Invalid mapping_name.',
+    'approved:true is required for ODI scenario run.',
+    'truncate_target_table must be selected as true or false before running a scenario.',
+    'Invalid scenario_version.',
+    'Invalid context.',
+  ];
+  for (const error of validation) {
+    const outcome = projectMappingRunOutcome({ httpStatus: 400, payload: { error }, request: REQUEST });
+    assertFailedClass(outcome);
+    assert.equal(outcome.error, error);
+    assert.equal(outcome.error.includes(HISTORY_CHECK_TEXT), false);
+    const near = projectMappingRunOutcome({ httpStatus: 500, payload: { error }, request: REQUEST });
+    assertUnknownWording(near, REQUEST.mapping_name);
+  }
+
+  const gate = projectMappingRunOutcome({ httpStatus: 409, payload: GATE_PAYLOAD, request: REQUEST });
+  assertFailedClass(gate);
+  assert.equal(gate.error, GATE_ERROR);
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 400,
+    payload: GATE_PAYLOAD,
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+
+  const ikmError = "The mapping's IKM does not expose the TRUNCATE_TARGET_TABLE option. Run with truncate_target_table=false or change the IKM.";
+  const ikm = projectMappingRunOutcome({
+    httpStatus: 409,
+    payload: { status: 'ikm_option_unsupported', error: ikmError, batch_id: 'RUN-IKM1' },
+    request: REQUEST,
+  });
+  assertFailedClass(ikm);
+  assert.equal(ikm.error, ikmError);
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 400,
+    payload: { status: 'ikm_option_unsupported', error: ikmError },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+
+  const optionUpdate = projectMappingRunOutcome({
+    httpStatus: 500,
+    payload: { error: 'Scenario option update failed.', batch_id: 'RUN-OPT1' },
+    request: REQUEST,
+  });
+  assertFailedClass(optionUpdate);
+  assert.equal(optionUpdate.error, 'Scenario option update failed.');
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 400,
+    payload: { error: 'Scenario option update failed.' },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+
+  const generation = projectMappingRunOutcome({
+    httpStatus: 400,
+    payload: { error: 'Scenario generation failed.', batch_id: 'RUN-GEN1' },
+    request: REQUEST,
+  });
+  assertFailedClass(generation);
+  assert.equal(generation.error, 'Scenario generation failed.');
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 500,
+    payload: { error: 'Scenario generation failed.', batch_id: 'RUN-GEN1' },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+
+  const healthCodes = [
+    [400, 'ApprovalRequired'],
+    [503, 'AgentConfigurationUnavailable'],
+    [503, 'AgentUnavailable'],
+    [503, 'RemoteProcessFailed'],
+    [503, 'RemoteOutputInvalid'],
+    [503, 'RemoteTimeout'],
+  ];
+  for (const [httpStatus, errorCode] of healthCodes) {
+    const outcome = projectMappingRunOutcome({
+      httpStatus,
+      payload: { status: 'blocked', remote: blockedRemote(errorCode) },
+      request: REQUEST,
+    });
+    assertFailedClass(outcome);
+    assert.equal(outcome.error, errorCode);
+    assert.equal(outcome.overallStatus, 'blocked');
+  }
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 503,
+    payload: { status: 'blocked', remote: blockedRemote('RemoteTimeout', { run_may_have_started: true }) },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 500,
+    payload: { status: 'blocked', remote: blockedRemote('ApprovalRequired') },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+
+  for (const errorCode of [
+    'InvalidRunIdentity',
+    'AgentConfigurationUnavailable',
+    'AgentUnavailable',
+    'ScenarioOwnershipUnavailable',
+    'RepositoryCleanupFailed',
+  ]) {
+    const outcome = projectMappingRunOutcome({
+      httpStatus: 502,
+      payload: { status: 'blocked', remote: blockedRemote(errorCode), batch_id: 'RUN-BLOCK1' },
+      request: REQUEST,
+    });
+    assertFailedClass(outcome);
+    assert.equal(outcome.error, errorCode);
+  }
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: { status: 'blocked', remote: blockedRemote('InvalidRunIdentity', { side_effects: true }) },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: { status: 'blocked', remote: blockedRemote('RemoteTimeout') },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+
+  const resolved = projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: { status: 'failed', remote: FAILED_REMOTE, batch_id: 'RUN-001' },
+    request: REQUEST,
+  });
+  assertFailedClass(resolved);
+  assert.equal(resolved.error, 'ScenarioRunFailed');
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 500,
+    payload: { status: 'failed', remote: FAILED_REMOTE, batch_id: 'RUN-001' },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: {
+      status: 'failed',
+      remote: { ...FAILED_REMOTE, outcome_unknown: true },
+      batch_id: 'RUN-001',
+    },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+
+  const persisted = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: { overall_status: 'RUN_FAILED', batch_id: 'RUN-001', current_step: 'run_scenario' },
+    request: REQUEST,
+  });
+  assertFailedClass(persisted);
+  assert.equal(persisted.overallStatus, 'RUN_FAILED');
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 500,
+    payload: { overall_status: 'RUN_FAILED', batch_id: 'RUN-001' },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: { overall_status: 'RUN_FAILED', outcome_unknown: true, batch_id: 'RUN-001' },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+  assertUnknownWording(projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: { status: 'failed', batch_id: 'RUN-BARE1' },
+    request: REQUEST,
+  }), REQUEST.mapping_name);
+});
+
+test('dotted versions and backend identifiers are displayed only inside the remote contract', () => {
+  const mapping = `M${'A'.repeat(89)}`;
+  const scenario = `S${'C'.repeat(93)}`;
+  const context = `C${'X'.repeat(127)}`;
+  assert.equal(mapping.length, 90);
+  assert.equal(scenario.length, 94);
+  assert.equal(context.length, 128);
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: {
+      ...SUCCESS_PAYLOAD,
+      mapping_name: mapping,
+      scenario,
+      version: '001.2',
+      context,
+    },
+  });
+  assert.equal(outcome.outcomeClass, 'succeeded');
+  assert.equal(outcome.mapping, mapping);
+  assert.equal(outcome.scenarioName, scenario);
+  assert.equal(outcome.scenarioVersion, '001.2');
+  assert.equal(outcome.context, context);
+  assert.equal(rendered(outcome).includes(mapping), true);
+  assert.equal(rendered(outcome).includes('001.2'), true);
+
+  const hidden = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: {
+      status: 'SUCCESS',
+      mapping_name: `M${'A'.repeat(128)}`,
+      scenario_name: 'MAP_HR.EMPLOYEES',
+      scenario: 'MAP_HR-EMPLOYEES',
+      scenario_version: '1234567890123',
+      version: '001/2',
+      context: 'GLOBAL/DEV',
+      remote: DONE_REMOTE,
+    },
+  });
+  assert.equal(`M${'A'.repeat(128)}`.length, 129);
+  assert.equal(hidden.outcomeClass, 'succeeded');
+  assert.equal(hidden.mapping, NOT_REPORTED);
+  assert.equal(hidden.scenarioName, NOT_REPORTED);
+  assert.equal(hidden.scenarioVersion, NOT_REPORTED);
+  assert.equal(hidden.context, NOT_REPORTED);
+  const hiddenText = rendered(hidden);
+  assert.equal(hiddenText.includes('MAP_HR.EMPLOYEES'), false);
+  assert.equal(hiddenText.includes('MAP_HR-EMPLOYEES'), false);
+  assert.equal(hiddenText.includes('GLOBAL/DEV'), false);
+  assert.equal(hiddenText.includes('1234567890123'), false);
 });

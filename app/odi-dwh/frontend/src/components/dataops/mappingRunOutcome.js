@@ -10,6 +10,12 @@ export const MAY_HAVE_RUN_TEXT =
 // Replacement for any error text that is not an allowlisted sentence or code.
 export const WITHHELD_ERROR = 'The server reported an error; details are withheld.';
 
+// Added when that replacement is all the operator has and the response carried
+// no batch id they can refresh. routes/mapping_write.py validation bodies and
+// routes/error_responses.py redacted 500s omit batch_id.
+export const HISTORY_CHECK_TEXT =
+  'Check the run history for this mapping before trying again.';
+
 const SUCCESS_STATUSES = new Set(['SUCCESS', 'SUCCEEDED']);
 
 // Closed set from remote_run_contract.ERRORS.
@@ -27,44 +33,97 @@ const REMOTE_ERROR_CODES = new Set([
   'RemoteTimeout',
 ]);
 
-// Fixed sentences emitted for POST /api/mapping/run. `error` is rendered only
-// when it is exactly one of these, or an allowlisted remote.error_code.
-// Anything else is replaced with WITHHELD_ERROR.
+// Closed `failed` set. Classification matches the whole shape
+// (HTTP status + status + flags + sentence or code), not one field.
+// Anything that is not a proven success and not in this set is `unknown`.
 //
-// Sources:
-// - routes/mapping_write.py api_mapping_run:
-//   "mapping_name is required.", "Invalid mapping_name.", and the
-//   validation_error strings from mapping_run_service.py below.
-// - app.py _approval_error, called by that route with action "ODI scenario run":
-//   "approved:true is required for ODI scenario run."
-// - mapping_run_service.py parse_required_bool / validate_mapping_run_options:
-//   "truncate_target_table must be selected as true or false before running a scenario.",
-//   "Invalid scenario_version.", "Invalid context."
-// - mapping_run_service.py _CUTOVER_GATE_ERROR (409 gate constant).
-// - mapping_run_service.py _failure_outcome public_error values:
-//   "Scenario option update failed.", "Scenario generation failed."
-// - mapping_run_service.py _unsupported_option_outcome. The option token is the
-//   only interpolation and matches [A-Z][A-Z0-9_]{0,63} (_unsupported_ikm_option).
-// - routes/error_responses.py redacted_error via redacted_write_error("mapping run"):
-//   "mapping run failed."
-const ALLOWED_ERRORS = new Set([
+// Sources for the shapes:
+// - routes/mapping_write.py:208-221 and app.py:196-199 (validation / approval 400)
+// - mapping_run_service.py:58-80 (validation sentences)
+// - mapping_run_service.py:50-55,266-267 (409 fixed-mapping gate)
+// - mapping_run_service.py:227-260 (409 IKM option unsupported)
+// - mapping_run_service.py:292-296 (500 "Scenario option update failed.")
+// - mapping_run_service.py:303-307 (400 "Scenario generation failed.")
+// - mapping_run_service.py:276-280 and remote_run_contract.py:32-37,85-100
+//   (health block: status blocked, remote.status blocked, three flags false;
+//   any error_code, including RemoteTimeout, because the health probe is pre-run)
+// - odi_automation/remote_agent_health.groovy:18-40 (health never starts a scenario)
+// - mapping_run_service.py:314-323 and remote_run_contract.py:96-100
+//   (502 run block and 502 resolved ERROR)
+// - odi_automation/run_scenario_remote.groovy:78-135 (run-block codes, before start)
+// - mapping_run_service.py:209-213,314-318 (persisted overall_status RUN_FAILED)
+// - routes/error_responses.py:9-16 (redacted 500 is NOT in this set)
+
+// Pre-run 400 sentences. The body is `{error}` with no status.
+const VALIDATION_ERRORS = [
   'mapping_name is required.',
   'Invalid mapping_name.',
   'approved:true is required for ODI scenario run.',
   'truncate_target_table must be selected as true or false before running a scenario.',
   'Invalid scenario_version.',
   'Invalid context.',
-  'The fixed DIM_PRODUCT mapping cannot run through the generic mapping run path until a separately reviewed cutover proof replaces this gate.',
-  'Scenario option update failed.',
-  'Scenario generation failed.',
-  'mapping run failed.',
-]);
+];
 
+// mapping_run_service.py:51-54
+const FIXED_GATE_STATUS = 'blocked_fixed_mapping_cutover_pending';
+const FIXED_GATE_ERROR = 'The fixed DIM_PRODUCT mapping cannot run through the generic mapping run path until a separately reviewed cutover proof replaces this gate.';
+
+// mapping_run_service.py:295 and :306. Different HTTP statuses.
+const OPTION_UPDATE_ERROR = 'Scenario option update failed.';
+const GENERATION_ERROR = 'Scenario generation failed.';
+
+// routes/error_responses.py:12 — known sentence, but not a proven pre-run failure.
+const REDACTED_RUN_ERROR = 'mapping run failed.';
+
+// mapping_run_service.py:245-247. Option token is the only interpolation.
 const IKM_ERROR = /^The mapping's IKM does not expose the [A-Z][A-Z0-9_]{0,63} option\. Run with truncate_target_table=false or change the IKM\.$/;
 
-// Identifier, UUID-like value, or short token. Dots and free text stay hidden.
+// Run block codes from the reviewer's table, emitted before the scenario starts
+// (run_scenario_remote.groovy:78-135; remote_run_contract.py blocked branch).
+const RUN_BLOCK_CODES = new Set([
+  'InvalidRunIdentity',
+  'AgentConfigurationUnavailable',
+  'AgentUnavailable',
+  'ScenarioOwnershipUnavailable',
+  'RepositoryCleanupFailed',
+]);
+
+// remote_run_contract.py:96-98. Flags are started / side_effects / not unknown.
+const RESOLVED_ERROR = {
+  httpStatus: 502,
+  status: 'failed',
+  sessionStatus: 'ERROR',
+  errorCode: 'ScenarioRunFailed',
+};
+
+// Saved state read back with HTTP 200. Definite finished result.
+const PERSISTED_RUN_FAILED = 'RUN_FAILED';
+
+// `error` is rendered only when it is exactly one of these, or an allowlisted
+// remote.error_code. Anything else is replaced with WITHHELD_ERROR.
+const ALLOWED_ERRORS = new Set([
+  ...VALIDATION_ERRORS,
+  FIXED_GATE_ERROR,
+  OPTION_UPDATE_ERROR,
+  GENERATION_ERROR,
+  REDACTED_RUN_ERROR,
+]);
+
+// Steps and status tokens. Not the backend name contract below.
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]{0,80}$/;
-const VERSION = /^(?:[0-9]{1,6}|[A-Za-z][A-Za-z0-9_]{0,31})$/;
+// Mapping, scenario and context.
+// app.py:172 `_IDENTIFIER_RE` = `^[A-Z][A-Z0-9_]*$`, applied after uppercasing
+// in `_valid_identifier` (app.py:188-189).
+// odi_orchestrator.py:1209 `re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", v)` and
+// odi_automation/run_scenario_remote.groovy:87-88 `/[A-Z][A-Z0-9_]{0,127}/`
+// cap that class at 128 characters. Display uses that exact remote pattern.
+const BACKEND_IDENTIFIER = /^[A-Z][A-Z0-9_]{0,127}$/;
+// Version.
+// app.py:173 `_VERSION_RE` = `^[A-Za-z0-9_.-]+$` (`_valid_version`, app.py:192-193).
+// odi_orchestrator.py:1210 and run_scenario_remote.groovy:88 use the same class
+// with a length bound: `[A-Za-z0-9_.-]{1,12}`. Display uses that exact pattern,
+// so `001.2` is shown and a longer value stays "not reported".
+const BACKEND_VERSION = /^[A-Za-z0-9_.-]{1,12}$/;
 const BATCH = /^RUN-[A-Z0-9]{2,32}$/;
 const SESSION = /^(?:[0-9]{1,12}|[A-Za-z][A-Za-z0-9_-]{0,63})$/;
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
@@ -91,15 +150,6 @@ function isUnknownWord(value) {
   return text === 'UNKNOWN' || text === 'RUN_UNKNOWN';
 }
 
-function isDefiniteFailureWord(value, remote = false) {
-  if (typeof value !== 'string') return false;
-  const text = value.trim();
-  if (!IDENTIFIER.test(text) || isSuccessWord(text) || isUnknownWord(text)) return false;
-  // remote_run_contract uses "passed" for a completed healthy run.
-  if (remote && text.toLowerCase() === 'passed') return false;
-  return true;
-}
-
 function statusTokens(payload) {
   if (!payload) return [];
   const found = [];
@@ -110,48 +160,119 @@ function statusTokens(payload) {
   return found;
 }
 
-function flagTrue(body, remote, key) {
-  return body?.[key] === true || remote?.[key] === true;
-}
-
 function resolvedHttp(httpStatus) {
   return Number.isInteger(httpStatus) && httpStatus >= 200 && httpStatus < 300;
 }
 
+function remoteOf(body) {
+  return plainObject(body?.remote) ? body.remote : null;
+}
+
+// Health and run blocks require the three remote flags false. A true flag on
+// the body or the remote is a different outcome (the scenario may have started).
+function blockFlagsClear(body, remote) {
+  return ['run_may_have_started', 'side_effects', 'outcome_unknown'].every((key) => (
+    remote?.[key] === false && body?.[key] !== true
+  ));
+}
+
+function isProvenSuccess(httpStatus, body) {
+  if (!resolvedHttp(httpStatus)) return false;
+  const remote = remoteOf(body);
+  // outcome_unknown contradicts a finished success. run_may_have_started does
+  // not: remote_run_contract sets it for a finished DONE session.
+  if (body.outcome_unknown === true || remote?.outcome_unknown === true) return false;
+  const top = statusTokens(body);
+  if (top.length === 0 || !top.every(isSuccessWord)) return false;
+  const remoteStatus = typeof remote?.status === 'string' ? remote.status.trim() : '';
+  if (remoteStatus === '') return true;
+  if (isUnknownWord(remoteStatus)) return false;
+  return isSuccessWord(remoteStatus) || remoteStatus.toLowerCase() === 'passed';
+}
+
+function isValidationFailure(httpStatus, body) {
+  return httpStatus === 400 && VALIDATION_ERRORS.includes(body.error);
+}
+
+function isFixedGate(httpStatus, body) {
+  return httpStatus === 409 && body.status === FIXED_GATE_STATUS && body.error === FIXED_GATE_ERROR;
+}
+
+function isIkmFailure(httpStatus, body) {
+  return httpStatus === 409
+    && body.status === 'ikm_option_unsupported'
+    && typeof body.error === 'string'
+    && IKM_ERROR.test(body.error);
+}
+
+function isOptionUpdateFailure(httpStatus, body) {
+  return httpStatus === 500 && body.error === OPTION_UPDATE_ERROR;
+}
+
+function isGenerationFailure(httpStatus, body) {
+  return httpStatus === 400 && body.error === GENERATION_ERROR;
+}
+
+function isHealthBlock(httpStatus, body) {
+  const remote = remoteOf(body);
+  if ((httpStatus !== 400 && httpStatus !== 503) || !remote) return false;
+  if (body.status !== 'blocked' || remote.status !== 'blocked') return false;
+  if (!blockFlagsClear(body, remote) || remote.session_status != null) return false;
+  // Any code, including RemoteTimeout. The health probe does not start a run.
+  return typeof remote.error_code === 'string' && remote.error_code.length > 0;
+}
+
+function isRunBlock(httpStatus, body) {
+  const remote = remoteOf(body);
+  if (httpStatus !== 502 || !remote) return false;
+  if (body.status !== 'blocked' || remote.status !== 'blocked') return false;
+  if (!blockFlagsClear(body, remote) || remote.session_status != null) return false;
+  return RUN_BLOCK_CODES.has(remote.error_code);
+}
+
+function isResolvedRunError(httpStatus, body) {
+  const remote = remoteOf(body);
+  if (httpStatus !== RESOLVED_ERROR.httpStatus || !remote) return false;
+  if (body.status !== RESOLVED_ERROR.status || remote.status !== RESOLVED_ERROR.status) return false;
+  if (remote.session_status !== RESOLVED_ERROR.sessionStatus) return false;
+  if (remote.error_code !== RESOLVED_ERROR.errorCode) return false;
+  if (remote.run_may_have_started !== true || remote.side_effects !== true) return false;
+  if (remote.outcome_unknown !== false || body.outcome_unknown === true) return false;
+  return true;
+}
+
+function isPersistedRunFailed(httpStatus, body) {
+  if (!resolvedHttp(httpStatus) || body.overall_status !== PERSISTED_RUN_FAILED) return false;
+  if (body.outcome_unknown === true || body.run_may_have_started === true || body.side_effects === true) {
+    return false;
+  }
+  const remote = remoteOf(body);
+  if (remote?.outcome_unknown === true || isUnknownWord(remote?.status)) return false;
+  if (statusTokens(body).some(isSuccessWord)) return false;
+  return true;
+}
+
+function isClosedFailure(httpStatus, body) {
+  return isValidationFailure(httpStatus, body)
+    || isFixedGate(httpStatus, body)
+    || isIkmFailure(httpStatus, body)
+    || isOptionUpdateFailure(httpStatus, body)
+    || isGenerationFailure(httpStatus, body)
+    || isHealthBlock(httpStatus, body)
+    || isRunBlock(httpStatus, body)
+    || isResolvedRunError(httpStatus, body)
+    || isPersistedRunFailed(httpStatus, body);
+}
+
 // `succeeded` is only a resolved 2xx whose status says success.
-// `failed` is a definite failure or block the server reported.
-// `unknown` covers remote status unknown, RUN_UNKNOWN, RemoteTimeout, HTTP 504,
-// outcome_unknown, and run_may_have_started / side_effects when the server did
-// not also report a definite result. No response body is unknown too.
-// run_may_have_started does not override a definite success or failure: the
-// remote contract sets it for a finished DONE session and a finished ERROR session.
+// `failed` is only the closed set above.
+// Every other body, including a redacted 500, 2xx {}, 2xx partial, a non-2xx
+// SUCCESS, remote unknown, HTTP 504, and a missing body, is `unknown`.
 function classifyOutcome(httpStatus, body) {
   if (!body) return 'unknown';
-
-  const remote = plainObject(body.remote) ? body.remote : null;
-  const top = statusTokens(body);
-  const remoteStatus = typeof remote?.status === 'string' ? remote.status.trim() : '';
-  const outcomeUnknown = flagTrue(body, remote, 'outcome_unknown');
-  const mayHaveRun = flagTrue(body, remote, 'run_may_have_started') || flagTrue(body, remote, 'side_effects');
-  const remoteTimeout = httpStatus === 504
-    || body.error_code === 'RemoteTimeout'
-    || remote?.error_code === 'RemoteTimeout';
-  const statusUnknown = top.some(isUnknownWord) || isUnknownWord(remoteStatus);
-
-  if (outcomeUnknown || remoteTimeout || statusUnknown) return 'unknown';
-
-  const resolved = resolvedHttp(httpStatus);
-  const successClaim = top.some(isSuccessWord) || isSuccessWord(remoteStatus);
-  if (!resolved && successClaim) return 'unknown';
-
-  const remotePassed = remoteStatus === '' || isSuccessWord(remoteStatus) || remoteStatus.toLowerCase() === 'passed';
-  if (resolved && top.length > 0 && top.every(isSuccessWord) && remotePassed) return 'succeeded';
-
-  if (top.some((value) => isDefiniteFailureWord(value)) || isDefiniteFailureWord(remoteStatus, true)) {
-    return 'failed';
-  }
-  if (mayHaveRun) return 'unknown';
-  return 'failed';
+  if (isProvenSuccess(httpStatus, body)) return 'succeeded';
+  if (isClosedFailure(httpStatus, body)) return 'failed';
+  return 'unknown';
 }
 
 function displayStatus(body, outcomeClass) {
@@ -167,13 +288,20 @@ function displayStatus(body, outcomeClass) {
   return visible[0] || NOT_REPORTED;
 }
 
+function projectBackendIdentifier(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return BACKEND_IDENTIFIER.test(text) ? text : null;
+}
+
 function projectVersion(value) {
-  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 999999) {
-    return String(value);
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
+    const text = String(value);
+    return BACKEND_VERSION.test(text) ? text : null;
   }
   if (typeof value !== 'string') return null;
   const text = value.trim();
-  return VERSION.test(text) ? text : null;
+  return BACKEND_VERSION.test(text) ? text : null;
 }
 
 function projectBatch(value) {
@@ -240,6 +368,14 @@ function errorForClass(error, outcomeClass, payload, thrown) {
   return error;
 }
 
+function finishError(error, payload) {
+  if (typeof error !== 'string' || !error.startsWith(WITHHELD_ERROR)) return error;
+  if (projectBatch(payload?.batch_id)) return error;
+  if (error.includes(HISTORY_CHECK_TEXT)) return error;
+  const suffix = error.slice(WITHHELD_ERROR.length);
+  return `${WITHHELD_ERROR} ${HISTORY_CHECK_TEXT}${suffix}`;
+}
+
 function requestedFields(request) {
   if (!request || typeof request !== 'object') {
     return { requestedMapping: null, requestedRunMode: null };
@@ -278,16 +414,16 @@ export function projectMappingRunOutcome({
     generation: Number.isInteger(generation) ? generation : null,
     requestedMapping: requested.requestedMapping,
     requestedRunMode: requested.requestedRunMode,
-    mapping: safeIdentifier(body?.mapping_name) || NOT_REPORTED,
-    scenarioName: safeIdentifier(body?.scenario_name) || safeIdentifier(body?.scenario) || NOT_REPORTED,
+    mapping: projectBackendIdentifier(body?.mapping_name) || NOT_REPORTED,
+    scenarioName: projectBackendIdentifier(body?.scenario_name) || projectBackendIdentifier(body?.scenario) || NOT_REPORTED,
     scenarioVersion: projectVersion(body?.scenario_version) || projectVersion(body?.version) || NOT_REPORTED,
-    context: safeIdentifier(body?.context) || NOT_REPORTED,
+    context: projectBackendIdentifier(body?.context) || NOT_REPORTED,
     runMode: serverMode,
     overallStatus: displayStatus(body, outcomeClass),
     failedStep: outcomeClass === 'succeeded'
       ? NOT_REPORTED
       : (safeIdentifier(body?.current_step) || NOT_REPORTED),
-    error: errorForClass(projectError(body, thrown), outcomeClass, body, thrown),
+    error: finishError(errorForClass(projectError(body, thrown), outcomeClass, body, thrown), body),
     batchId: projectBatch(body?.batch_id) || NOT_REPORTED,
     sessionId: projectSession(body),
     // MappingRunSuccess / MappingRunFailure define no count fields.
@@ -366,8 +502,9 @@ function selectSameRun(current, response) {
 }
 
 function safeMappingName(value) {
-  const text = safeIdentifier(value);
-  return text ? text.toUpperCase() : null;
+  if (typeof value !== 'string') return null;
+  const text = value.trim().toUpperCase();
+  return BACKEND_IDENTIFIER.test(text) ? text : null;
 }
 
 function returnedMappingMatches(current, response, record, mappingName) {
