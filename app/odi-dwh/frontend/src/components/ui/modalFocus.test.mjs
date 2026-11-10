@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { trapModalFocus } from './modalFocus.js';
+import { shouldDismissModal, trapModalFocus } from './modalFocus.js';
 
 
 function focusable(name) {
@@ -32,4 +32,12 @@ test('modal focus wraps forward and backward', () => {
   trapModalFocus({ key: 'Tab', shiftKey: true, preventDefault: () => { prevented = true; } }, container);
   assert.equal(globalThis.document.activeElement, last);
   assert.equal(prevented, true);
+});
+
+
+test('modal dismiss stays enabled unless closeDisabled is set', () => {
+  assert.equal(shouldDismissModal(), true);
+  assert.equal(shouldDismissModal(undefined), true);
+  assert.equal(shouldDismissModal(false), true);
+  assert.equal(shouldDismissModal(true), false);
 });

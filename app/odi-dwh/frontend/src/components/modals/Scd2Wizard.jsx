@@ -1,26 +1,33 @@
 import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Modal } from '../ui/Modal';
+import { shouldDismissModal } from '../ui/modalFocus';
 import { useDispatch } from '../../store/AppContext';
 import { generateScd2, getScd2Postflight, planScd2, runScd2 } from '../../services/api';
 import {
   SOURCE_OWNERS,
   TARGET_OWNERS,
+  acceptWrite,
   applyPrefill,
   buildGenerateRequest,
   buildPlanRequest,
   buildPostflightParams,
   buildRunRequest,
   canGenerate,
+  createWriteGate,
   emptyScd2Form,
-  payloadFromApiError,
   postflightRows,
-  projectApiError,
   projectGenerate,
   projectPlan,
   projectPostflight,
+  projectRejected,
   projectRun,
+  setWriteConfirmation,
+  settleWrite,
+  stageSucceeded,
   validateScd2Form,
+  writeButtonState,
+  writesInFlight,
 } from './scd2WizardModel';
 
 const STEPS = ['Setup', 'Plan', 'Generate', 'Run'];
@@ -33,13 +40,14 @@ function visibleError(errors, key, raw) {
   return errors[key];
 }
 
-function Field({ label, required, error, children }) {
+function Field({ label, required, error, note, children }) {
   return (
     <label className="block">
       <span className="text-xs font-semibold text-slate-500 uppercase mb-1 block">
         {label}{required ? ' *' : ''}
       </span>
       {children}
+      {note ? <span className="mt-1 block text-xs text-amber-700">{note}</span> : null}
       {error ? <span className="mt-1 block text-xs text-rose-600">{error}</span> : null}
     </label>
   );
@@ -68,13 +76,17 @@ function OwnerSelect({ value, owners, onChange }) {
 function EvidencePanel({ evidence }) {
   if (!evidence) return null;
   const rows = postflightRows(evidence);
+  const parity = Array.isArray(evidence.parity) ? evidence.parity : [];
+  const tone = evidence.warning
+    ? 'border-amber-200 bg-amber-50'
+    : evidence.success
+      ? 'border-slate-200 bg-slate-50'
+      : 'border-rose-200 bg-rose-50';
   return (
-    <div className={clsx(
-      'rounded-xl border p-4 text-sm',
-      evidence.success ? 'border-slate-200 bg-slate-50' : 'border-rose-200 bg-rose-50',
-    )}>
+    <div className={clsx('rounded-xl border p-4 text-sm', tone)}>
       <p className="text-xs font-bold uppercase text-slate-500">Postflight</p>
       <p className="mt-1 font-medium text-slate-700">Status: {evidence.status || 'unknown'}</p>
+      {evidence.warning ? <p className="mt-2 font-medium text-amber-800">{evidence.message}</p> : null}
       {rows.length > 0 && (
         <dl className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
           {rows.map(row => (
@@ -85,7 +97,17 @@ function EvidencePanel({ evidence }) {
           ))}
         </dl>
       )}
-      {!evidence.success && evidence.message ? <p className="mt-2 text-rose-700">{evidence.message}</p> : null}
+      {parity.length > 0 && (
+        <dl className="mt-3 space-y-1">
+          {parity.map(flag => (
+            <div key={flag.key} className="flex justify-between gap-3">
+              <dt className="text-slate-500">{flag.label}</dt>
+              <dd className="font-mono text-slate-800">{flag.text}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {!evidence.success && !evidence.warning && evidence.message ? <p className="mt-2 text-rose-700">{evidence.message}</p> : null}
     </div>
   );
 }
@@ -102,8 +124,10 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   const [generateView, setGenerateView] = useState(null);
   const [runView, setRunView] = useState(null);
   const [evidence, setEvidence] = useState(null);
-  const [confirmGenerate, setConfirmGenerate] = useState(false);
-  const [confirmRun, setConfirmRun] = useState(false);
+  const [generateGate, setGenerateGate] = useState(() => createWriteGate({ lockAfterSuccess: true }));
+  const [runGate, setRunGate] = useState(() => createWriteGate({ lockAfterSuccess: false }));
+  const generateGateRef = useRef(generateGate);
+  const runGateRef = useRef(runGate);
 
   useEffect(() => {
     mounted.current = true;
@@ -113,7 +137,30 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   }, []);
 
   const validation = validateScd2Form(form);
-  const set = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
+  const set = (key, value) => setForm(prev => {
+    const prefillNotes = { ...(prev.prefillNotes || {}) };
+    delete prefillNotes[key];
+    return { ...prev, [key]: value, prefillNotes };
+  });
+
+  function commitGenerateGate(next) {
+    generateGateRef.current = next;
+    setGenerateGate(next);
+  }
+
+  function commitRunGate(next) {
+    runGateRef.current = next;
+    setRunGate(next);
+  }
+
+  function resetWrites() {
+    commitGenerateGate(createWriteGate({ lockAfterSuccess: true }));
+    commitRunGate(createWriteGate({ lockAfterSuccess: false }));
+  }
+
+  function writeBusy() {
+    return writesInFlight([generateGateRef.current, runGateRef.current]);
+  }
 
   function beginRequest() {
     requestSeq.current += 1;
@@ -129,6 +176,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   }
 
   const handleClose = () => {
+    if (!shouldDismissModal(writeBusy())) return;
     beginRequest();
     setStep(0);
     setError('');
@@ -136,13 +184,13 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
     setGenerateView(null);
     setRunView(null);
     setEvidence(null);
-    setConfirmGenerate(false);
-    setConfirmRun(false);
+    resetWrites();
     setForm(emptyScd2Form());
     onClose();
   };
 
   async function loadPlan() {
+    if (writeBusy()) return;
     const id = beginRequest();
     setLoading(true);
     setError('');
@@ -152,11 +200,17 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       if (!stillCurrent(id)) return;
       const view = projectPlan(payload);
       setPlanView(view);
-      if (!view.success) setError(view.message);
+      if (view.success) {
+        resetWrites();
+        setGenerateView(null);
+        setRunView(null);
+        setEvidence(null);
+      } else {
+        setError(view.message);
+      }
     } catch (err) {
       if (!stillCurrent(id)) return;
-      const body = payloadFromApiError(err);
-      const view = body ? projectPlan(body) : projectApiError(err);
+      const view = projectRejected(err);
       setPlanView(view);
       setError(view.message);
     } finally {
@@ -165,7 +219,9 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   }
 
   async function handleGenerate() {
-    if (!confirmGenerate || !canGenerate(planView) || loading) return;
+    const decision = acceptWrite(generateGateRef.current, { ready: canGenerate(planView) });
+    if (!decision.accepted) return;
+    commitGenerateGate(decision.gate);
     const id = beginRequest();
     setLoading(true);
     setError('');
@@ -175,6 +231,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       if (!stillCurrent(id)) return;
       const view = projectGenerate(payload);
       setGenerateView(view);
+      commitGenerateGate(settleWrite(generateGateRef.current, { ok: view.success === true }));
       if (!view.success) {
         setError(view.message);
         toast('Type 2 generation failed.', 'error');
@@ -183,9 +240,9 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       }
     } catch (err) {
       if (!stillCurrent(id)) return;
-      const body = payloadFromApiError(err);
-      const view = body ? projectGenerate(body) : projectApiError(err);
+      const view = projectRejected(err);
       setGenerateView(view);
+      commitGenerateGate(settleWrite(generateGateRef.current, { ok: false }));
       setError(view.message);
       toast('Type 2 generation failed.', 'error');
     } finally {
@@ -194,7 +251,9 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   }
 
   async function handleRun() {
-    if (!confirmRun || !generateView?.success || loading) return;
+    const decision = acceptWrite(runGateRef.current, { ready: stageSucceeded(generateView) });
+    if (!decision.accepted) return;
+    commitRunGate(decision.gate);
     const id = beginRequest();
     setLoading(true);
     setError('');
@@ -206,6 +265,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       const view = projectRun(payload);
       setRunView(view);
       setEvidence(view.evidence);
+      commitRunGate(settleWrite(runGateRef.current, { ok: view.success === true }));
       if (!view.success) {
         setError(view.message);
         toast('Type 2 scenario run failed.', 'error');
@@ -214,15 +274,10 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       }
     } catch (err) {
       if (!stillCurrent(id)) return;
-      const body = payloadFromApiError(err);
-      const view = body ? projectRun(body) : {
-        ...projectApiError(err),
-        evidence: null,
-        scenario: null,
-        session_status: '',
-      };
+      const view = projectRejected(err);
       setRunView(view);
-      setEvidence(view.evidence);
+      setEvidence(null);
+      commitRunGate(settleWrite(runGateRef.current, { ok: false }));
       setError(view.message);
       toast('Type 2 scenario run failed.', 'error');
     } finally {
@@ -231,7 +286,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   }
 
   async function refreshEvidence() {
-    if (loading) return;
+    if (loading || writeBusy()) return;
     const id = beginRequest();
     setLoading(true);
     setError('');
@@ -240,22 +295,44 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       if (!stillCurrent(id)) return;
       const view = projectPostflight(payload);
       setEvidence(view);
-      if (!view.success) setError(view.message);
+      if (view && !view.success && !view.warning) setError(view.message);
     } catch (err) {
       if (!stillCurrent(id)) return;
-      const body = payloadFromApiError(err);
-      const view = body ? projectPostflight(body) : projectApiError(err);
-      setEvidence(view.counts ? view : { ...view, counts: {}, total: undefined, current: undefined, closed: undefined });
+      const view = projectRejected(err);
+      setEvidence(view);
       setError(view.message);
     } finally {
       if (stillCurrent(id)) setLoading(false);
     }
   }
 
+  function confirmGenerate(checked) {
+    commitGenerateGate(setWriteConfirmation(generateGateRef.current, checked));
+  }
+
+  function confirmRun(checked) {
+    commitRunGate(setWriteConfirmation(runGateRef.current, checked));
+  }
+
+  const busy = writesInFlight([generateGate, runGate]);
+  const generateButton = writeButtonState(generateGate, {
+    ready: canGenerate(planView),
+    idleLabel: 'Generate',
+    pendingLabel: 'Generating...',
+    doneLabel: 'Generated',
+  });
+  const runButton = writeButtonState(runGate, {
+    ready: stageSucceeded(generateView),
+    idleLabel: 'Run',
+    pendingLabel: 'Running...',
+    doneLabel: 'Ran',
+    repeatLabel: 'Run again',
+  });
+
   const shownEvidence = evidence || runView?.evidence || null;
 
   return (
-    <Modal open={open} onClose={handleClose} title="Type 2 (History)" size="lg">
+    <Modal open={open} onClose={handleClose} title="Type 2 (History)" size="lg" closeDisabled={busy}>
       <div className="flex items-center gap-0 mb-6">
         {STEPS.map((label, index) => (
           <div key={label} className="flex items-center flex-1">
@@ -283,25 +360,25 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
             Describe the Type 2 mapping. Column names are entered here and are not inferred from the table name.
           </p>
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Source owner" required error={visibleError(validation.errors, 'source_owner', form.source_owner)}>
+            <Field label="Source owner" required note={form.prefillNotes?.source_owner} error={visibleError(validation.errors, 'source_owner', form.source_owner)}>
               <OwnerSelect value={form.source_owner} owners={SOURCE_OWNERS} onChange={value => set('source_owner', value)} />
             </Field>
-            <Field label="Source table" required error={visibleError(validation.errors, 'source_table', form.source_table)}>
+            <Field label="Source table" required note={form.prefillNotes?.source_table} error={visibleError(validation.errors, 'source_table', form.source_table)}>
               <input value={form.source_table} onChange={event => set('source_table', event.target.value)} className={inputCls} autoFocus />
             </Field>
           </div>
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Target owner" required error={visibleError(validation.errors, 'target_owner', form.target_owner)}>
+            <Field label="Target owner" required note={form.prefillNotes?.target_owner} error={visibleError(validation.errors, 'target_owner', form.target_owner)}>
               <OwnerSelect value={form.target_owner} owners={TARGET_OWNERS} onChange={value => set('target_owner', value)} />
             </Field>
-            <Field label="Target table" required error={visibleError(validation.errors, 'target_table', form.target_table)}>
+            <Field label="Target table" required note={form.prefillNotes?.target_table} error={visibleError(validation.errors, 'target_table', form.target_table)}>
               <input value={form.target_table} onChange={event => set('target_table', event.target.value)} className={inputCls} />
             </Field>
           </div>
-          <Field label="Mapping name" required error={visibleError(validation.errors, 'mapping_name', form.mapping_name)}>
+          <Field label="Mapping name" required note={form.prefillNotes?.mapping_name} error={visibleError(validation.errors, 'mapping_name', form.mapping_name)}>
             <input value={form.mapping_name} onChange={event => set('mapping_name', event.target.value)} className={inputCls} />
           </Field>
-          <Field label="Natural key columns" required error={visibleError(validation.errors, 'natural_key_text', form.natural_key_text)}>
+          <Field label="Natural key columns" required note={form.prefillNotes?.natural_key_text} error={visibleError(validation.errors, 'natural_key_text', form.natural_key_text)}>
             <input value={form.natural_key_text} onChange={event => set('natural_key_text', event.target.value)} placeholder="CUST_ID" className={inputCls} />
           </Field>
           <div className="space-y-2">
@@ -421,10 +498,17 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
             <p className="text-slate-600">Generate creates the target, the ODI mapping, and the scenario.</p>
             <p className="font-mono text-slate-700">{form.mapping_name}</p>
           </div>
-          <label className="flex items-start gap-2 text-sm text-slate-700">
-            <input type="checkbox" checked={confirmGenerate} onChange={event => setConfirmGenerate(event.target.checked)} />
-            <span>I approve Type 2 generation.</span>
-          </label>
+          {!generateButton.finished && (
+            <label className="flex items-start gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={generateGate.confirmed === true}
+                disabled={generateGate.phase === 'in_flight'}
+                onChange={event => confirmGenerate(event.target.checked)}
+              />
+              <span>I approve Type 2 generation.</span>
+            </label>
+          )}
           {generateView?.success && (
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
               <p className="font-semibold">Status: {generateView.status}</p>
@@ -447,8 +531,14 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
               {generateView?.scenario_name} {generateView?.scenario_version}
             </p>
           </div>
+          {runButton.notice ? <p className="text-sm font-medium text-amber-800">{runButton.notice}</p> : null}
           <label className="flex items-start gap-2 text-sm text-slate-700">
-            <input type="checkbox" checked={confirmRun} onChange={event => setConfirmRun(event.target.checked)} />
+            <input
+              type="checkbox"
+              checked={runGate.confirmed === true}
+              disabled={runGate.phase === 'in_flight'}
+              onChange={event => confirmRun(event.target.checked)}
+            />
             <span>I approve the Type 2 scenario run.</span>
           </label>
           {runView && (
@@ -476,11 +566,11 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
         <button
           type="button"
           onClick={() => {
-            if (step === 0) return;
+            if (writeBusy() || step === 0) return;
             setError('');
             setStep(current => current - 1);
           }}
-          disabled={step === 0}
+          disabled={step === 0 || busy}
           className="px-4 py-2 rounded-lg border border-slate-200 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-0 transition-all"
         >
           Back
@@ -490,10 +580,11 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
             <button
               type="button"
               onClick={() => {
+                if (writeBusy() || !validation.ok || loading) return;
                 setStep(1);
                 loadPlan();
               }}
-              disabled={!validation.ok || loading}
+              disabled={!validation.ok || loading || busy}
               className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
             >
               Next
@@ -503,8 +594,11 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
             <>
               <button
                 type="button"
-                onClick={loadPlan}
-                disabled={loading || !validation.ok}
+                onClick={() => {
+                  if (writeBusy()) return;
+                  loadPlan();
+                }}
+                disabled={loading || !validation.ok || busy}
                 className="px-4 py-2 rounded-lg border border-slate-200 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"
               >
                 Refresh plan
@@ -512,12 +606,11 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
               <button
                 type="button"
                 onClick={() => {
-                  setConfirmGenerate(false);
-                  setGenerateView(null);
+                  if (writeBusy() || !canGenerate(planView)) return;
                   setError('');
                   setStep(2);
                 }}
-                disabled={!canGenerate(planView) || loading}
+                disabled={!canGenerate(planView) || loading || busy}
                 className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
               >
                 Next
@@ -529,22 +622,20 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
               <button
                 type="button"
                 onClick={handleGenerate}
-                disabled={loading || !confirmGenerate || !canGenerate(planView)}
+                disabled={!generateButton.enabled}
                 className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-6 py-2 rounded-lg text-sm font-bold transition-colors"
               >
-                <i className={clsx('fa-solid mr-2', loading ? 'fa-spinner fa-spin' : 'fa-play')} />
-                {loading ? 'Generating...' : 'Generate'}
+                <i className={clsx('fa-solid mr-2', generateButton.inFlight ? 'fa-spinner fa-spin' : 'fa-play')} />
+                {generateButton.label}
               </button>
               <button
                 type="button"
                 onClick={() => {
-                  setConfirmRun(false);
-                  setRunView(null);
-                  setEvidence(null);
+                  if (writeBusy() || !stageSucceeded(generateView)) return;
                   setError('');
                   setStep(3);
                 }}
-                disabled={!generateView?.success || loading}
+                disabled={!stageSucceeded(generateView) || busy}
                 className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
               >
                 Next
@@ -555,8 +646,11 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
             <>
               <button
                 type="button"
-                onClick={refreshEvidence}
-                disabled={loading || !validation.ok}
+                onClick={() => {
+                  if (writeBusy()) return;
+                  refreshEvidence();
+                }}
+                disabled={loading || !validation.ok || busy}
                 className="px-4 py-2 rounded-lg border border-slate-200 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"
               >
                 Refresh evidence
@@ -564,11 +658,11 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
               <button
                 type="button"
                 onClick={handleRun}
-                disabled={loading || !confirmRun || !generateView?.success}
+                disabled={!runButton.enabled}
                 className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-6 py-2 rounded-lg text-sm font-bold transition-colors"
               >
-                <i className={clsx('fa-solid mr-2', loading ? 'fa-spinner fa-spin' : 'fa-play')} />
-                {loading ? 'Running...' : 'Run'}
+                <i className={clsx('fa-solid mr-2', runButton.inFlight ? 'fa-spinner fa-spin' : 'fa-play')} />
+                {runButton.label}
               </button>
             </>
           )}

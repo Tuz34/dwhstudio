@@ -1,11 +1,17 @@
 import { useEffect, useId, useRef } from 'react';
 import { FaTimes } from 'react-icons/fa';
-import { modalFocusableElements, trapModalFocus } from './modalFocus';
+import { modalFocusableElements, shouldDismissModal, trapModalFocus } from './modalFocus';
 
-export function Modal({ open, onClose, title, children, size = 'md' }) {
+export function Modal({ open, onClose, title, children, size = 'md', closeDisabled = false }) {
   const dialogRef = useRef(null);
   const previousFocusRef = useRef(null);
   const titleId = useId();
+  const closeDisabledRef = useRef(closeDisabled);
+  const allowDismiss = shouldDismissModal(closeDisabled);
+
+  useEffect(() => {
+    closeDisabledRef.current = closeDisabled;
+  }, [closeDisabled]);
 
   useEffect(() => {
     if (!open) return;
@@ -15,7 +21,7 @@ export function Modal({ open, onClose, title, children, size = 'md' }) {
     (firstFocusable || dialog)?.focus();
 
     const handler = (e) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape' && shouldDismissModal(closeDisabledRef.current)) onClose();
       if (e.key === 'Tab') trapModalFocus(e, dialogRef.current);
     };
     window.addEventListener('keydown', handler);
@@ -37,7 +43,10 @@ export function Modal({ open, onClose, title, children, size = 'md' }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm animate-fade-in"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onClick={(e) => {
+        if (e.target !== e.currentTarget || !allowDismiss) return;
+        onClose();
+      }}
     >
       <div
         ref={dialogRef}
@@ -53,8 +62,12 @@ export function Modal({ open, onClose, title, children, size = 'md' }) {
           <button
             type="button"
             aria-label="Close dialog"
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+            disabled={!allowDismiss}
+            onClick={() => {
+              if (!allowDismiss) return;
+              onClose();
+            }}
+            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:pointer-events-none"
           >
             <FaTimes aria-hidden="true" />
           </button>

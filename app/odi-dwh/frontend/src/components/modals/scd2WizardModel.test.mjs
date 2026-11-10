@@ -1,20 +1,29 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { shouldDismissModal } from '../ui/modalFocus.js';
 import {
+  acceptWrite,
   applyPrefill,
   buildGenerateRequest,
   buildPlanRequest,
   buildPostflightParams,
   buildRunRequest,
   canGenerate,
+  createWriteGate,
   emptyScd2Form,
   projectApiError,
   projectGenerate,
-  projectPlan,
   projectPostflight,
+  projectPlan,
+  projectRejected,
   projectRun,
+  setWriteConfirmation,
+  settleWrite,
+  stageSucceeded,
   validateScd2Form,
+  writeButtonState,
+  writesInFlight,
 } from './scd2WizardModel.js';
 
 // Copied from tests/scd2_support.py REQUEST.
@@ -351,4 +360,188 @@ test('a failed payload is not shown as success', () => {
   const evidence = projectPostflight({ status: 'invalid_stock_contract', error_code: 'invalid_identifier', counts: {} });
   assert.equal(evidence.success, false);
   assert.match(evidence.message, /invalid_stock_contract/);
+});
+
+
+function arm(gate) {
+  return setWriteConfirmation(gate, true);
+}
+
+function button(gate, labels) {
+  return writeButtonState(gate, { ready: true, ...labels });
+}
+
+const GENERATE_LABELS = { idleLabel: 'Generate', pendingLabel: 'Generating...', doneLabel: 'Generated' };
+const RUN_LABELS = { idleLabel: 'Run', pendingLabel: 'Running...', doneLabel: 'Ran', repeatLabel: 'Run again' };
+
+
+test('a second generate or run is blocked after success', () => {
+  let generate = arm(createWriteGate({ lockAfterSuccess: true }));
+  generate = settleWrite(acceptWrite(generate, { ready: true }).gate, { ok: true });
+  assert.equal(generate.confirmed, false);
+  const finished = button(arm(generate), GENERATE_LABELS);
+  assert.equal(finished.enabled, false);
+  assert.equal(finished.label, 'Generated');
+  assert.equal(acceptWrite(arm(generate), { ready: true }).reason, 'finished');
+
+  let run = arm(createWriteGate({ lockAfterSuccess: false }));
+  run = settleWrite(acceptWrite(run, { ready: true }).gate, { ok: true });
+  const disarmed = button(run, RUN_LABELS);
+  assert.equal(disarmed.enabled, false);
+  assert.equal(disarmed.label, 'Run again');
+  assert.equal(disarmed.notice, 'This scenario already ran once in this dialog.');
+  assert.equal(acceptWrite(run, { ready: true }).reason, 'confirmation');
+  const rerun = acceptWrite(arm(run), { ready: true });
+  assert.equal(rerun.accepted, true);
+});
+
+
+test('a failed generate or run needs a new confirmation before retry', () => {
+  for (const lockAfterSuccess of [true, false]) {
+    let gate = arm(createWriteGate({ lockAfterSuccess }));
+    gate = settleWrite(acceptWrite(gate, { ready: true }).gate, { ok: false });
+    assert.equal(gate.confirmed, false);
+    assert.equal(acceptWrite(gate, { ready: true }).reason, 'confirmation');
+    assert.equal(button(gate, lockAfterSuccess ? GENERATE_LABELS : RUN_LABELS).enabled, false);
+    assert.equal(acceptWrite(arm(gate), { ready: true }).accepted, true);
+  }
+});
+
+
+test('an in-flight write blocks another submit, dismiss, and step changes', () => {
+  let gate = arm(createWriteGate({ lockAfterSuccess: true }));
+  const started = acceptWrite(gate, { ready: true });
+  assert.equal(started.accepted, true);
+  assert.equal(started.gate.phase, 'in_flight');
+  assert.equal(acceptWrite(started.gate, { ready: true }).reason, 'in_flight');
+  assert.equal(writesInFlight([started.gate]), true);
+  assert.equal(shouldDismissModal(writesInFlight([started.gate])), false);
+  assert.equal(button(started.gate, GENERATE_LABELS).enabled, false);
+  assert.equal(button(started.gate, GENERATE_LABELS).inFlight, true);
+  const settled = settleWrite(started.gate, { ok: false });
+  assert.equal(writesInFlight([settled]), false);
+  assert.equal(shouldDismissModal(writesInFlight([settled])), true);
+  assert.equal(shouldDismissModal(), true);
+  assert.equal(shouldDismissModal(false), true);
+});
+
+
+test('a non-2xx response is a failed stage even when the body looks successful', () => {
+  const body = {
+    status: 'generated',
+    scenario_version: '001',
+    mapping_name: 'MAP_ODS_CUST_TO_DIM_CUST',
+    scenario_name: 'MAP_ODS_CUST_TO_DIM_CUST_SCN',
+  };
+  assert.equal(projectGenerate(body).success, true);
+  const rejected = projectRejected({ status: 502, message: 'Service request failed.', scd2: body });
+  assert.equal(rejected.success, false);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.rejected, true);
+  assert.equal(stageSucceeded(rejected), false);
+  assert.equal(rejected.scenario_version, '');
+  assert.match(rejected.message, /HTTP 502/);
+  assert.match(rejected.message, /generated/);
+  assert.equal(rejected.message.includes('Service request failed'), false);
+
+  const detailed = projectRejected({
+    status: 502,
+    scd2: { status: 'run_failed', error_code: 'scenario_failed', error: 'session ERROR' },
+  });
+  assert.match(detailed.message, /HTTP 502/);
+  assert.match(detailed.message, /run_failed/);
+  assert.match(detailed.message, /scenario_failed/);
+  assert.match(detailed.message, /session ERROR/);
+  assert.equal(stageSucceeded(detailed), false);
+
+  const network = projectRejected(new Error('Failed to fetch'));
+  assert.equal(network.success, false);
+  assert.equal(network.http_status, null);
+  assert.match(network.message, /Failed to fetch/);
+});
+
+
+test('status ok with parity false is a mismatch warning', () => {
+  const mismatch = projectPostflight({
+    status: 'ok',
+    source_current_count_equal: false,
+    business_parity_proven: false,
+    physical_noop_proven: false,
+    history_overlap_checked: false,
+    stock_contract_valid: true,
+    counts: { source_count: 6, target_current: 5, target_total: 5, rows_with_effective_to_set: 0 },
+  });
+  assert.equal(mismatch.success, false);
+  assert.equal(mismatch.warning, true);
+  assert.equal(mismatch.message, 'Source and current counts do not match.');
+  assert.equal(mismatch.parity.find(flag => flag.key === 'source_current_count_equal').text, 'false');
+  assert.equal(mismatch.parity.find(flag => flag.key === 'business_parity_proven').text, 'false');
+  assert.equal(stageSucceeded(mismatch), false);
+
+  const matched = projectPostflight({
+    status: 'ok',
+    source_current_count_equal: true,
+    business_parity_proven: false,
+    physical_noop_proven: false,
+    history_overlap_checked: false,
+    stock_contract_valid: true,
+    counts: { source_count: 5, target_current: 5, target_total: 5, rows_with_effective_to_set: 0 },
+  });
+  assert.equal(matched.success, true);
+  assert.equal(matched.warning, false);
+  assert.equal(matched.parity.find(flag => flag.key === 'source_current_count_equal').text, 'true');
+});
+
+
+test('a missing parity flag is not reported', () => {
+  const evidence = projectPostflight({
+    status: 'ok',
+    counts: { target_total: 5, target_current: 5, rows_with_effective_to_set: 0 },
+  });
+  assert.equal(evidence.success, true);
+  assert.equal(evidence.warning, false);
+  for (const key of [
+    'source_current_count_equal',
+    'business_parity_proven',
+    'physical_noop_proven',
+    'history_overlap_checked',
+    'stock_contract_valid',
+  ]) {
+    assert.equal(evidence.parity.find(flag => flag.key === key).text, 'not reported', key);
+  }
+  const explicitNull = projectPostflight({ status: 'ok', source_current_count_equal: null, counts: {} });
+  assert.equal(explicitNull.parity.find(flag => flag.key === 'source_current_count_equal').text, 'not reported');
+  assert.equal(explicitNull.success, true);
+});
+
+
+test('a malformed prefill key is dropped instead of split', () => {
+  const badKeys = ['CUST ID', 'A,B', 'A;B', '"CUST_ID"', "'CUST_ID'"];
+  for (const bad of badKeys) {
+    const form = applyPrefill(customerForm(), { key_columns: [bad] });
+    assert.equal(form.natural_key_text, '', bad);
+    assert.equal(form.prefillNotes.natural_key_text, 'The suggested key was invalid.', bad);
+    const validated = validateScd2Form(form);
+    assert.equal(validated.ok, false, bad);
+    assert.deepEqual(validated.request.natural_key, [], bad);
+  }
+
+  const mixed = applyPrefill(customerForm(), { key_columns: ['CUST_ID', 'A,B'] });
+  assert.equal(mixed.natural_key_text, '');
+  assert.equal(mixed.prefillNotes.natural_key_text, 'The suggested key was invalid.');
+
+  for (const bad of ['CUST ID', 'A,B', 'A;B', '"ODS_CUSTOMERS"']) {
+    const form = applyPrefill(emptyScd2Form(), { source_table: bad, mapping_name: 'MAP NAME', target_table: bad });
+    assert.equal(form.source_table, '', bad);
+    assert.equal(form.target_table, '', bad);
+    assert.equal(form.mapping_name, '');
+    assert.equal(form.prefillNotes.source_table, 'The suggested source table was invalid.');
+    assert.equal(form.prefillNotes.mapping_name, 'The suggested mapping name was invalid.');
+    assert.equal(form.prefillNotes.target_table, 'The suggested target table was invalid.');
+  }
+
+  const valid = applyPrefill(emptyScd2Form(), { key_columns: ['cust_id', 'LOC_ID'], source_table: 'ODS_CUSTOMERS' });
+  assert.equal(valid.natural_key_text, 'cust_id, LOC_ID');
+  assert.equal(valid.prefillNotes.natural_key_text, undefined);
+  assert.equal(valid.source_table, 'ODS_CUSTOMERS');
 });
