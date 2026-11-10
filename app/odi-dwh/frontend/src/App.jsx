@@ -7,6 +7,7 @@ import { DataOperations } from './components/tabs/DataOperations';
 import { KnowledgeHub }   from './components/tabs/KnowledgeHub';
 import { ControlTower }   from './components/tabs/ControlTower';
 import { MappingWizard }  from './components/modals/MappingWizard';
+import { Scd2Wizard }     from './components/modals/Scd2Wizard';
 import { SurgeonEdit }    from './components/modals/SurgeonEdit';
 import { SnapshotCompare } from './components/modals/SnapshotCompare';
 import { getAuthStatus, loginAuth, logoutAuth } from './services/api';
@@ -32,6 +33,8 @@ function ModalRouter() {
   switch (modal.type) {
     case 'wizard':
       return <MappingWizard open onClose={close} initialData={modal.props?.mappingRequest || {}} />;
+    case 'scd2':
+      return <Scd2Wizard open onClose={close} initialData={modal.props?.mappingRequest || {}} />;
     case 'surgeon':
       return (
         <SurgeonEdit
