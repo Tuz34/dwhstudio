@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { shouldDismissModal } from '../ui/modalFocus.js';
+import { buildScd2Handoff } from './mappingWizardRequests.js';
 import {
   acceptWrite,
   applyPrefill,
@@ -10,17 +11,22 @@ import {
   buildPostflightParams,
   buildRunRequest,
   canGenerate,
+  canRefreshEvidence,
   createWriteGate,
   emptyScd2Form,
+  PREFILL_ALIASES,
   projectApiError,
   projectGenerate,
   projectPostflight,
   projectPlan,
   projectRejected,
   projectRun,
+  replaceWriteGate,
+  REVIEW_SENTENCE,
   setWriteConfirmation,
   settleWrite,
   stageSucceeded,
+  STATUS_OK_SCOPE,
   validateScd2Form,
   writeButtonState,
   writesInFlight,
@@ -474,8 +480,12 @@ test('status ok with parity false is a mismatch warning', () => {
   assert.equal(mismatch.success, false);
   assert.equal(mismatch.warning, true);
   assert.equal(mismatch.message, 'Source and current counts do not match.');
+  assert.equal(mismatch.parity.find(flag => flag.key === 'source_current_count_equal').label, 'Source row count equals current row count');
   assert.equal(mismatch.parity.find(flag => flag.key === 'source_current_count_equal').text, 'false');
-  assert.equal(mismatch.parity.find(flag => flag.key === 'business_parity_proven').text, 'false');
+  assert.equal(mismatch.parity.find(flag => flag.key === 'business_parity_proven').text, 'not proven by this check');
+  assert.equal(mismatch.parity.find(flag => flag.key === 'physical_noop_proven').text, 'not proven by this check');
+  assert.equal(mismatch.parity.find(flag => flag.key === 'history_overlap_checked').text, 'not checked by this check');
+  assert.equal(mismatch.statusScope, 'The count check passed. It does not prove row-level equality.');
   assert.equal(stageSucceeded(mismatch), false);
 
   const matched = projectPostflight({
@@ -489,7 +499,17 @@ test('status ok with parity false is a mismatch warning', () => {
   });
   assert.equal(matched.success, true);
   assert.equal(matched.warning, false);
+  assert.equal(matched.parity.find(flag => flag.key === 'source_current_count_equal').label, 'Source row count equals current row count');
   assert.equal(matched.parity.find(flag => flag.key === 'source_current_count_equal').text, 'true');
+  assert.equal(matched.parity.find(flag => flag.key === 'business_parity_proven').text, 'not proven by this check');
+  assert.equal(matched.parity.find(flag => flag.key === 'physical_noop_proven').text, 'not proven by this check');
+  assert.equal(matched.parity.find(flag => flag.key === 'history_overlap_checked').text, 'not checked by this check');
+  assert.equal(matched.statusScope, 'The count check passed. It does not prove row-level equality.');
+  for (const flag of matched.parity) {
+    if (['business_parity_proven', 'physical_noop_proven', 'history_overlap_checked'].includes(flag.key)) {
+      assert.equal(flag.text === 'false', false, flag.key);
+    }
+  }
 });
 
 
@@ -544,4 +564,311 @@ test('a malformed prefill key is dropped instead of split', () => {
   assert.equal(valid.natural_key_text, 'cust_id, LOC_ID');
   assert.equal(valid.prefillNotes.natural_key_text, undefined);
   assert.equal(valid.source_table, 'ODS_CUSTOMERS');
+});
+
+
+test('proof flags say proven or checked, and never the raw word false', () => {
+  const proven = projectPostflight({
+    status: 'ok',
+    business_parity_proven: true,
+    physical_noop_proven: true,
+    history_overlap_checked: true,
+    counts: { target_total: 5, target_current: 5, rows_with_effective_to_set: 0 },
+  });
+  assert.equal(proven.parity.find(flag => flag.key === 'business_parity_proven').text, 'proven');
+  assert.equal(proven.parity.find(flag => flag.key === 'physical_noop_proven').text, 'proven');
+  assert.equal(proven.parity.find(flag => flag.key === 'history_overlap_checked').text, 'checked');
+  assert.equal(proven.statusScope, STATUS_OK_SCOPE);
+
+  const absent = projectPostflight({ status: 'ok', counts: {} });
+  for (const key of ['business_parity_proven', 'physical_noop_proven', 'history_overlap_checked']) {
+    assert.equal(absent.parity.find(flag => flag.key === key).text, 'not reported', key);
+  }
+  assert.equal(projectPostflight({ status: 'invalid_stock_contract', counts: {} }).statusScope, '');
+});
+
+
+function lockedAfter(error) {
+  const view = projectRejected(error, { write: true });
+  let gate = arm(createWriteGate({ lockAfterSuccess: true }));
+  gate = settleWrite(acceptWrite(gate, { ready: true }).gate, { review: view.needsReview === true, ok: view.success === true });
+  return { view, gate };
+}
+
+
+test('unknown, partial, and transport failures need review and stay locked', () => {
+  const cases = [
+    {
+      name: 'run_unknown',
+      error: {
+        status: 502,
+        message: 'Service request failed.',
+        scd2: {
+          status: 'run_unknown',
+          outcome_unknown: true,
+          manual_review_required: true,
+          scenario_execution_completed: null,
+          steps: [{ step: 'odi_scenario_run', outcome_unknown: true, remote: { run_may_have_started: true } }],
+        },
+      },
+      status: /run_unknown/,
+    },
+    {
+      name: 'run_failed manual review',
+      error: {
+        status: 502,
+        scd2: {
+          status: 'run_failed',
+          manual_review_required: true,
+          scenario_execution_completed: false,
+          steps: [{ step: 'odi_scenario_run', status: 'failed', side_effects: true, remote: { run_may_have_started: true } }],
+        },
+      },
+      status: /run_failed/,
+    },
+    {
+      name: 'generate partial side effects',
+      error: {
+        status: 502,
+        scd2: {
+          status: 'partial_failure_target_ddl',
+          known_side_effects: true,
+          manual_review_required: true,
+          outcome_unknown: false,
+          steps: [{ step: 'target_ddl', status: 'partial_failure', sequence_created: true, target_created: false }],
+        },
+      },
+      status: /partial_failure_target_ddl/,
+    },
+    {
+      name: 'network',
+      error: new Error('Failed to fetch'),
+      status: /Failed to fetch/,
+    },
+    {
+      name: 'timeout',
+      error: new Error('timeout'),
+      status: /timeout/,
+    },
+  ];
+
+  for (const item of cases) {
+    const { view, gate } = lockedAfter(item.error);
+    assert.equal(view.needsReview, true, item.name);
+    assert.equal(view.success, false, item.name);
+    assert.equal(view.outcome, 'needs_review', item.name);
+    assert.match(view.message, item.status, item.name);
+    assert.match(view.message, /may have started or partly completed/, item.name);
+    assert.equal(view.message.trim().toLowerCase() === 'failed', false, item.name);
+    assert.equal(view.message.includes(REVIEW_SENTENCE), true, item.name);
+    const again = acceptWrite(arm(gate), { ready: true });
+    assert.equal(again.accepted, false, item.name);
+    assert.equal(again.reason, 'needs_review', item.name);
+    assert.equal(setWriteConfirmation(gate, true).confirmed, false, item.name);
+    assert.equal(canRefreshEvidence({ loading: false, gates: [gate] }), true, item.name);
+    assert.equal(writesInFlight([gate]), false, item.name);
+    assert.equal(shouldDismissModal(writesInFlight([gate])), true, item.name);
+    assert.equal(button(gate, GENERATE_LABELS).enabled, false, item.name);
+  }
+});
+
+
+test('a definite failure can be retried after a fresh confirmation', () => {
+  const view = projectRejected({
+    status: 409,
+    scd2: {
+      status: 'blocked_target_not_scd2',
+      manual_review_required: false,
+      outcome_unknown: false,
+      steps: [{ step: 'odi_scenario_run', status: 'blocked', side_effects: false, remote: { run_may_have_started: false } }],
+    },
+  }, { write: true });
+  assert.equal(view.needsReview, false);
+  assert.equal(view.outcome, 'failed');
+  assert.equal(view.rejected, true);
+  assert.match(view.message, /blocked_target_not_scd2/);
+  assert.equal(view.message.includes(REVIEW_SENTENCE), false);
+
+  let gate = settleWrite(acceptWrite(arm(createWriteGate()), { ready: true }).gate, { ok: false });
+  assert.equal(acceptWrite(gate, { ready: true }).reason, 'confirmation');
+  assert.equal(acceptWrite(arm(gate), { ready: true }).accepted, true);
+
+  const cleanRun = projectRun({
+    status: 'run_failed',
+    manual_review_required: false,
+    outcome_unknown: false,
+    scenario_execution_completed: false,
+    scenario: { name: 'MAP_ODS_CUST_TO_DIM_CUST_SCN', version: '001', context: 'GLOBAL' },
+    steps: [{ step: 'odi_scenario_run', status: 'blocked', side_effects: false, remote: { run_may_have_started: false } }],
+    postflight: { status: 'ok', counts: { target_total: 1, target_current: 1, rows_with_effective_to_set: 0 } },
+  });
+  assert.equal(cleanRun.needsReview, false);
+  assert.equal(cleanRun.success, false);
+});
+
+
+test('a completed run with postflight failure and a may-have flag need review', () => {
+  const postflightFailed = projectRejected({
+    status: 502,
+    scd2: {
+      status: 'run_completed_postflight_failed',
+      manual_review_required: true,
+      scenario_execution_completed: true,
+      scenario: { name: 'MAP_ODS_CUST_TO_DIM_CUST_SCN', version: '001', context: 'GLOBAL' },
+      postflight: { status: 'error', counts: {} },
+    },
+  }, { write: true });
+  assert.equal(postflightFailed.needsReview, true);
+  assert.match(postflightFailed.message, /run_completed_postflight_failed/);
+  assert.equal(postflightFailed.evidence.status, 'error');
+
+  const mayHaveOnly = projectRejected({
+    status: 502,
+    scd2: {
+      status: 'run_failed',
+      steps: [{ step: 'odi_scenario_run', remote: { run_may_have_started: true } }],
+    },
+  }, { write: true });
+  assert.equal(mayHaveOnly.needsReview, true);
+
+  const unknownOnly = projectGenerate({
+    status: 'partial_failure_scenario_generate',
+    outcome_unknown: true,
+    known_side_effects: true,
+    manual_review_required: true,
+  });
+  assert.equal(unknownOnly.needsReview, true);
+  assert.equal(unknownOnly.success, false);
+  assert.match(unknownOnly.message, /partial_failure_scenario_generate/);
+
+  const generated = projectGenerate({
+    ...GENERATED,
+    outcome_unknown: false,
+    known_side_effects: true,
+    manual_review_required: false,
+    steps: [{ step: 'odi_scenario_run', status: 'passed', side_effects: true, remote: { run_may_have_started: true } }],
+  });
+  assert.equal(generated.success, true);
+  assert.equal(generated.outcome, 'succeeded');
+  assert.equal(generated.needsReview, false);
+});
+
+
+test('a fresh plan does not unlock a write that needs review', () => {
+  const { gate } = lockedAfter({ status: 502, scd2: { status: 'run_unknown', manual_review_required: true } });
+  const replacement = createWriteGate({ lockAfterSuccess: true });
+  assert.equal(replaceWriteGate(gate, replacement), gate);
+  assert.equal(replaceWriteGate(createWriteGate(), replacement), replacement);
+});
+
+
+test('prefill accepts both hand-off spellings and lets a valid canonical value win', () => {
+  assert.deepEqual(PREFILL_ALIASES.map(spec => [spec.field, spec.canonical, spec.alias]), [
+    ['source_owner', 'source_schema', 'src_schema'],
+    ['source_table', 'source_table', 'src_table'],
+    ['target_owner', 'target_schema', 'tgt_owner'],
+    ['target_table', 'target_table', 'tgt_table'],
+  ]);
+
+  const wizard = applyPrefill(emptyScd2Form(), {
+    src_schema: 'hr',
+    src_table: 'ODS_CUSTOMERS',
+    tgt_owner: 'dm',
+    tgt_table: 'DIM_CUSTOMER',
+    mapping_name: 'MAP_ODS_CUST_TO_DIM_CUST',
+    key_columns: ['CUST_ID'],
+    src_model: 'ORACLE_DWH',
+    load_type: 'type2',
+  });
+  assert.equal(wizard.source_owner, 'HR');
+  assert.equal(wizard.source_table, 'ODS_CUSTOMERS');
+  assert.equal(wizard.target_owner, 'DM');
+  assert.equal(wizard.target_table, 'DIM_CUSTOMER');
+  assert.equal(wizard.src_model, undefined);
+  assert.equal(wizard.load_type, undefined);
+
+  const conflict = applyPrefill(emptyScd2Form(), {
+    source_schema: 'HR',
+    src_schema: 'DWH',
+    source_table: 'ODS_CUSTOMERS',
+    src_table: 'OTHER_TABLE',
+    target_schema: 'DM',
+    tgt_owner: 'DWH',
+    target_table: 'DIM_CUSTOMER',
+    tgt_table: 'OTHER_TARGET',
+  });
+  assert.equal(conflict.source_owner, 'HR');
+  assert.equal(conflict.source_table, 'ODS_CUSTOMERS');
+  assert.equal(conflict.target_owner, 'DM');
+  assert.equal(conflict.target_table, 'DIM_CUSTOMER');
+
+  const aliasFillsInvalidCanonical = applyPrefill(emptyScd2Form(), {
+    source_schema: 'NOPE',
+    src_schema: 'SH',
+    target_schema: '',
+    tgt_owner: 'DM',
+  });
+  assert.equal(aliasFillsInvalidCanonical.source_owner, 'SH');
+  assert.equal(aliasFillsInvalidCanonical.prefillNotes.source_owner, undefined);
+  assert.equal(aliasFillsInvalidCanonical.target_owner, 'DM');
+
+  const invalid = applyPrefill(emptyScd2Form(), {
+    src_schema: 'SYS',
+    src_table: 'BAD NAME',
+    tgt_owner: 'HR',
+    tgt_table: 'A,B',
+    source_schema: 'NOT_AN_OWNER',
+    target_table: '"DIM_CUSTOMER"',
+  });
+  assert.equal(invalid.source_owner, '');
+  assert.equal(invalid.source_table, '');
+  assert.equal(invalid.target_owner, '');
+  assert.equal(invalid.target_table, '');
+  assert.equal(invalid.prefillNotes.source_owner, 'The suggested source owner was invalid.');
+  assert.equal(invalid.prefillNotes.source_table, 'The suggested source table was invalid.');
+  assert.equal(invalid.prefillNotes.target_owner, 'The suggested target owner was invalid.');
+  assert.equal(invalid.prefillNotes.target_table, 'The suggested target table was invalid.');
+});
+
+
+test('the mapping wizard hand-off fills the Type 2 identity fields', () => {
+  const action = buildScd2Handoff({
+    src_model: 'ORACLE_DWH',
+    src_table: 'ODS_CUSTOMERS',
+    src_schema: 'DWH',
+    tgt_model: 'ORACLE_DM',
+    tgt_owner: 'DM',
+    tgt_table: 'DIM_CUSTOMER',
+    needs_skey: false,
+    skey_natural_key: '',
+    description: 'Synthetic mapping',
+    mapping_name: 'MAP_ODS_CUST_TO_DIM_CUST',
+    drop_target_if_exists: false,
+    load_type: 'type2',
+    key_columns: 'cust_id',
+  });
+  const request = action.payload.props.mappingRequest;
+  assert.equal(request.src_schema, 'DWH');
+  assert.equal(request.src_table, 'ODS_CUSTOMERS');
+  assert.equal(request.tgt_owner, 'DM');
+  assert.equal(request.tgt_table, 'DIM_CUSTOMER');
+  const form = applyPrefill(emptyScd2Form(), request);
+  assert.equal(form.source_owner, 'DWH');
+  assert.equal(form.source_table, 'ODS_CUSTOMERS');
+  assert.equal(form.target_owner, 'DM');
+  assert.equal(form.target_table, 'DIM_CUSTOMER');
+  assert.equal(form.mapping_name, 'MAP_ODS_CUST_TO_DIM_CUST');
+  assert.equal(form.natural_key_text, 'CUST_ID');
+  assert.equal(form.load_type, undefined);
+  assert.equal(form.drop_target_if_exists, undefined);
+  const identity = validateScd2Form(form);
+  assert.deepEqual(Object.keys(identity.errors), ['tracked_text']);
+  const ready = validateScd2Form({ ...form, tracked_mode: 'all' });
+  assert.equal(ready.ok, true);
+  assert.equal(ready.request.source_owner, 'DWH');
+  assert.equal(ready.request.source_table, 'ODS_CUSTOMERS');
+  assert.equal(ready.request.target_owner, 'DM');
+  assert.equal(ready.request.target_table, 'DIM_CUSTOMER');
+  assert.equal(ready.request.mapping_name, 'MAP_ODS_CUST_TO_DIM_CUST');
+  assert.deepEqual(ready.request.natural_key, ['CUST_ID']);
 });

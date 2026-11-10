@@ -22,14 +22,23 @@ const COUNT_LABELS = {
 const COUNT_ORDER = ['target_total', 'target_current', 'rows_with_effective_to_set'];
 
 // Flags returned by scd2_postflight.collect_stock_postflight. A missing flag is
-// "not reported". `*_proven` false means the check was not proven, not a mismatch.
+// "not reported". The three proof flags stay false on a passing count witness;
+// that is "not proven" / "not checked", not a failed load.
 const EVIDENCE_FLAGS = [
-  ['source_current_count_equal', 'Source equals current'],
+  ['source_current_count_equal', 'Source row count equals current row count'],
   ['business_parity_proven', 'Business parity proven'],
   ['physical_noop_proven', 'Physical no-op proven'],
   ['history_overlap_checked', 'History overlap checked'],
   ['stock_contract_valid', 'Stock contract valid'],
 ];
+
+export const STATUS_OK_SCOPE = 'The count check passed. It does not prove row-level equality.';
+export const REVIEW_SENTENCE = 'This operation may have started or partly completed and must be checked before it is tried again.';
+export const WRITE_IN_FLIGHT_NOTE = 'This request is still running. Do not reload this page. If the page is reloaded anyway, check the evidence before running again.';
+
+const PROOF_FLAGS = new Set(['business_parity_proven', 'physical_noop_proven']);
+const SUCCESS_STATUSES = new Set(['generated', 'run_completed']);
+const UNKNOWN_REPOSITORY = new Set(['unverified', 'commit_outcome_unknown', 'rollback_failed']);
 
 const PREFILL_NOTES = {
   source_owner: 'The suggested source owner was invalid.',
@@ -39,6 +48,15 @@ const PREFILL_NOTES = {
   mapping_name: 'The suggested mapping name was invalid.',
   natural_key_text: 'The suggested key was invalid.',
 };
+
+// Chat spelling is canonical. The mapping wizard spelling is the alias.
+// When both are present and valid, the canonical value is kept.
+export const PREFILL_ALIASES = Object.freeze([
+  Object.freeze({ field: 'source_owner', canonical: 'source_schema', alias: 'src_schema', owners: SOURCE_OWNERS, uppercase: true }),
+  Object.freeze({ field: 'source_table', canonical: 'source_table', alias: 'src_table' }),
+  Object.freeze({ field: 'target_owner', canonical: 'target_schema', alias: 'tgt_owner', owners: TARGET_OWNERS, uppercase: true }),
+  Object.freeze({ field: 'target_table', canonical: 'target_table', alias: 'tgt_table' }),
+]);
 
 export function emptyScd2Form() {
   return {
@@ -138,14 +156,39 @@ function assignPrefillKey(next, columns) {
   delete next.prefillNotes.natural_key_text;
 }
 
+function suppliedPrefill(prefill, key) {
+  if (!Object.prototype.hasOwnProperty.call(prefill, key)) return false;
+  const value = prefill[key];
+  return value != null && value !== '';
+}
+
+function applyPrefillAlias(next, prefill, spec) {
+  const canonicalSupplied = suppliedPrefill(prefill, spec.canonical);
+  const aliasSupplied = suppliedPrefill(prefill, spec.alias);
+  if (!canonicalSupplied && !aliasSupplied) return;
+  const options = {
+    owners: spec.owners || null,
+    uppercase: spec.uppercase === true,
+    mapping: spec.mapping === true,
+  };
+  const canonical = prefill[spec.canonical];
+  const alias = prefill[spec.alias];
+  if (canonicalSupplied && isSingleIdentifier(canonical, options)) {
+    assignPrefillIdentifier(next, spec.field, canonical, options);
+    return;
+  }
+  if (aliasSupplied && isSingleIdentifier(alias, options)) {
+    assignPrefillIdentifier(next, spec.field, alias, options);
+    return;
+  }
+  assignPrefillIdentifier(next, spec.field, canonicalSupplied ? canonical : alias, options);
+}
+
 export function applyPrefill(form, prefill) {
   const next = { ...emptyScd2Form(), ...form };
   next.prefillNotes = { ...(form?.prefillNotes || {}) };
   if (!prefill || typeof prefill !== 'object' || Array.isArray(prefill)) return next;
-  if ('source_schema' in prefill) assignPrefillIdentifier(next, 'source_owner', prefill.source_schema, { owners: SOURCE_OWNERS, uppercase: true });
-  if ('source_table' in prefill) assignPrefillIdentifier(next, 'source_table', prefill.source_table);
-  if ('target_schema' in prefill) assignPrefillIdentifier(next, 'target_owner', prefill.target_schema, { owners: TARGET_OWNERS, uppercase: true });
-  if ('target_table' in prefill) assignPrefillIdentifier(next, 'target_table', prefill.target_table);
+  for (const spec of PREFILL_ALIASES) applyPrefillAlias(next, prefill, spec);
   if ('mapping_name' in prefill) assignPrefillIdentifier(next, 'mapping_name', prefill.mapping_name, { mapping: true });
   if ('key_columns' in prefill) assignPrefillKey(next, prefill.key_columns);
   return next;
@@ -380,7 +423,7 @@ export function createWriteGate({ lockAfterSuccess = false } = {}) {
 }
 
 export function setWriteConfirmation(gate, checked) {
-  if (!gate || gate.phase === 'in_flight') return gate;
+  if (!gate || gate.phase === 'in_flight' || gate.phase === 'needs_review') return gate;
   if (gate.lockAfterSuccess && gate.completedCount > 0) return { ...gate, confirmed: false };
   if (!checked) return { ...gate, confirmed: false };
   return { ...gate, confirmed: true, confirmToken: gate.confirmToken + 1 };
@@ -388,6 +431,7 @@ export function setWriteConfirmation(gate, checked) {
 
 export function acceptWrite(gate, { ready } = {}) {
   if (!gate || gate.phase === 'in_flight') return { accepted: false, reason: 'in_flight', gate };
+  if (gate.phase === 'needs_review') return { accepted: false, reason: 'needs_review', gate };
   if (gate.lockAfterSuccess && gate.completedCount > 0) return { accepted: false, reason: 'finished', gate };
   if (ready !== true) return { accepted: false, reason: 'not_ready', gate };
   if (!gate.confirmed || gate.confirmToken === gate.consumedToken) {
@@ -405,12 +449,22 @@ export function acceptWrite(gate, { ready } = {}) {
   };
 }
 
-export function settleWrite(gate, { ok } = {}) {
+export function settleWrite(gate, { ok, review } = {}) {
   if (!gate || gate.phase !== 'in_flight') return gate;
+  if (review === true) return { ...gate, phase: 'needs_review', confirmed: false };
   if (ok === true) {
     return { ...gate, phase: 'succeeded', confirmed: false, completedCount: gate.completedCount + 1 };
   }
   return { ...gate, phase: 'failed', confirmed: false };
+}
+
+export function replaceWriteGate(current, next) {
+  if (current?.phase === 'needs_review') return current;
+  return next;
+}
+
+export function canRefreshEvidence({ loading = false, gates = [] } = {}) {
+  return loading !== true && !writesInFlight(gates);
 }
 
 export function writesInFlight(gates) {
@@ -420,9 +474,10 @@ export function writesInFlight(gates) {
 export function writeButtonState(gate, { ready, idleLabel, pendingLabel, doneLabel, repeatLabel }) {
   const finished = Boolean(gate?.lockAfterSuccess && gate.completedCount > 0);
   const inFlight = gate?.phase === 'in_flight';
-  const repeat = !finished && (gate?.completedCount || 0) > 0;
+  const reviewLocked = gate?.phase === 'needs_review';
+  const repeat = !finished && !reviewLocked && (gate?.completedCount || 0) > 0;
   const armed = Boolean(gate?.confirmed) && gate.confirmToken !== gate.consumedToken;
-  const enabled = !finished && !inFlight && ready === true && armed;
+  const enabled = !finished && !inFlight && !reviewLocked && ready === true && armed;
   let label = idleLabel;
   if (inFlight) label = pendingLabel;
   else if (finished) label = doneLabel;
@@ -434,17 +489,75 @@ export function writeButtonState(gate, { ready, idleLabel, pendingLabel, doneLab
   return { enabled, label, finished, inFlight, repeat, notice };
 }
 
+function topLevelUncertainty(payload) {
+  if (payload.outcome_unknown === true) return true;
+  if (payload.manual_review_required === true) return true;
+  if (payload.manual_recovery_review_required === true) return true;
+  if (Object.prototype.hasOwnProperty.call(payload, 'scenario_execution_completed') && payload.scenario_execution_completed == null) {
+    return true;
+  }
+  return false;
+}
+
+function reviewStatus(status) {
+  return status === 'run_unknown' || status === 'outcome_unknown' || status.startsWith('partial_failure');
+}
+
+function treeHasUncertainty(value, seen) {
+  if (!value || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some(item => treeHasUncertainty(item, seen));
+  const status = typeof value.status === 'string' ? value.status : '';
+  if (reviewStatus(status)) return true;
+  if (topLevelUncertainty(value)) return true;
+  if (value.known_side_effects === true && !SUCCESS_STATUSES.has(status)) return true;
+  if (Object.prototype.hasOwnProperty.call(value, 'side_effects') && value.side_effects == null) return true;
+  if (typeof value.repository_outcome === 'string' && UNKNOWN_REPOSITORY.has(value.repository_outcome)) return true;
+  for (const [key, item] of Object.entries(value)) {
+    if (/may_have_/i.test(key) && item === true) return true;
+    if (item && typeof item === 'object' && treeHasUncertainty(item, seen)) return true;
+  }
+  return false;
+}
+
+// Needs review when the server cannot promise that nothing started or changed:
+// outcome_unknown, run_unknown, manual_review_required, partial_failure_*,
+// known_side_effects on a non-success, side_effects null, an unverified
+// repository outcome, scenario_execution_completed null, or any *_may_have_*
+// flag. A clean generated / run_completed body is not reviewed just because
+// the successful run reports run_may_have_started.
+export function hasReviewSignal(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const status = typeof payload.status === 'string' ? payload.status : '';
+  if (SUCCESS_STATUSES.has(status) && !topLevelUncertainty(payload)) return false;
+  return treeHasUncertainty(payload, new Set());
+}
+
+function reviewCopy(parts) {
+  const detail = parts.filter(Boolean).join(' — ');
+  const message = detail ? `${detail}. ${REVIEW_SENTENCE}` : REVIEW_SENTENCE;
+  return { detail, message };
+}
+
 export function projectGenerate(payload) {
   const status = typeof payload?.status === 'string' ? payload.status : '';
   const scenarioVersion = typeof payload?.scenario_version === 'string' ? payload.scenario_version : '';
-  const ok = status === 'generated' && scenarioVersion.length > 0;
+  const needsReview = hasReviewSignal(payload);
+  const ok = status === 'generated' && scenarioVersion.length > 0 && !needsReview;
   if (!ok) {
     const failure = describeFailure(payload);
-    const message = status === 'generated' ? 'generated response is missing scenario_version.' : failure.message;
+    const review = needsReview ? reviewCopy([status, typeof payload?.error_code === 'string' ? payload.error_code : '']) : null;
+    const message = review
+      ? review.message
+      : (status === 'generated' ? 'generated response is missing scenario_version.' : failure.message);
     return {
       ok: false,
       success: false,
+      needsReview,
+      outcome: needsReview ? 'needs_review' : 'failed',
       status,
+      detail: review ? review.detail : '',
       message,
       mapping_name: '',
       scenario_name: '',
@@ -455,7 +568,10 @@ export function projectGenerate(payload) {
   return {
     ok: true,
     success: true,
+    needsReview: false,
+    outcome: 'succeeded',
     status,
+    detail: '',
     message: '',
     mapping_name: String(payload.mapping_name || ''),
     scenario_name: String(payload.scenario_name || ''),
@@ -481,11 +597,21 @@ function sessionStatus(steps) {
   return typeof runStep?.session_status === 'string' ? runStep.session_status : '';
 }
 
+function evidenceFlagText(key, value) {
+  if (key === 'history_overlap_checked') {
+    return value === true ? 'checked' : 'not checked by this check';
+  }
+  if (PROOF_FLAGS.has(key)) {
+    return value === true ? 'proven' : 'not proven by this check';
+  }
+  return String(value);
+}
+
 function evidenceFlag(payload, key, label) {
   if (!payload || !Object.prototype.hasOwnProperty.call(payload, key) || payload[key] == null) {
     return { key, label, reported: false, value: null, text: 'not reported' };
   }
-  return { key, label, reported: true, value: payload[key], text: String(payload[key]) };
+  return { key, label, reported: true, value: payload[key], text: evidenceFlagText(key, payload[key]) };
 }
 
 export function projectEvidenceFlags(payload) {
@@ -530,6 +656,7 @@ export function projectPostflight(payload) {
     current: counts.target_current,
     closed: counts.rows_with_effective_to_set,
     message: warning ? 'Source and current counts do not match.' : (ok ? '' : failure.message),
+    statusScope: payload.status === 'ok' ? STATUS_OK_SCOPE : '',
     parity,
   };
 }
@@ -552,13 +679,22 @@ export function projectRun(payload) {
   const scenario = scenarioObject(payload?.scenario);
   const evidence = projectPostflight(payload?.postflight);
   const session = sessionStatus(payload?.steps);
-  const ok = status === 'run_completed' && Boolean(scenario) && evidence?.ok === true;
+  const needsReview = hasReviewSignal(payload);
+  const ok = status === 'run_completed' && Boolean(scenario) && evidence?.ok === true && !needsReview;
   const failure = ok ? null : describeFailure(payload);
-  const message = ok ? '' : (evidence?.warning && evidence.message ? evidence.message : failure.message);
+  const review = needsReview
+    ? reviewCopy([status, typeof payload?.error_code === 'string' ? payload.error_code : ''])
+    : null;
+  const message = ok
+    ? ''
+    : (review ? review.message : (evidence?.warning && evidence.message ? evidence.message : failure.message));
   return {
     ok,
     success: ok,
+    needsReview,
+    outcome: ok ? 'succeeded' : (needsReview ? 'needs_review' : 'failed'),
     status,
+    detail: review ? review.detail : '',
     message,
     scenario,
     session_status: session,
@@ -572,7 +708,7 @@ export function payloadFromApiError(error) {
   return null;
 }
 
-export function projectRejected(error) {
+export function projectRejected(error, { write = false } = {}) {
   const httpStatus = Number.isInteger(error?.status) ? error.status : null;
   const body = payloadFromApiError(error);
   const serverStatus = typeof body?.status === 'string' ? body.status : '';
@@ -583,17 +719,48 @@ export function projectRejected(error) {
   if (serverStatus) parts.push(serverStatus);
   if (errorCode) parts.push(errorCode);
   if (serverError) parts.push(serverError);
+  const needsReview = hasReviewSignal(body) || (write === true && body == null);
+  if (needsReview) {
+    const fallback = typeof error?.message === 'string' && error.message ? error.message : '';
+    const review = reviewCopy(parts.length ? parts : [fallback]);
+    return {
+      ok: false,
+      success: false,
+      rejected: false,
+      needsReview: true,
+      warning: true,
+      outcome: 'needs_review',
+      http_status: httpStatus,
+      status: serverStatus,
+      error_code: errorCode,
+      error: serverError,
+      detail: review.detail,
+      message: review.message,
+      blockers: [review.message],
+      warnings: [],
+      mapping_name: '',
+      scenario_name: '',
+      scenario_version: '',
+      target: null,
+      scenario: scenarioObject(body?.scenario),
+      session_status: sessionStatus(body?.steps),
+      evidence: body?.postflight ? projectPostflight(body.postflight) : null,
+    };
+  }
   const message = parts.join(' — ')
     || (typeof error?.message === 'string' && error.message ? error.message : 'Request failed.');
   return {
     ok: false,
     success: false,
     rejected: true,
+    needsReview: false,
     warning: false,
+    outcome: 'failed',
     http_status: httpStatus,
     status: serverStatus,
     error_code: errorCode,
     error: serverError,
+    detail: '',
     message,
     blockers: [message],
     warnings: [],
