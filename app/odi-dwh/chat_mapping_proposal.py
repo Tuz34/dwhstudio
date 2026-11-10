@@ -8,27 +8,18 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import dataclass
 
 # Same Oracle/ODI identifier contract as MappingGenerator._validate_identifier.
 _IDENTIFIER = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 _DM_WARNING = "Datamart targets are supported only for Type 2 history."
 _TYPE2_NAME_WARNING = "Mapping name is longer than 31 characters; Type 2 requires a shorter name."
 _LAYERS = {"ODS": "ODS", "EDW": "EDW", "DWH": "DWH", "DM": "DM", "DATAMART": "DM", "DATA MART": "DM"}
-_LAYER_TOKEN = r"(?:DATA\s+MART|DATAMART|EDW|DWH|ODS|DM)"
-_LAYER_PATTERNS = (
-    re.compile(rf"\b(?:INTO|TO)(?:\s+THE)?\s+(?P<layer>{_LAYER_TOKEN})\b"),
-    re.compile(rf"\bIN\s+THE\s+(?P<layer>{_LAYER_TOKEN})\b"),
-    re.compile(rf"\b(?P<layer>{_LAYER_TOKEN})\s+(?:LAYER|KATMAN(?:I|INA|INDA)?)\b"),
-    re.compile(rf"\b(?:LAYER|KATMAN)\s+(?P<layer>{_LAYER_TOKEN})\b"),
-)
-_KEY_MARKER = re.compile(
-    r"\b(?:PRIMARY\s+KEY|NATURAL\s+KEY|KEY\s+COLUMNS?|KEYS?|PK|"
-    r"ANAHTAR(?:\s+KOLON(?:U|LARI)?)?)\b"
-)
-_TARGET_MARKER = re.compile(
-    r"\b(?:TARGET(?:\s+TABLE)?|HEDEF(?:\s+TABLO[A-Z]*)?|"
-    r"INTO\s+(?:THE\s+)?TABLE)\s*(?::|=)?\s+(?P<token>\S+)"
-)
+_PART = r'''(?:[A-Z][A-Z0-9_]*|"[A-Z][A-Z0-9_]*"|'[A-Z][A-Z0-9_]*'|`[A-Z][A-Z0-9_]*`|“[A-Z][A-Z0-9_]*”|‘[A-Z][A-Z0-9_]*’)'''
+_DOTTED = re.compile(rf"{_PART}(?:\.{_PART})+")
+_WORD = re.compile(r"[A-Z][A-Z0-9_]*(?:['’][A-Z0-9_]+)*|[0-9]+")
+_QUOTED = {'"': '"', "'": "'", '`': '`', '“': '”', '‘': '’'}
+_PUNCTUATION = frozenset(",.():=?!/+&-")
 _FUNCTION_WORDS = frozenset({
     "THE", "A", "AN", "INTO", "TO", "FROM", "AS", "ON", "IN", "FOR", "WITH",
     "AND", "OR", "OF", "IS", "ARE", "BY", "USE", "USING", "BIR", "BU", "SU",
@@ -52,31 +43,102 @@ _KEY_BLOCKED = (_FUNCTION_WORDS | _CALENDAR_WORDS | frozenset({
     "SCD1", "SCD2", "HISTORY", "HISTORICAL", "EKLE", "GUNCELLE", "KEY",
     "KEYS", "PRIMARY", "NATURAL", "ANAHTAR",
 })) - {"A"}  # Explicit `key A, B` names columns; `a` is an article only in prose.
-_LOAD_PATTERNS = {
-    "type2": re.compile(r"\b(?:SCD\s*[-_]?\s*2|TYPE\s*[-_]?\s*2|TIP\s*[-_]?\s*2)(?:\s+HISTORY)?\b|\b(?:TARIHCELI|HISTORY|HISTORICAL)\b"),
-    "type1": re.compile(r"\b(?:SCD\s*[-_]?\s*1|TYPE\s*[-_]?\s*1|TIP\s*[-_]?\s*1)\b"),
-    "truncate_load": re.compile(r"\b(?:TRUNCATE(?:\s+INSERT)?|FULL\s+RELOAD|FULL\s+LOAD|TAM\s+YUKLEME|TAM\s+YENILE(?:ME)?)\b"),
-    "insert_update": re.compile(r"\b(?:INSERT\s*[/+&-]\s*UPDATE|INSERT\s+UPDATE|UPSERT|MERGE|EKLE\s*[/+&-]\s*GUNCELLE|EKLE\s+VE\s+GUNCELLE|VARSA\s+GUNCELLE\s+YOKSA\s+EKLE)\b"),
+_LOAD_PHRASES = {
+    "insert_update": (
+        ("INSERT", "/", "UPDATE"), ("INSERT", "+", "UPDATE"),
+        ("INSERT", "&", "UPDATE"), ("INSERT", "-", "UPDATE"),
+        ("INSERT", "UPDATE"), ("UPSERT",), ("MERGE",),
+        ("EKLE", "/", "GUNCELLE"), ("EKLE", "+", "GUNCELLE"),
+        ("EKLE", "&", "GUNCELLE"), ("EKLE", "-", "GUNCELLE"),
+        ("EKLE", "VE", "GUNCELLE"),
+        ("VARSA", "GUNCELLE", "YOKSA", "EKLE"),
+    ),
+    "truncate_load": (
+        ("TRUNCATE", "INSERT"), ("TRUNCATE",), ("FULL", "RELOAD"),
+        ("FULL", "LOAD"), ("TAM", "YUKLEME"), ("TAM", "YENILE"),
+        ("TAM", "YENILEME"),
+    ),
+    "type1": (
+        ("TYPE", "1"), ("TIP", "1"), ("SCD", "1"), ("SCD", "-", "1"),
+        ("SCD", "_", "1"), ("SCD1",), ("SCD_1",),
+    ),
+    "type2": (
+        ("TYPE", "2", "HISTORY"), ("TIP", "2", "HISTORY"),
+        ("SCD", "2", "HISTORY"), ("SCD2", "HISTORY"),
+        ("TYPE", "2"), ("TIP", "2"), ("SCD", "2"),
+        ("SCD", "-", "2"), ("SCD_2",), ("SCD2",),
+        ("TARIHCELI",), ("HISTORY",), ("HISTORICAL",),
+    ),
 }
-_LOAD_PREFIX = re.compile(
-    r"\b(?:(?:AS|USING|WITH)\s+(?:(?:A|AN|THE)\s+)?(?:(?:LOAD|MODE)\s+)?"
-    r"|LOAD\s+TYPE\s+|YUKLEME\s+TIPI\s+)$"
-)
-_LOAD_SUFFIX = re.compile(r"\s+(?:OLARAK|ILE|SEKLINDE)\b")
-_HEDGE = re.compile(
-    r"\?|\b(?:NOT|NO|NEVER|DON'?T|WITHOUT|AVOID|RATHER\s+THAN|INSTEAD\s+OF|"
-    r"EXCEPT|UNLESS|ONLY\s+IF|IF|SHOULD|DEGIL|OLMASIN|OLMADAN|HARIC|"
-    r"YERINE|EGER|ISTEMIYORUM|ASLA|TARIHCESIZ|TARIHSIZ)\b|"
-    r"\b(?:YAP|ET|TUT|KULLAN)(?:MA|ME|MADAN|MEDEN|MAYIN|MEYIN|MAZ|MEZ)\b"
-)
+_HEDGE_EXACT = frozenset({
+    "NOT", "NO", "NEVER", "DONT", "WITHOUT", "EXCEPT", "UNLESS", "IF", "CANNOT",
+    "OLMASIN", "OLMADAN", "HARIC", "YERINE", "EGER", "ASLA", "HAYIR",
+})
+_NEGATIVE_VERB = re.compile(r"(?:YAP|ET|OL|TUT|KULLAN|SIL|YUKLE|AT)(?:MA|ME)[A-Z0-9_]*\Z")
+_LOAD_PRIVATIVE = re.compile(r"(?:TARIH|TRUNCATE|INSERT|UPDATE|MERGE|UPSERT|TYPE|TIP|SCD|YUKLE|YENILE|GUNCELLE|EKLE)[A-Z0-9_]*(?:SIZ|SUZ)\Z")
+
+
+@dataclass(frozen=True)
+class _Token:
+    kind: str
+    value: str
 
 
 def _plain(message: str) -> str:
-    text = message.replace("ı", "i").replace("İ", "I").replace("’", "'")
+    text = message.replace("ı", "i").replace("İ", "I")
     return "".join(
         char for char in unicodedata.normalize("NFKD", text)
         if not unicodedata.combining(char)
     ).upper()
+
+
+def _lex(message: str) -> list[_Token]:
+    """A dotted name or a quoted span is one opaque grammar token."""
+    text = _plain(message)
+    tokens = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char.isspace():
+            index += 1
+            continue
+        dotted = _DOTTED.match(text, index)
+        word = _WORD.match(text, index) if not dotted else None
+        match = dotted or word
+        if match:
+            end = match.end()
+            if end < len(text) and text[end] in ";'\"`“”‘’":
+                while end < len(text) and not text[end].isspace() and text[end] not in ",()?":
+                    end += 1
+                tokens.append(_Token("invalid", text[index:end]))
+                index = end
+                continue
+            if dotted:
+                parts = [part.strip('"\'`“”‘’') for part in match.group().split(".")]
+                tokens.append(_Token("dotted", ".".join(parts)))
+            else:
+                tokens.append(_Token("word", match.group().replace("’", "'")))
+            index = end
+            continue
+        if char in _QUOTED:
+            close = text.find(_QUOTED[char], index + 1)
+            while (close >= 0 and _QUOTED[char] in {"'", "’"} and
+                   0 < close < len(text) - 1 and text[close - 1].isalnum() and
+                   text[close + 1].isalnum()):
+                close = text.find(_QUOTED[char], close + 1)
+            index = len(text) if close < 0 else close + 1
+            tokens.append(_Token("quoted", ""))
+            continue
+        if char in _PUNCTUATION:
+            tokens.append(_Token("punct", char))
+            index += 1
+            continue
+        end = index + 1
+        while end < len(text) and not text[end].isspace() and text[end] not in ",()?":
+            end += 1
+        tokens.append(_Token("invalid", text[index:end]))
+        index = end
+    return tokens
 
 
 def _identifier(value: object) -> str | None:
@@ -98,169 +160,310 @@ def _table_ref(value: object) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _token_ref(token: str) -> tuple[str | None, str | None]:
-    # Only ordinary prose punctuation is removed. SQL punctuation remains
-    # attached and fails the full identifier check.
-    return _table_ref(token.strip('"\'(),.'))
+def _at(tokens: list[_Token], index: int, value: str, taken: set[int]) -> bool:
+    if index < 0 or index >= len(tokens) or index in taken:
+        return False
+    expected = "punct" if value in _PUNCTUATION else "word"
+    return tokens[index].kind == expected and tokens[index].value == value
 
 
-def _masked(text: str, spans: list[tuple[int, int]]) -> str:
-    chars = list(text)
-    for start, end in spans:
-        for index in range(start, end):
-            if chars[index] != "?":
-                chars[index] = " "
-    return "".join(chars)
+def _sequence(tokens: list[_Token], index: int, values: tuple[str, ...], taken: set[int]) -> bool:
+    return all(_at(tokens, index + offset, value, taken) for offset, value in enumerate(values))
 
 
-def _layer(text: str) -> str | None:
-    found = {
-        _LAYERS[" ".join(match.group("layer").split())]
-        for pattern in _LAYER_PATTERNS for match in pattern.finditer(text)
-    }
-    return next(iter(found)) if len(found) == 1 else None
+def _table_marker(tokens: list[_Token], index: int, taken: set[int]) -> bool:
+    return (_at(tokens, index, "TABLE", taken) or
+            (index < len(tokens) and index not in taken and tokens[index].kind == "word"
+             and tokens[index].value.startswith("TABLO")))
 
 
-def _load_constructions(text: str) -> list[tuple[str, int, int]]:
+def _layer_at(tokens: list[_Token], index: int, taken: set[int]) -> tuple[str, int] | None:
+    if _sequence(tokens, index, ("DATA", "MART"), taken):
+        return "DM", index + 2
+    if index < len(tokens) and index not in taken and tokens[index].kind == "word":
+        layer = _LAYERS.get(tokens[index].value)
+        if layer:
+            return layer, index + 1
+    return None
+
+
+def _layer_constructions(tokens: list[_Token], taken: set[int]) -> list[tuple[str, int, int]]:
     found = []
-    for kind, pattern in _LOAD_PATTERNS.items():
-        for match in pattern.finditer(text):
-            prefix = _LOAD_PREFIX.search(text[:match.start()])
-            suffix = _LOAD_SUFFIX.match(text, match.end())
-            if prefix or suffix:
-                found.append((kind, prefix.start() if prefix else match.start(),
-                              suffix.end() if suffix else match.end()))
+    for index in range(len(tokens)):
+        if _at(tokens, index, "INTO", taken) or _at(tokens, index, "TO", taken):
+            start = index + 1
+            if _at(tokens, start, "THE", taken):
+                start += 1
+            layer = _layer_at(tokens, start, taken)
+            if layer and not _at(tokens, layer[1], "STUDIO", taken):
+                found.append((layer[0], index, layer[1]))
+        if _sequence(tokens, index, ("IN", "THE"), taken):
+            layer = _layer_at(tokens, index + 2, taken)
+            if layer and not _at(tokens, layer[1], "STUDIO", taken):
+                found.append((layer[0], index, layer[1]))
+        layer = _layer_at(tokens, index, taken)
+        if layer and any(_at(tokens, layer[1], ending, taken) for ending in
+                         ("LAYER", "KATMANI", "KATMANINA", "KATMANINDA")):
+            found.append((layer[0], index, layer[1] + 1))
+        if _at(tokens, index, "LAYER", taken) or _at(tokens, index, "KATMAN", taken):
+            layer = _layer_at(tokens, index + 1, taken)
+            if layer:
+                found.append((layer[0], index, layer[1]))
     return found
 
 
-def _load_type(text: str) -> str | None:
-    if _HEDGE.search(text):
+def _layer(tokens: list[_Token], taken: set[int]) -> str | None:
+    found = {layer for layer, _start, _end in _layer_constructions(tokens, taken)}
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def _load_phrase_at(tokens: list[_Token], index: int, taken: set[int]) -> tuple[str, int] | None:
+    matches = [
+        (kind, index + len(phrase))
+        for kind, phrases in _LOAD_PHRASES.items() for phrase in phrases
+        if _sequence(tokens, index, phrase, taken)
+    ]
+    return max(matches, key=lambda item: item[1]) if matches else None
+
+
+def _load_constructions(tokens: list[_Token], taken: set[int]) -> list[tuple[str, int, int]]:
+    found = []
+    index = 0
+    while index < len(tokens):
+        phrase = _load_phrase_at(tokens, index, taken)
+        if not phrase:
+            index += 1
+            continue
+        kind, end = phrase
+        prefix = None
+        previous = index - 1
+        if any(_at(tokens, previous, word, taken) for word in ("LOAD", "MODE")):
+            previous -= 1
+        if any(_at(tokens, previous, word, taken) for word in ("A", "AN", "THE")):
+            previous -= 1
+        if any(_at(tokens, previous, word, taken) for word in ("AS", "USING", "WITH")):
+            prefix = previous
+        elif (_sequence(tokens, index - 2, ("LOAD", "TYPE"), taken) or
+              _sequence(tokens, index - 2, ("YUKLEME", "TIPI"), taken)):
+            prefix = index - 2
+        suffix = any(_at(tokens, end, word, taken) for word in ("OLARAK", "ILE", "SEKLINDE"))
+        if prefix is not None or suffix:
+            found.append((kind, prefix if prefix is not None else index, end + int(suffix)))
+            index = end
+        else:
+            index += 1
+    return found
+
+
+def _hedge_word(word: str) -> bool:
+    return bool(
+        word in _HEDGE_EXACT or "N'T" in word or
+        word.startswith(("AVOID", "SHOULD", "DEGIL", "ISTEM")) or
+        _NEGATIVE_VERB.fullmatch(word) or _LOAD_PRIVATIVE.fullmatch(word)
+    )
+
+
+def _hedged(tokens: list[_Token], taken: set[int]) -> bool:
+    for index, entry in enumerate(tokens):
+        if index in taken or entry.kind in {"quoted", "dotted"}:
+            continue
+        if "?" in entry.value:
+            return True
+        if entry.kind != "word":
+            continue
+        word = entry.value
+        loading_noun = word == "YUKLEME" and (
+            _at(tokens, index - 1, "TAM", taken) or _at(tokens, index + 1, "TIPI", taken))
+        if not loading_noun and _hedge_word(word):
+            return True
+        if (_sequence(tokens, index, ("RATHER", "THAN"), taken) or
+                _sequence(tokens, index, ("INSTEAD", "OF"), taken)):
+            return True
+    return False
+
+
+def _load_type(tokens: list[_Token], taken: set[int]) -> str | None:
+    if _hedged(tokens, taken):
         return None
-    found = _load_constructions(text)
+    found = _load_constructions(tokens, taken)
     return found[0][0] if len(found) == 1 else None
 
 
-def _key_boundary(text: str) -> bool:
-    if re.match(r"(?:TARGET|HEDEF|INTO|TO|IN|LAYER|KATMAN|AS|USING|WITH|"
-                r"LOAD|YUKLEME|MODEL|MODELLE|AKTAR|CREATE|TRANSFER)\b", text):
-        return True
-    if any(pattern.match(text) for pattern in _LAYER_PATTERNS):
-        return True
-    return any(start == 0 for _kind, start, _end in _load_constructions(text))
+def _target_value_index(tokens: list[_Token], index: int, taken: set[int]) -> int | None:
+    if _at(tokens, index, "TARGET", taken) or _at(tokens, index, "HEDEF", taken):
+        next_index = index + 1
+        if _table_marker(tokens, next_index, taken):
+            next_index += 1
+        elif _at(tokens, next_index, "LAYER", taken) or _at(tokens, next_index, "KATMAN", taken):
+            return None
+    elif _at(tokens, index, "INTO", taken):
+        next_index = index + 1
+        if _at(tokens, next_index, "THE", taken):
+            next_index += 1
+        if not _table_marker(tokens, next_index, taken):
+            return None
+        next_index += 1
+    else:
+        return None
+    if _at(tokens, next_index, ":", taken) or _at(tokens, next_index, "=", taken):
+        next_index += 1
+    return next_index
 
 
-def _key_tail(tail: str, offset: int, *, on_clause: bool = False) -> tuple[list[str], list[tuple[int, int]]]:
-    tokens = list(re.finditer(r"[^\s,():=]+|[,():=]", tail))
-    index = 0
-    if tokens and tokens[0].group() in {":", "="}:
-        index += 1
-    if on_clause and index < len(tokens) and tokens[index].group() in {"THE", "AN"}:
-        index += 1
-    if (on_clause and index + 1 < len(tokens) and tokens[index].group() == "A"
-            and tokens[index + 1].group() not in {",", "AND", "VE"}):
-        index += 1
-    keys: list[str] = []
-    spans: list[tuple[int, int]] = []
-    expect_name = True
-    parenthesized = False
-    for token_match in tokens[index:]:
-        piece = token_match.group()
-        if keys and _key_boundary(tail[token_match.start():]):
-            return ([], spans) if parenthesized else (keys, spans)
-        if piece == "(" and not keys and not parenthesized:
-            parenthesized = True
-            continue
-        if piece == ")" and parenthesized and not expect_name:
-            return keys, spans
-        if piece in {",", "AND", "VE"}:
-            if expect_name:
-                return [], spans
-            expect_name = True
-            continue
-        if not expect_name:
-            if _identifier(piece) and not _HEDGE.fullmatch(piece):
-                spans.append((offset + token_match.start(), offset + token_match.end()))
-            return [], spans
-        sentence_end = piece.endswith(".") and piece.count(".") == 1
-        name = _identifier(piece[:-1] if sentence_end else piece)
-        if not name or name in _KEY_BLOCKED:
-            if name and not _HEDGE.fullmatch(name):
-                spans.append((offset + token_match.start(), offset + token_match.end()))
-            return [], spans
-        spans.append((offset + token_match.start(), offset + token_match.end()))
-        if name not in keys:
-            keys.append(name)
-        if len(keys) > 8:
-            return [], spans
-        expect_name = False
-        if sentence_end:
-            return keys, spans
-    return (keys if keys and not expect_name and not parenthesized else []), spans
-
-
-def _keys(text: str) -> tuple[list[str], list[tuple[int, int]]]:
-    for marker in _KEY_MARKER.finditer(text):
-        before = text[max(0, marker.start() - 28):marker.start()]
-        if re.search(r"\b(?:COLUMN|COLUMNS|KOLON|KOLONU|KOLONLARI)(?:\s+NAMED)?\s+$", before):
-            continue
-        return _key_tail(text[marker.end():], marker.end())
-    if not _HEDGE.search(text):
-        constructions = _load_constructions(text)
-        if len(constructions) == 1 and constructions[0][0] in {"insert_update", "type1", "type2"}:
-            end = constructions[0][2]
-            on = re.match(r"\s+ON\b", text[end:])
-            if on:
-                return _key_tail(text[end + on.end():], end + on.end(), on_clause=True)
-    return [], []
-
-
-def _explicit_target(text: str) -> tuple[str | None, str | None, list[tuple[int, int]]]:
+def _explicit_target(tokens: list[_Token]) -> tuple[str | None, str | None, set[int]]:
     references = []
-    spans = []
-    for match in _TARGET_MARKER.finditer(text):
-        token = match.group("token")
-        if token in {"LAYER", "KATMAN"}:
+    taken: set[int] = set()
+    for index in range(len(tokens)):
+        value_index = _target_value_index(tokens, index, taken)
+        if value_index is None or value_index >= len(tokens):
             continue
-        owner, table = _token_ref(token)
+        entry = tokens[value_index]
+        if entry.kind not in {"word", "dotted"}:
+            continue
+        owner, table = _table_ref(entry.value)
         if table:
-            spans.append(match.span("token"))
+            taken.add(value_index)
             references.append((owner, table))
     distinct = set(references)
-    return (*references[0], spans) if len(distinct) == 1 else (None, None, spans)
+    return (*references[0], taken) if len(distinct) == 1 else (None, None, taken)
 
 
 def _explicit_source(
-    text: str, target_spans: list[tuple[int, int]],
-) -> tuple[str | None, str | None, list[tuple[int, int]]]:
-    owner_match = re.search(r"\b(?:SOURCE|KAYNAK)\s+SCHEMA\s+(\S+)", text)
-    stated_owner = _identifier(owner_match.group(1)) if owner_match else None
-    owner_spans = [owner_match.span(1)] if owner_match and stated_owner else []
-
-    def available(span: tuple[int, int]) -> bool:
-        return not any(span[0] < end and start < span[1]
-                       for start, end in [*target_spans, *owner_spans])
-
-    for match in re.finditer(r"\S+", text):
-        span = match.span()
-        owner, table = _token_ref(match.group())
-        if (available(span) and owner and table and owner not in _FUNCTION_WORDS
-                and table not in _FUNCTION_WORDS):
-            return owner, table, [span, *owner_spans]
+    tokens: list[_Token], target_taken: set[int],
+) -> tuple[str | None, str | None, set[int]]:
+    stated_owner = None
+    owner_taken: set[int] = set()
+    for index in range(len(tokens) - 2):
+        if ((_sequence(tokens, index, ("SOURCE", "SCHEMA"), target_taken) or
+             _sequence(tokens, index, ("KAYNAK", "SCHEMA"), target_taken))
+                and tokens[index + 2].kind == "word"):
+            stated_owner = _identifier(tokens[index + 2].value)
+            if stated_owner:
+                owner_taken.add(index + 2)
+                break
+    unavailable = target_taken | owner_taken
+    for index, entry in enumerate(tokens):
+        if index not in unavailable and entry.kind == "dotted":
+            owner, table = _table_ref(entry.value)
+            if owner and table:
+                return owner, table, {index} | owner_taken
 
     candidates = []
-    for pattern in (
-        re.compile(r"\b(?P<token>[A-Z][A-Z0-9_]*)\s+(?:TABLE|TABLO[A-Z]*)\b"),
-        re.compile(r"\b(?:TABLE|TABLO[A-Z]*)\s+(?:(?:THE|A|AN|BIR|BU|SU)\s+)?(?P<token>\S+)"),
-    ):
-        for match in pattern.finditer(text):
-            span = match.span("token")
-            owner, table = _token_ref(match.group("token"))
-            if available(span) and table and table not in _FUNCTION_WORDS:
-                candidates.append((span[0], owner or stated_owner, table, span))
+    for index, entry in enumerate(tokens):
+        if index in unavailable or entry.kind != "word":
+            continue
+        table = _identifier(entry.value)
+        if not table or table in _FUNCTION_WORDS:
+            continue
+        if (_table_marker(tokens, index + 1, unavailable) or
+                _table_marker(tokens, index - 1, unavailable) or
+                (index >= 2 and tokens[index - 1].kind == "word" and
+                 tokens[index - 1].value in {"THE", "A", "AN", "BIR", "BU", "SU"} and
+                 _table_marker(tokens, index - 2, unavailable))):
+            candidates.append((index, table))
     if candidates:
-        _start, owner, table, span = min(candidates, key=lambda candidate: candidate[0])
-        return owner, table, [span, *owner_spans]
-    return stated_owner, None, owner_spans
+        index, table = min(candidates)
+        return stated_owner, table, {index} | owner_taken
+    return stated_owner, None, owner_taken
+
+
+def _key_marker_end(tokens: list[_Token], index: int, taken: set[int]) -> int | None:
+    if ((_at(tokens, index, "PRIMARY", taken) or _at(tokens, index, "NATURAL", taken))
+            and _at(tokens, index + 1, "KEY", taken)):
+        return index + 2
+    if _at(tokens, index, "KEY", taken):
+        before = tokens[index - 1].value if index > 0 else ""
+        two_before = tokens[index - 2].value if index > 1 else ""
+        if before in {"COLUMN", "COLUMNS", "KOLON", "KOLONU", "KOLONLARI"} or (
+                before == "NAMED" and two_before in {"COLUMN", "COLUMNS", "KOLON"}):
+            return None
+        if _at(tokens, index + 1, "COLUMN", taken) or _at(tokens, index + 1, "COLUMNS", taken):
+            return index + 2
+        return index + 1
+    if any(_at(tokens, index, word, taken) for word in ("KEYS", "PK", "ANAHTAR")):
+        if _at(tokens, index, "ANAHTAR", taken) and any(
+                _at(tokens, index + 1, word, taken) for word in ("KOLON", "KOLONU", "KOLONLARI")):
+            return index + 2
+        return index + 1
+    return None
+
+
+def _key_boundary(
+    tokens: list[_Token], index: int, taken: set[int],
+    layer_starts: set[int], load_starts: set[int],
+) -> bool:
+    if index in layer_starts or index in load_starts:
+        return True
+    return any(_at(tokens, index, word, taken) for word in (
+        "TARGET", "HEDEF", "INTO", "TO", "IN", "LAYER", "KATMAN", "AS",
+        "USING", "WITH", "LOAD", "YUKLEME", "MODEL", "MODELLE", "AKTAR",
+        "CREATE", "TRANSFER",
+    ))
+
+
+def _key_tail(
+    tokens: list[_Token], start: int, taken: set[int],
+    layer_starts: set[int], load_starts: set[int], *, on_clause: bool = False,
+) -> tuple[list[str], set[int]]:
+    index = start
+    if _at(tokens, index, ":", taken) or _at(tokens, index, "=", taken):
+        index += 1
+    parenthesized = _at(tokens, index, "(", taken)
+    if parenthesized:
+        index += 1
+    if on_clause and any(_at(tokens, index, article, taken) for article in ("THE", "AN")):
+        index += 1
+    if (on_clause and _at(tokens, index, "A", taken) and index + 1 < len(tokens)
+            and tokens[index + 1].kind == "word" and tokens[index + 1].value not in {"AND", "VE"}):
+        index += 1
+    keys: list[str] = []
+    used: set[int] = set()
+    expect_name = True
+    while index < len(tokens):
+        entry = tokens[index]
+        if keys and _key_boundary(tokens, index, taken, layer_starts, load_starts):
+            return ([], used) if parenthesized else (keys, used)
+        if _at(tokens, index, ")", taken) and parenthesized and not expect_name:
+            return keys, used
+        if _at(tokens, index, ".", taken) or _at(tokens, index, "!", taken) or _at(tokens, index, "?", taken):
+            return (keys if not expect_name and not parenthesized else []), used
+        if (_at(tokens, index, ",", taken) or _at(tokens, index, "AND", taken)
+                or _at(tokens, index, "VE", taken)):
+            if expect_name:
+                return [], used
+            expect_name = True
+            index += 1
+            continue
+        if index in taken or entry.kind != "word":
+            return [], used
+        name = _identifier(entry.value)
+        if not expect_name or not name or name in _KEY_BLOCKED or _hedge_word(entry.value):
+            if name and not _hedge_word(entry.value):
+                used.add(index)
+            return [], used
+        used.add(index)
+        if name not in keys:
+            keys.append(name)
+        if len(keys) > 8:
+            return [], used
+        expect_name = False
+        index += 1
+    return (keys if keys and not expect_name and not parenthesized else []), used
+
+
+def _keys(tokens: list[_Token], taken: set[int]) -> tuple[list[str], set[int]]:
+    loads = _load_constructions(tokens, taken)
+    load_starts = {start for _kind, start, _end in loads}
+    layer_starts = {start for _layer_name, start, _end in _layer_constructions(tokens, taken)}
+    for index in range(len(tokens)):
+        marker_end = _key_marker_end(tokens, index, taken)
+        if marker_end is not None:
+            return _key_tail(tokens, marker_end, taken, layer_starts, load_starts)
+    if not _hedged(tokens, taken) and len(loads) == 1 and loads[0][0] in {"insert_update", "type1", "type2"}:
+        end = loads[0][2]
+        if _at(tokens, end, "ON", taken):
+            return _key_tail(tokens, end + 1, taken, layer_starts, load_starts, on_clause=True)
+    return [], set()
 
 
 def _hint_source(raw: dict) -> tuple[str | None, str | None]:
@@ -273,9 +476,14 @@ def _hint_target(raw: dict) -> tuple[str | None, str | None]:
     return owner or _identifier(raw.get("target_schema") or raw.get("tgt_owner")), table
 
 
-def _explicit_mapping_name(text: str) -> str | None:
-    match = re.search(r"\b(?:MAPPING|MAP)\s+(?:NAME|NAMED|ADI|ADINDA)\s+(\S+)", text)
-    return _identifier(match.group(1).strip('"\'(),.')) if match else None
+def _explicit_mapping_name(tokens: list[_Token]) -> str | None:
+    for index in range(len(tokens) - 2):
+        if (tokens[index].kind == "word" and tokens[index].value in {"MAPPING", "MAP"}
+                and tokens[index + 1].kind == "word"
+                and tokens[index + 1].value in {"NAME", "NAMED", "ADI", "ADINDA"}
+                and tokens[index + 2].kind == "word"):
+            return _identifier(tokens[index + 2].value)
+    return None
 
 
 def normalize_mapping_request(message: str, raw: object) -> dict | None:
@@ -305,15 +513,15 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
                 proposal["changes"] = safe_changes
         return proposal
 
-    text = _plain(message)
+    tokens = _lex(message)
     stated: set[str] = set()
-    explicit_owner, explicit_table, target_spans = _explicit_target(text)
-    user_source_owner, user_source_table, source_spans = _explicit_source(text, target_spans)
-    identifier_free = _masked(text, [*target_spans, *source_spans])
-    keys, key_spans = _keys(identifier_free)
-    intent = _masked(identifier_free, key_spans)
-    layer = _layer(intent)
-    load_type = _load_type(intent)
+    explicit_owner, explicit_table, target_taken = _explicit_target(tokens)
+    user_source_owner, user_source_table, source_taken = _explicit_source(tokens, target_taken)
+    identifier_taken = target_taken | source_taken
+    keys, key_taken = _keys(tokens, identifier_taken)
+    intent_taken = identifier_taken | key_taken
+    layer = _layer(tokens, intent_taken)
+    load_type = _load_type(tokens, intent_taken)
     hint_source_owner, hint_source_table = _hint_source(raw)
     if user_source_table:
         source_table = user_source_table
@@ -356,7 +564,7 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
         target_owner, target_table = None, None
         stated.discard("target_schema")
         stated.discard("target_table")
-    explicit_name = _explicit_mapping_name(text)
+    explicit_name = _explicit_mapping_name(tokens)
 
     proposal: dict = {"operation": "CREATE"}
     if source_owner:
