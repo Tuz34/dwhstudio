@@ -436,7 +436,7 @@ def test_reviewed_non_assignment_phrases_have_no_load_or_keys(message):
     "rather than", "instead of", "except", "unless", "only if", "if", "should",
     "?", "değil", "olmasın", "hariç", "yerine", "eğer", "istemiyorum",
     "tarihçesiz",
-    "yapma", "etme", "tutma", "kullanma", "etmeden", "yapmayın", "tutmaz",
+    "yapma", "etme", "tutmasın", "kullanmadan", "etmeden", "yapmayın", "tutmaz",
 ])
 def test_any_hedge_anywhere_suppresses_assigned_load_type(hedge):
     result = normalize_mapping_request(f"Model HR.ORDERS into ODS as truncate insert, {hedge}", {})
@@ -646,8 +646,8 @@ def test_quoted_examples_never_assign_load_or_keys(example):
 
 @pytest.mark.parametrize("hedge", [
     "değildir", "değilse", "yapmasın", "etmeyiniz", "you can't",
-    "I cannot", "shouldn't", "isn't", "won't", "avoidance", "shoulder",
-    "istemem", "silme", "yükleme", "hayır",
+    "I cannot", "shouldn't", "isn't", "won't", "avoided", "shouldnt",
+    "istemem", "silmeyin", "yüklemesin", "hayır",
 ])
 def test_inflected_hedges_clear_assigned_load_type(hedge):
     result = normalize_mapping_request(
@@ -674,11 +674,30 @@ def test_reviewer_hedge_sentences_never_assign_load(message):
 
 
 GRAMMAR_WORDS = [
-    "MERGE", "TRUNCATE", "UPSERT", "HISTORY", "SCD2", "TYPE", "TIP",
-    "ODS", "EDW", "DM", "DATAMART", "KEY", "ANAHTAR", "PK", "AS",
-    "OLARAK", "ILE", "WITH", "USING", "NOT", "NO", "SHOULD", "AVOID",
-    "IF", "DEGIL", "YAPMASIN",
+    "MERGE", "TRUNCATE", "UPSERT", "INSERT", "UPDATE", "FULL", "RELOAD",
+    "HISTORY", "HISTORICAL", "SCD", "SCD1", "SCD2", "TYPE", "TIP",
+    "TARIHCELI", "EKLE", "EKLEME", "GUNCELLE", "GUNCELLEME",
+    "VARSA", "YOKSA", "TAM", "YUKLEME", "YENILE", "YENILEME",
+    "ODS", "DWH", "EDW", "DM", "DATAMART", "DATA", "MART",
+    "KEY", "KEYS", "ANAHTAR", "PK", "PRIMARY", "NATURAL",
+    "AS", "USING", "WITH", "OLARAK", "ILE", "SEKLINDE", "TARGET",
+    "TABLE", "HEDEF", "INTO", "TO", "LAYER", "KATMAN",
+    "NOT", "NO", "NEVER", "SHOULD", "AVOID", "IF", "DEGIL", "YAPMASIN",
 ]
+
+
+def test_grammar_word_property_fixture_is_nonempty_and_covers_each_category():
+    words = set(GRAMMAR_WORDS)
+    assert words
+    for category in (
+        {"INSERT", "UPDATE", "MERGE", "UPSERT", "TRUNCATE", "FULL", "RELOAD",
+         "TYPE", "TIP", "SCD2", "TARIHCELI", "EKLEME", "GUNCELLEME"},
+        {"ODS", "DWH", "EDW", "DM", "DATAMART", "DATA", "MART"},
+        {"KEY", "KEYS", "ANAHTAR", "PK", "PRIMARY", "NATURAL"},
+        {"AS", "USING", "WITH", "OLARAK", "ILE", "SEKLINDE", "TARGET", "HEDEF", "INTO", "LAYER"},
+        {"NOT", "NO", "NEVER", "SHOULD", "AVOID", "IF", "DEGIL", "YAPMASIN"},
+    ):
+        assert category <= words
 
 
 @pytest.mark.parametrize("word", GRAMMAR_WORDS)
@@ -722,6 +741,131 @@ def test_owner_wording_variants_keep_expected_prefills(message, load_type, keys,
     assert result["load_type"] == load_type
     assert result.get("key_columns") == keys
     assert result["source_schema"] == "DWH"
+
+
+@pytest.mark.parametrize("source_ref", [
+    "DWH.ODI81N_SRC_F1'i", "DWH.ODI81N_SRC_F1’i",
+    "DWH.ODI81N_SRC_F1’den",
+])
+@pytest.mark.parametrize("with_marker", [False, True])
+def test_turkish_case_suffix_keeps_qualified_source(source_ref, with_marker):
+    marker = " tablosunu" if with_marker else ""
+    result = normalize_mapping_request(
+        f"{source_ref}{marker} ODS katmanına insert update olarak modelle, anahtar ID", {})
+    assert (result["source_schema"], result["source_table"]) == ("DWH", "ODI81N_SRC_F1")
+    assert result["target_layer"] == "ODS"
+    assert result["target_table"] == "ODS_DWH_ODI81N_SRC_F1"
+    assert result["mapping_name"] == "MAP_DWH_ODI81N_SRC_F1_TO_ODS"
+    assert result["load_type"] == "insert_update"
+    assert result["key_columns"] == ["ID"]
+
+
+@pytest.mark.parametrize("apostrophe", ["'", "’"])
+def test_turkish_case_suffix_keeps_named_target(apostrophe):
+    result = normalize_mapping_request(
+        "DWH.SRC tablosunu EDW katmanına tip 2 olarak modelle, anahtar ID, "
+        f"hedef tablo DWH.DIM_X{apostrophe}e", {})
+    assert (result["source_schema"], result["source_table"]) == ("DWH", "SRC")
+    assert result["target_layer"] == "EDW"
+    assert (result["target_schema"], result["target_table"]) == ("DWH", "DIM_X")
+    assert result["load_type"] == "type2"
+    assert result["key_columns"] == ["ID"]
+
+
+@pytest.mark.parametrize(("layer_phrase", "layer", "load_type"), [
+    ("ODS'e", "ODS", "insert_update"), ("EDW'ye", "EDW", "insert_update"),
+    ("DM'e", "DM", "insert_update"), ("datamart'a", "DM", "insert_update"),
+    ("data mart'a", "DM", "insert_update"),
+])
+def test_turkish_dative_layer_is_a_destination(layer_phrase, layer, load_type):
+    result = normalize_mapping_request(
+        f"DWH.X tablosunu {layer_phrase} insert update olarak yükle, anahtar ID", {})
+    assert result["target_layer"] == layer
+    assert result["load_type"] == load_type
+    assert result["key_columns"] == ["ID"]
+
+
+def test_unqualified_identifier_case_suffix_binds_its_marker():
+    source = normalize_mapping_request("Model table ORDERS'i into ODS as merge", {})
+    target = normalize_mapping_request(
+        "Model HR.ORDERS into EDW as type 2, target table DIM_X'e", {})
+    assert source["source_table"] == "ORDERS"
+    assert target["target_table"] == "DIM_X"
+
+
+@pytest.mark.parametrize("message", [
+    "DWH.F1'brokenlong tablosunu ODS katmanına insert update olarak modelle, anahtar ID",
+    "DWH.F1’brokenlong tablosunu ODS katmanına insert update olarak modelle, anahtar ID",
+    "Model table BAD;DROP into ODS as merge",
+])
+def test_invalid_table_marker_does_not_bind_the_next_layer_word(message):
+    result = normalize_mapping_request(message, {})
+    assert "source_table" not in result
+    assert result["target_layer"] == "ODS"
+    assert "target_table" not in result
+
+
+@pytest.mark.parametrize("bad_target", ["DWH.DIM_X'brokenlong", "DWH.DIM_X’brokenlong", "X;DROP"])
+def test_invalid_explicit_target_never_falls_back_to_layer_convention(bad_target):
+    result = normalize_mapping_request(
+        f"DWH.SRC tablosunu EDW katmanına tip 2 olarak modelle, anahtar ID, hedef tablo {bad_target}", {})
+    assert result["target_layer"] == "EDW"
+    assert result["source_table"] == "SRC"
+    assert "target_table" not in result
+    assert result["load_type"] == "type2"
+    assert result["key_columns"] == ["ID"]
+
+
+@pytest.mark.parametrize(("tail", "load_type", "keys"), [
+    ("yükleme anahtar ID", "insert_update", ["ID"]),
+    ("yükleme", "insert_update", None),
+    ("yüklemede", "insert_update", None),
+    ("yüklemek", "insert_update", None),
+    ("istemci anahtar ID", "insert_update", ["ID"]),
+    ("key SHOULD_BE", "insert_update", ["SHOULD_BE"]),
+    ("key DEGIL_FLAG", "insert_update", ["DEGIL_FLAG"]),
+    ("key ISTEM_KODU", "insert_update", ["ISTEM_KODU"]),
+    ("silme", "insert_update", None),
+    ("ekleme", "insert_update", None),
+    ("güncelleme", "insert_update", None),
+    ("atama", "insert_update", None),
+    ("olma", "insert_update", None),
+    ("shoulder", "insert_update", None),
+    ("avoidance", "insert_update", None),
+])
+def test_affirmative_nouns_and_identifier_keys_keep_load_type(tail, load_type, keys):
+    result = normalize_mapping_request(
+        f"DWH.X tablosunu ODS katmanına insert update olarak modelle, {tail}", {})
+    assert result["load_type"] == load_type
+    assert result.get("key_columns") == keys
+
+
+@pytest.mark.parametrize(("message", "expected"), [
+    ("DWH.X tablosunu ODS katmanına full reload olarak modelle, yüklemede", "truncate_load"),
+    ("DWH.X tablosunu ODS katmanına truncate insert olarak yüklemek", "truncate_load"),
+    ("DWH.X tablosunu ODS katmanına ekleme güncelleme olarak modelle, anahtar ID", "insert_update"),
+    ("DWH.X tablosunu ODS katmanına ekleme/güncelleme olarak modelle, anahtar ID", "insert_update"),
+    ("DWH.X tablosunu ODS katmanına tam yükleme olarak modelle", "truncate_load"),
+])
+def test_affirmative_load_vocabulary_is_not_a_hedge(message, expected):
+    result = normalize_mapping_request(message, {})
+    assert result["load_type"] == expected
+
+
+@pytest.mark.parametrize("negative", [
+    "yükleme yapma", "truncate etmeden", "yüklemesin", "silmeyin",
+    "kullanmadan", "istemiyorum", "shouldn't", "yapmayacak", "etmemeli",
+    "atmayın", "olmadı", "güncellemiyor",
+])
+def test_precise_negative_forms_still_clear_assigned_load(negative):
+    result = normalize_mapping_request(
+        f"DWH.X tablosunu ODS katmanına insert update olarak modelle, {negative}", {})
+    assert "load_type" not in result
+
+
+def test_unclosed_quote_leaves_trailing_hedge_visible():
+    result = normalize_mapping_request('Model HR.ORDERS into ODS as truncate insert "unbalanced do not', {})
+    assert "load_type" not in result
 
 
 def test_api_ask_returns_normalized_proposal_without_raw_llm_text(app_client, monkeypatch):

@@ -18,8 +18,11 @@ _LAYERS = {"ODS": "ODS", "EDW": "EDW", "DWH": "DWH", "DM": "DM", "DATAMART": "DM
 _PART = r'''(?:[A-Z][A-Z0-9_]*|"[A-Z][A-Z0-9_]*"|'[A-Z][A-Z0-9_]*'|`[A-Z][A-Z0-9_]*`|“[A-Z][A-Z0-9_]*”|‘[A-Z][A-Z0-9_]*’)'''
 _DOTTED = re.compile(rf"{_PART}(?:\.{_PART})+")
 _WORD = re.compile(r"[A-Z][A-Z0-9_]*(?:['’][A-Z0-9_]+)*|[0-9]+")
+_CASE_SUFFIX = re.compile(r"['’]([A-Z]{1,6})(?![A-Z0-9_])")
+_WORD_CASE_SUFFIX = re.compile(r"([A-Z][A-Z0-9_]*)['’]([A-Z]{1,6})\Z")
 _QUOTED = {'"': '"', "'": "'", '`': '`', '“': '”', '‘': '’'}
 _PUNCTUATION = frozenset(",.():=?!/+&-")
+_DATIVE_SUFFIXES = frozenset({"A", "E", "YA", "YE"})
 _FUNCTION_WORDS = frozenset({
     "THE", "A", "AN", "INTO", "TO", "FROM", "AS", "ON", "IN", "FOR", "WITH",
     "AND", "OR", "OF", "IS", "ARE", "BY", "USE", "USING", "BIR", "BU", "SU",
@@ -51,6 +54,7 @@ _LOAD_PHRASES = {
         ("EKLE", "/", "GUNCELLE"), ("EKLE", "+", "GUNCELLE"),
         ("EKLE", "&", "GUNCELLE"), ("EKLE", "-", "GUNCELLE"),
         ("EKLE", "VE", "GUNCELLE"),
+        ("EKLEME", "/", "GUNCELLEME"), ("EKLEME", "GUNCELLEME"),
         ("VARSA", "GUNCELLE", "YOKSA", "EKLE"),
     ),
     "truncate_load": (
@@ -74,7 +78,15 @@ _HEDGE_EXACT = frozenset({
     "NOT", "NO", "NEVER", "DONT", "WITHOUT", "EXCEPT", "UNLESS", "IF", "CANNOT",
     "OLMASIN", "OLMADAN", "HARIC", "YERINE", "EGER", "ASLA", "HAYIR",
 })
-_NEGATIVE_VERB = re.compile(r"(?:YAP|ET|OL|TUT|KULLAN|SIL|YUKLE|AT)(?:MA|ME)[A-Z0-9_]*\Z")
+_AUX_NEGATIVE = re.compile(r"(?:YAP|ET)(?:(?:MA|ME)[A-Z]*|MIYOR[A-Z]*)\Z")
+_OTHER_NEGATIVE = re.compile(
+    r"(?:YUKLE|SIL|AT|KULLAN|TUT|OL|EKLE|GUNCELLE)"
+    r"(?:(?:MA|ME)(?:SIN(?:IZ)?|YIN(?:IZ)?|DAN|DEN|Z|DI[A-Z]*|"
+    r"YACAK[A-Z]*|YECEK[A-Z]*|MALI[A-Z]*|MELI[A-Z]*)|MIYOR[A-Z]*)\Z"
+)
+_ISTEM_NEGATIVE = re.compile(r"ISTEM(?:IYOR[A-Z]*|EM|EZ|EDIM|EYIZ)\Z")
+_AVOID_FORMS = frozenset({"AVOID", "AVOIDS", "AVOIDING", "AVOIDED"})
+_SHOULD_FORMS = frozenset({"SHOULD", "SHOULDNT", "SHOULDN'T"})
 _LOAD_PRIVATIVE = re.compile(r"(?:TARIH|TRUNCATE|INSERT|UPDATE|MERGE|UPSERT|TYPE|TIP|SCD|YUKLE|YENILE|GUNCELLE|EKLE)[A-Z0-9_]*(?:SIZ|SUZ)\Z")
 
 
@@ -82,6 +94,7 @@ _LOAD_PRIVATIVE = re.compile(r"(?:TARIH|TRUNCATE|INSERT|UPDATE|MERGE|UPSERT|TYPE
 class _Token:
     kind: str
     value: str
+    case_suffix: str = ""
 
 
 def _plain(message: str) -> str:
@@ -107,6 +120,9 @@ def _lex(message: str) -> list[_Token]:
         match = dotted or word
         if match:
             end = match.end()
+            suffix = _CASE_SUFFIX.match(text, end) if dotted else None
+            if suffix:
+                end = suffix.end()
             if end < len(text) and text[end] in ";'\"`“”‘’":
                 while end < len(text) and not text[end].isspace() and text[end] not in ",()?":
                     end += 1
@@ -115,9 +131,14 @@ def _lex(message: str) -> list[_Token]:
                 continue
             if dotted:
                 parts = [part.strip('"\'`“”‘’') for part in match.group().split(".")]
-                tokens.append(_Token("dotted", ".".join(parts)))
+                tokens.append(_Token("dotted", ".".join(parts), suffix.group(1) if suffix else ""))
             else:
-                tokens.append(_Token("word", match.group().replace("’", "'")))
+                value = match.group().replace("’", "'")
+                word_suffix = _WORD_CASE_SUFFIX.fullmatch(value)
+                if word_suffix and not (word_suffix.group(2) == "T" and word_suffix.group(1).endswith("N")):
+                    tokens.append(_Token("word", word_suffix.group(1), word_suffix.group(2)))
+                else:
+                    tokens.append(_Token("word", value))
             index = end
             continue
         if char in _QUOTED:
@@ -126,7 +147,10 @@ def _lex(message: str) -> list[_Token]:
                    0 < close < len(text) - 1 and text[close - 1].isalnum() and
                    text[close + 1].isalnum()):
                 close = text.find(_QUOTED[char], close + 1)
-            index = len(text) if close < 0 else close + 1
+            if close < 0:
+                index += 1  # An unclosed quote does not hide the remaining message.
+                continue
+            index = close + 1
             tokens.append(_Token("quoted", ""))
             continue
         if char in _PUNCTUATION:
@@ -202,6 +226,8 @@ def _layer_constructions(tokens: list[_Token], taken: set[int]) -> list[tuple[st
             if layer and not _at(tokens, layer[1], "STUDIO", taken):
                 found.append((layer[0], index, layer[1]))
         layer = _layer_at(tokens, index, taken)
+        if layer and tokens[layer[1] - 1].case_suffix in _DATIVE_SUFFIXES:
+            found.append((layer[0], index, layer[1]))
         if layer and any(_at(tokens, layer[1], ending, taken) for ending in
                          ("LAYER", "KATMANI", "KATMANINA", "KATMANINDA")):
             found.append((layer[0], index, layer[1] + 1))
@@ -256,10 +282,13 @@ def _load_constructions(tokens: list[_Token], taken: set[int]) -> list[tuple[str
 
 
 def _hedge_word(word: str) -> bool:
+    if "_" in word or "." in word or any(char.isdigit() for char in word):
+        return False
     return bool(
-        word in _HEDGE_EXACT or "N'T" in word or
-        word.startswith(("AVOID", "SHOULD", "DEGIL", "ISTEM")) or
-        _NEGATIVE_VERB.fullmatch(word) or _LOAD_PRIVATIVE.fullmatch(word)
+        word in _HEDGE_EXACT or word in _AVOID_FORMS or word in _SHOULD_FORMS or
+        "N'T" in word or word.startswith("DEGIL") or
+        _AUX_NEGATIVE.fullmatch(word) or _OTHER_NEGATIVE.fullmatch(word) or
+        _ISTEM_NEGATIVE.fullmatch(word) or _LOAD_PRIVATIVE.fullmatch(word)
     )
 
 
@@ -272,9 +301,7 @@ def _hedged(tokens: list[_Token], taken: set[int]) -> bool:
         if entry.kind != "word":
             continue
         word = entry.value
-        loading_noun = word == "YUKLEME" and (
-            _at(tokens, index - 1, "TAM", taken) or _at(tokens, index + 1, "TIPI", taken))
-        if not loading_noun and _hedge_word(word):
+        if _hedge_word(word):
             return True
         if (_sequence(tokens, index, ("RATHER", "THAN"), taken) or
                 _sequence(tokens, index, ("INSTEAD", "OF"), taken)):
@@ -310,22 +337,33 @@ def _target_value_index(tokens: list[_Token], index: int, taken: set[int]) -> in
     return next_index
 
 
-def _explicit_target(tokens: list[_Token]) -> tuple[str | None, str | None, set[int]]:
+def _explicit_target(tokens: list[_Token]) -> tuple[str | None, str | None, set[int], bool]:
     references = []
     taken: set[int] = set()
+    marker_seen = False
+    invalid_marker = False
     for index in range(len(tokens)):
         value_index = _target_value_index(tokens, index, taken)
-        if value_index is None or value_index >= len(tokens):
+        if value_index is None:
+            continue
+        marker_seen = True
+        if value_index >= len(tokens):
+            invalid_marker = True
             continue
         entry = tokens[value_index]
         if entry.kind not in {"word", "dotted"}:
+            invalid_marker = True
             continue
         owner, table = _table_ref(entry.value)
         if table:
             taken.add(value_index)
             references.append((owner, table))
+        else:
+            invalid_marker = True
     distinct = set(references)
-    return (*references[0], taken) if len(distinct) == 1 else (None, None, taken)
+    if not invalid_marker and len(distinct) == 1:
+        return (*references[0], taken, marker_seen)
+    return None, None, taken, marker_seen
 
 
 def _explicit_source(
@@ -349,18 +387,32 @@ def _explicit_source(
                 return owner, table, {index} | owner_taken
 
     candidates = []
-    for index, entry in enumerate(tokens):
-        if index in unavailable or entry.kind != "word":
+    invalid_marker = False
+    for marker in range(len(tokens)):
+        if not _table_marker(tokens, marker, unavailable):
             continue
-        table = _identifier(entry.value)
+        previous = marker - 1
+        suffix_only = tokens[marker].value != "TABLE" and tokens[marker].value != "TABLO"
+        preceded_by_name = (previous >= 0 and previous not in unavailable and
+                            tokens[previous].kind in {"word", "dotted", "invalid", "quoted"} and
+                            tokens[previous].value not in _FUNCTION_WORDS)
+        if suffix_only or preceded_by_name:
+            candidate = previous
+        else:
+            candidate = marker + 1
+            if candidate < len(tokens) and tokens[candidate].value in {"THE", "A", "AN", "BIR", "BU", "SU"}:
+                candidate += 1
+        if candidate < 0 or candidate >= len(tokens) or candidate in unavailable:
+            invalid_marker = True
+            continue
+        entry = tokens[candidate]
+        table = _identifier(entry.value) if entry.kind == "word" else None
         if not table or table in _FUNCTION_WORDS:
+            invalid_marker = True
             continue
-        if (_table_marker(tokens, index + 1, unavailable) or
-                _table_marker(tokens, index - 1, unavailable) or
-                (index >= 2 and tokens[index - 1].kind == "word" and
-                 tokens[index - 1].value in {"THE", "A", "AN", "BIR", "BU", "SU"} and
-                 _table_marker(tokens, index - 2, unavailable))):
-            candidates.append((index, table))
+        candidates.append((candidate, table))
+    if invalid_marker:
+        return stated_owner, None, owner_taken
     if candidates:
         index, table = min(candidates)
         return stated_owner, table, {index} | owner_taken
@@ -515,7 +567,7 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
 
     tokens = _lex(message)
     stated: set[str] = set()
-    explicit_owner, explicit_table, target_taken = _explicit_target(tokens)
+    explicit_owner, explicit_table, target_taken, target_marker_seen = _explicit_target(tokens)
     user_source_owner, user_source_table, source_taken = _explicit_source(tokens, target_taken)
     identifier_taken = target_taken | source_taken
     keys, key_taken = _keys(tokens, identifier_taken)
@@ -549,6 +601,9 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
         stated.add("target_table")
         if explicit_owner:
             stated.add("target_schema")
+    elif target_marker_seen:
+        target_owner = "DM" if layer == "DM" else "DWH" if layer else None
+        target_table = None
     elif layer in {"ODS", "EDW", "DWH"} and source_owner and source_table:
         target_owner = "DWH"
         prefix = f"{layer}_" if layer != "DWH" else ""
