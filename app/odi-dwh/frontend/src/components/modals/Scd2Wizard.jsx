@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Modal } from '../ui/Modal';
 import { shouldDismissModal } from '../ui/modalFocus';
@@ -26,7 +26,6 @@ import {
   replaceWriteGate,
   REVIEW_SENTENCE,
   setWriteConfirmation,
-  UNRESOLVED_CLOSE_SENTENCE,
   settleWrite,
   stageSucceeded,
   validateScd2Form,
@@ -148,8 +147,8 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   const [runGate, setRunGate] = useState(() => createWriteGate({ lockAfterSuccess: false }));
   const generateGateRef = useRef(generateGate);
   const runGateRef = useRef(runGate);
-  const closeArmedRef = useRef(false);
-  const [closeArmed, setCloseArmed] = useState(false);
+  const [closeWarning, setCloseWarning] = useState('');
+  const requestCloseRef = useRef(() => {});
 
   useEffect(() => {
     mounted.current = true;
@@ -203,28 +202,39 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
     dispatch({ type: 'SHOW_TOAST', payload: { message, type } });
   }
 
-  const handleClose = () => {
-    if (!shouldDismissModal(writeBusy())) return;
-    const decision = dialogWriteDecision(generateGateRef.current, runGateRef.current);
-    const closing = decision.close({ confirmed: closeArmedRef.current });
-    if (!closing.close) {
-      closeArmedRef.current = true;
-      setCloseArmed(true);
-      return;
-    }
-    closeArmedRef.current = false;
-    setCloseArmed(false);
-    beginRequest();
-    setStep(0);
-    setError('');
-    setPlanView(null);
-    setGenerateView(null);
-    setRunView(null);
-    setEvidence(null);
-    resetWrites(true);
-    setForm(emptyScd2Form());
-    onClose();
-  };
+  useEffect(() => {
+    requestCloseRef.current = (source) => {
+      if (!shouldDismissModal(writeBusy())) return;
+      const decision = dialogWriteDecision(generateGateRef.current, runGateRef.current);
+      const closing = decision.close({ source });
+      if (!closing.close) {
+        if (closing.needsConfirm) setCloseWarning(closing.message);
+        return;
+      }
+      setCloseWarning('');
+      beginRequest();
+      setStep(0);
+      setError('');
+      setPlanView(null);
+      setGenerateView(null);
+      setRunView(null);
+      setEvidence(null);
+      resetWrites(true);
+      setForm(emptyScd2Form());
+      onClose();
+    };
+  });
+
+  // Stable so showing the warning does not change Modal's onClose. Modal focuses
+  // its first control whenever onClose changes; the confirm button must not take
+  // that focus, or a held Enter or Space would confirm the close.
+  const handleDismiss = useCallback(() => {
+    requestCloseRef.current('dismiss');
+  }, []);
+
+  const handleConfirmClose = useCallback(() => {
+    requestCloseRef.current('confirm-button');
+  }, []);
 
   async function loadPlan() {
     if (writeBusy()) return;
@@ -394,7 +404,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   const shownEvidence = evidence || runView?.evidence || null;
 
   return (
-    <Modal open={open} onClose={handleClose} title="Type 2 (History)" size="lg" closeDisabled={busy}>
+    <Modal open={open} onClose={handleDismiss} title="Type 2 (History)" size="lg" closeDisabled={busy}>
       <div className="flex items-center gap-0 mb-6">
         {STEPS.map((label, index) => (
           <div key={label} className="flex items-center flex-1">
@@ -422,12 +432,12 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
           <ReviewPanel view={view} />
         </div>
       ))}
-      {closeArmed ? (
+      {closeWarning ? (
         <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
-          <p>{UNRESOLVED_CLOSE_SENTENCE}</p>
+          <p>{closeWarning}</p>
           <button
             type="button"
-            onClick={handleClose}
+            onClick={handleConfirmClose}
             className="mt-3 px-4 py-2 rounded-lg border border-amber-300 text-sm font-medium text-amber-950 hover:bg-amber-100"
           >
             Close dialog

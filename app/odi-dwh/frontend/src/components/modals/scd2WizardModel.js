@@ -628,6 +628,17 @@ function bannerView(view) {
   return { needsReview: true, detail: '', message: REVIEW_SENTENCE };
 }
 
+// Unresolved close depends on (locked, source). Escape, the backdrop, and X are
+// `dismiss` and never close a locked dialog, no matter how many times they repeat.
+// Only `confirm-button` closes it. An in-flight write blocks both sources.
+export function closeDialogDecision({ locked = false, source = 'dismiss', inFlight = false } = {}) {
+  if (inFlight === true) return { close: false, needsConfirm: false, message: '' };
+  if (locked === true && source !== 'confirm-button') {
+    return { close: false, needsConfirm: true, message: UNRESOLVED_CLOSE_SENTENCE };
+  }
+  return { close: true, needsConfirm: false, message: '' };
+}
+
 // One decision for both write gates. Either needs_review locks Generate and Run.
 export function dialogWriteDecision(generateGate, runGate) {
   const locked = generateGate?.phase === 'needs_review' || runGate?.phase === 'needs_review';
@@ -645,9 +656,12 @@ export function dialogWriteDecision(generateGate, runGate) {
         reset: true,
       };
     },
-    close({ confirmed = false } = {}) {
-      if (!locked || confirmed === true) return { close: true, needsConfirm: false, message: '' };
-      return { close: false, needsConfirm: true, message: UNRESOLVED_CLOSE_SENTENCE };
+    close({ source = 'dismiss' } = {}) {
+      return closeDialogDecision({
+        locked,
+        source,
+        inFlight: writesInFlight([generateGate, runGate]),
+      });
     },
     banners({ step = 0, generateView = null, runView = null } = {}) {
       if (locked) {

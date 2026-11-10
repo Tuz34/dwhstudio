@@ -13,6 +13,7 @@ import {
   canGenerate,
   canRefreshEvidence,
   classifyWriteOutcome,
+  closeDialogDecision,
   createWriteGate,
   DEFINITE_FAILURE_ROWS,
   dialogWriteDecision,
@@ -426,6 +427,16 @@ test('an in-flight write blocks another submit, dismiss, and step changes', () =
   assert.equal(acceptWrite(started.gate, { ready: true }).reason, 'in_flight');
   assert.equal(writesInFlight([started.gate]), true);
   assert.equal(shouldDismissModal(writesInFlight([started.gate])), false);
+  const duringWrite = dialogWriteDecision(started.gate, createWriteGate());
+  for (const source of ['dismiss', 'confirm-button']) {
+    const blocked = duringWrite.close({ source });
+    assert.equal(blocked.close, false, source);
+    assert.equal(blocked.needsConfirm, false, source);
+    assert.equal(blocked.message, '', source);
+    const pure = closeDialogDecision({ locked: false, source, inFlight: true });
+    assert.equal(pure.close, false, source);
+    assert.equal(pure.needsConfirm, false, source);
+  }
   assert.equal(button(started.gate, GENERATE_LABELS).enabled, false);
   assert.equal(button(started.gate, GENERATE_LABELS).inFlight, true);
   const settled = settleWrite(started.gate, { ok: false });
@@ -1162,13 +1173,48 @@ test('a needs-review gate locks both writes, every step, and close', () => {
   for (const step of [0, 1, 2, 3]) {
     assert.equal(open.banners({ step, generateView: null, runView: null }).length, 0, `clear step ${step}`);
   }
-  assert.equal(open.close({ confirmed: false }).close, true);
-  assert.equal(open.close({ confirmed: false }).needsConfirm, false);
-  assert.equal(open.close({ confirmed: false }).message, '');
+  const unlocked = open.close({ source: 'dismiss' });
+  assert.equal(unlocked.close, true);
+  assert.equal(unlocked.needsConfirm, false);
+  assert.equal(unlocked.message, '');
+  assert.equal(closeDialogDecision({ locked: false, source: 'dismiss' }).close, true);
 
-  const firstClose = afterRun.close({ confirmed: false });
-  assert.equal(firstClose.close, false);
-  assert.equal(firstClose.needsConfirm, true);
-  assert.equal(firstClose.message, UNRESOLVED_CLOSE_SENTENCE);
-  assert.equal(afterRun.close({ confirmed: true }).close, true);
+  for (const times of [1, 2, 10]) {
+    const decision = dialogWriteDecision(generate, run);
+    for (let attempt = 1; attempt <= times; attempt += 1) {
+      const result = decision.close({ source: 'dismiss' });
+      assert.equal(result.close, false, `dismiss x${times} #${attempt}`);
+      assert.equal(result.needsConfirm, true, `dismiss x${times} #${attempt}`);
+      assert.equal(result.message, UNRESOLVED_CLOSE_SENTENCE, `dismiss x${times} #${attempt}`);
+      const pure = closeDialogDecision({ locked: true, source: 'dismiss' });
+      assert.equal(pure.close, false, `pure dismiss x${times} #${attempt}`);
+      assert.equal(pure.needsConfirm, true, `pure dismiss x${times} #${attempt}`);
+      assert.equal(pure.message, UNRESOLVED_CLOSE_SENTENCE, `pure dismiss x${times} #${attempt}`);
+    }
+  }
+  // The old second-dismiss path passed confirmed:true. That flag is not a source.
+  const armedDismiss = afterRun.close({ source: 'dismiss', confirmed: true });
+  assert.equal(armedDismiss.close, false);
+  assert.equal(armedDismiss.needsConfirm, true);
+  assert.equal(afterRun.close({ confirmed: true }).close, false);
+
+  const confirmed = afterRun.close({ source: 'confirm-button' });
+  assert.equal(confirmed.close, true);
+  assert.equal(confirmed.needsConfirm, false);
+  assert.equal(confirmed.message, '');
+  const pureConfirm = closeDialogDecision({ locked: true, source: 'confirm-button' });
+  assert.equal(pureConfirm.close, true);
+  assert.equal(pureConfirm.needsConfirm, false);
+
+  let flying = arm(createWriteGate({ lockAfterSuccess: true }));
+  flying = acceptWrite(flying, { ready: true }).gate;
+  const lockedAndFlying = dialogWriteDecision(generate, flying);
+  for (const source of ['dismiss', 'confirm-button']) {
+    const blocked = lockedAndFlying.close({ source });
+    assert.equal(blocked.close, false, source);
+    assert.equal(blocked.needsConfirm, false, source);
+    const pure = closeDialogDecision({ locked: true, source, inFlight: true });
+    assert.equal(pure.close, false, source);
+    assert.equal(pure.needsConfirm, false, source);
+  }
 });
