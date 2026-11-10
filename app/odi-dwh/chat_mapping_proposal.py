@@ -78,9 +78,17 @@ _LOAD_PHRASES = {
 _HEDGE_EXACT = frozenset({
     "NOT", "NO", "NEVER", "DONT", "WITHOUT", "EXCEPT", "UNLESS", "IF", "CANNOT",
     "OLMASIN", "OLMADAN", "HARIC", "YERINE", "EGER", "ASLA", "HAYIR",
-    "GEREKSIZ", "GEREKMEZ", "GEREKMIYOR", "SKIP", "SKIPPING", "DISABLE",
-    "DISABLED", "OMIT", "EXCLUDE", "EXCLUDING", "IGNORE", "ATLA", "ATLAYIN",
-    "KAPALI", "IPTAL",
+    "GEREKSIZ", "GEREKMEZ", "GEREKMIYOR",
+})
+_EN_LOAD_HEDGES = frozenset({
+    "SKIP", "SKIPPING", "DISABLE", "DISABLED", "OMIT", "EXCLUDE", "EXCLUDING", "IGNORE",
+})
+_TR_LOAD_HEDGES = frozenset({"ATLA", "ATLAYIN", "KAPALI", "IPTAL"})
+_HEDGE_LOAD_WORDS = frozenset({
+    "INSERT", "UPDATE", "UPSERT", "MERGE", "EKLE", "GUNCELLE", "EKLEME", "GUNCELLEME",
+    "TRUNCATE", "RELOAD", "LOAD", "YUKLEME", "YENILE", "YENILEME",
+    "TYPE", "TIP", "SCD", "SCD1", "SCD_1", "SCD2", "SCD_2", "TARIHCELI",
+    "TARIHCE", "HISTORY", "HISTORICAL",
 })
 _NEGATIVE_ENDING = (
     r"(?:(?:MA|ME)(?:SIN(?:IZ)?|YIN(?:IZ)?|DAN|DEN|Z|DI[A-Z]*|"
@@ -318,6 +326,44 @@ def _hedge_word(word: str) -> bool:
     )
 
 
+def _hedge_load_word_at(tokens: list[_Token], index: int, taken: set[int]) -> bool:
+    if index < 0 or index >= len(tokens) or index in taken or tokens[index].kind != "word":
+        return False
+    word = tokens[index].value
+    suffix = _WORD_CASE_SUFFIX.fullmatch(word)
+    if suffix and suffix.group(2) != "S":
+        word = suffix.group(1)
+    return word in _HEDGE_LOAD_WORDS
+
+
+def _hedge_load_starts_at(tokens: list[_Token], index: int, taken: set[int]) -> bool:
+    return bool(_load_phrase_at(tokens, index, taken)) or _hedge_load_word_at(tokens, index, taken)
+
+
+def _hedge_load_ends_at(tokens: list[_Token], end: int, taken: set[int]) -> bool:
+    if _hedge_load_word_at(tokens, end - 1, taken):
+        return True
+    return any(
+        phrase and phrase[1] == end
+        for start in range(max(0, end - 4), end)
+        if (phrase := _load_phrase_at(tokens, start, taken))
+    )
+
+
+def _scoped_load_hedge(tokens: list[_Token], index: int, taken: set[int]) -> bool:
+    word = tokens[index].value
+    if word in _EN_LOAD_HEDGES:
+        start = index + 1
+        if any(_at(tokens, start, article, taken) for article in ("A", "AN", "THE")):
+            start += 1
+        return _hedge_load_starts_at(tokens, start, taken)
+    span = 2 if _sequence(tokens, index, ("DEVRE", "DISI"), taken) else 1
+    if word in _TR_LOAD_HEDGES or span == 2:
+        return (_hedge_load_ends_at(tokens, index, taken) or
+                _hedge_load_starts_at(tokens, index + span, taken))
+    return False
+
+
 def _hedged(tokens: list[_Token], taken: set[int]) -> bool:
     for index, entry in enumerate(tokens):
         if index in taken or entry.kind in {"quoted", "dotted"}:
@@ -327,12 +373,11 @@ def _hedged(tokens: list[_Token], taken: set[int]) -> bool:
         if entry.kind != "word":
             continue
         word = entry.value
-        if _hedge_word(word):
+        if _hedge_word(word) or _scoped_load_hedge(tokens, index, taken):
             return True
         if (_sequence(tokens, index, ("RATHER", "THAN"), taken) or
                 _sequence(tokens, index, ("INSTEAD", "OF"), taken) or
-                _sequence(tokens, index, ("GEREK", "YOK"), taken) or
-                _sequence(tokens, index, ("DEVRE", "DISI"), taken)):
+                _sequence(tokens, index, ("GEREK", "YOK"), taken)):
             return True
     return False
 
@@ -511,6 +556,16 @@ def _key_tail(
                 or _at(tokens, index, "VE", taken)):
             if expect_name:
                 return [], used
+            segment_end = index + 1
+            while (segment_end < len(tokens) and
+                   not _key_boundary(tokens, segment_end, taken, layer_starts, load_starts) and
+                   not any(_at(tokens, segment_end, separator, taken) for separator in
+                           (",", "AND", "VE", ".", "!", "?", ")"))):
+                segment_end += 1
+            if (segment_end > index + 2 and all(
+                    entry.kind == "word" and _identifier(entry.value)
+                    for entry in tokens[index + 1:segment_end])):
+                return ([], used) if parenthesized else (keys, used)
             expect_name = True
             index += 1
             continue
