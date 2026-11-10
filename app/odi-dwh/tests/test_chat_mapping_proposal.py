@@ -34,10 +34,10 @@ def test_explicit_load_types_in_english_and_turkish(wording, load_type):
 
 @pytest.mark.parametrize(("wording", "keys"), [
     ("key ID", ["ID"]),
-    ("upsert on CUSTOMER_ID", ["CUSTOMER_ID"]),
+    ("as upsert on CUSTOMER_ID", ["CUSTOMER_ID"]),
     ("primary key CUSTOMER_ID, REGION_ID", ["CUSTOMER_ID", "REGION_ID"]),
     ("anahtar müşteri_id ve region_id", ["MUSTERI_ID", "REGION_ID"]),
-    ("CUSTOMER_ID anahtarı", ["CUSTOMER_ID"]),
+    ("anahtar: CUSTOMER_ID", ["CUSTOMER_ID"]),
 ])
 def test_only_named_keys_are_carried(wording, keys):
     result = normalize_mapping_request(f"Model HR.ORDERS into ODS layer, {wording}", RAW)
@@ -91,9 +91,9 @@ def test_explicit_target_table_is_preserved_over_layer_default():
     assert result["mapping_name"] == "MAP_HR_ORDERS_TO_EDW"
 
 
-def test_explicit_unqualified_target_after_into_is_preserved():
+def test_explicit_unqualified_target_after_into_table_is_preserved():
     result = normalize_mapping_request(
-        "Model HR.ORDERS into CORE_ORDERS in EDW layer", RAW
+        "Model HR.ORDERS into table CORE_ORDERS in the EDW layer", RAW
     )
     assert result["source_table"] == "ORDERS"
     assert result["target_table"] == "CORE_ORDERS"
@@ -195,15 +195,15 @@ def test_negated_load_phrase_never_prefills_a_type(wording):
     assert "load_type" not in result
 
 
-@pytest.mark.parametrize(("wording", "expected"), [
-    ("do not truncate, use merge", "insert_update"),
-    ("not type 2, truncate insert", "truncate_load"),
-    ("do not truncate and do not merge", None),
-    ("type 1 and type 2", None),
+@pytest.mark.parametrize("wording", [
+    "do not truncate, use merge",
+    "not type 2, truncate insert",
+    "do not truncate and do not merge",
+    "as type 1 and using type 2",
 ])
-def test_only_one_positive_load_type_survives_negation(wording, expected):
+def test_any_hedge_or_two_load_constructions_leave_type_absent(wording):
     result = normalize_mapping_request(f"Model HR.ORDERS into ODS, {wording}", {})
-    assert result.get("load_type") == expected
+    assert "load_type" not in result
 
 
 @pytest.mark.parametrize("table", ["TRUNCATE", "MERGE", "UPSERT", "HISTORY", "SCD2"])
@@ -241,8 +241,8 @@ def test_source_schema_table_pair_never_mix_disagreeing_origins():
 
 
 @pytest.mark.parametrize("wording", [
-    "column KEY and STATUS", "upsert on Monday", "key ORDER ID",
-    "on CUSTOMER_ID", "key A, BAD;DROP", "key today", "upsert on bugün",
+    "column KEY and STATUS", "as upsert on Monday", "key ORDER ID",
+    "on CUSTOMER_ID", "key A, BAD;DROP", "key today", "as upsert on bugün",
 ])
 def test_ambiguous_or_invalid_key_tail_is_absent(wording):
     result = normalize_mapping_request(f"Model HR.ORDERS into ODS, {wording}", {})
@@ -250,7 +250,7 @@ def test_ambiguous_or_invalid_key_tail_is_absent(wording):
 
 
 @pytest.mark.parametrize(("wording", "expected"), [
-    ("upsert on the ORDER_ID", ["ORDER_ID"]),
+    ("as upsert on the ORDER_ID", ["ORDER_ID"]),
     ("key A, B", ["A", "B"]),
     ("key A and B", ["A", "B"]),
     ("anahtar MUSTERI_ID", ["MUSTERI_ID"]),
@@ -309,6 +309,252 @@ def test_type2_proposal_fixture_has_unqualified_wizard_source_fields():
         "mapping_name": "MAP_HR_ORDERS_TO_EDW", "load_type": "type2",
         "key_columns": ["ORDER_ID"],
     }
+
+
+OWNER_SENTENCES = {
+    "a": (
+        [
+            "DWH.ODI81N_SRC_F1 tablosunu ODS katmanına insert update olarak modelle, anahtar ID",
+            "anahtar ID, insert update olarak ODS katmanına DWH.ODI81N_SRC_F1 tablosunu modelle",
+        ],
+        {"source_schema": "DWH", "source_table": "ODI81N_SRC_F1", "target_layer": "ODS",
+         "load_type": "insert_update", "key_columns": ["ID"], "target_schema": "DWH",
+         "target_table": "ODS_DWH_ODI81N_SRC_F1",
+         "mapping_name": "MAP_DWH_ODI81N_SRC_F1_TO_ODS", "warnings": None},
+    ),
+    "b": (
+        [
+            "Model DWH.ODI81N_SRC_F2 into ODS as truncate insert",
+            "Into ODS as truncate insert, model DWH.ODI81N_SRC_F2",
+        ],
+        {"source_schema": "DWH", "source_table": "ODI81N_SRC_F2", "target_layer": "ODS",
+         "load_type": "truncate_load", "key_columns": None, "target_schema": "DWH",
+         "target_table": "ODS_DWH_ODI81N_SRC_F2",
+         "mapping_name": "MAP_DWH_ODI81N_SRC_F2_TO_ODS", "warnings": None},
+    ),
+    "c": (
+        [
+            "DWH.ODS_ODI81N_F4 tablosunu EDW katmanına tip 2 olarak modelle, "
+            "anahtar ID, hedef tablo DWH.DIM_ODI81N_F4",
+            "hedef tablo DWH.DIM_ODI81N_F4, DWH.ODS_ODI81N_F4 tablosunu "
+            "EDW katmanına tip 2 olarak modelle, anahtar ID",
+            "anahtar ID, hedef tablo DWH.DIM_ODI81N_F4, EDW katmanına tip 2 olarak "
+            "DWH.ODS_ODI81N_F4 tablosunu modelle",
+            "tip 2 olarak EDW katmanına DWH.ODS_ODI81N_F4 tablosunu modelle, "
+            "hedef tablo DWH.DIM_ODI81N_F4, anahtar ID",
+        ],
+        {"source_schema": "DWH", "source_table": "ODS_ODI81N_F4", "target_layer": "EDW",
+         "load_type": "type2", "key_columns": ["ID"], "target_schema": "DWH",
+         "target_table": "DIM_ODI81N_F4",
+         "mapping_name": "MAP_DWH_ODS_ODI81N_F4_TO_EDW", "warnings": None},
+    ),
+    "d": (
+        [
+            "Model DWH.ODI81N_SRC_F3 into the EDW layer as type 1 with key ID, "
+            "target table DWH.DWH_ODI81N_F3",
+            "target table DWH.DWH_ODI81N_F3, key ID, as type 1, "
+            "model DWH.ODI81N_SRC_F3 into the EDW layer",
+        ],
+        {"source_schema": "DWH", "source_table": "ODI81N_SRC_F3", "target_layer": "EDW",
+         "load_type": "type1", "key_columns": ["ID"], "target_schema": "DWH",
+         "target_table": "DWH_ODI81N_F3",
+         "mapping_name": "MAP_DWH_ODI81N_SRC_F3_TO_EDW", "warnings": None},
+    ),
+    "e": (
+        [
+            "DWH.DWH_ODI81N_F5 tablosunu datamart katmanına tarihçeli olarak modelle, "
+            "anahtar ID, hedef tablo DM.DIM_ODI81N_F5",
+            "hedef tablo DM.DIM_ODI81N_F5, anahtar ID, tarihçeli olarak "
+            "datamart katmanına DWH.DWH_ODI81N_F5 tablosunu modelle",
+        ],
+        {"source_schema": "DWH", "source_table": "DWH_ODI81N_F5", "target_layer": "DM",
+         "load_type": "type2", "key_columns": ["ID"], "target_schema": "DM",
+         "target_table": "DIM_ODI81N_F5", "mapping_name": None, "warnings": None},
+    ),
+}
+
+
+@pytest.mark.parametrize(("label", "sentence", "expected"), [
+    (f"{label}-{index}", sentence, expected)
+    for label, (sentences, expected) in OWNER_SENTENCES.items()
+    for index, sentence in enumerate(sentences)
+])
+def test_owner_sentences_and_permutations_have_complete_proposals(label, sentence, expected):
+    result = normalize_mapping_request(sentence, {"operation": "CREATE"})
+    assert {field: result.get(field) for field in expected} == expected, label
+    assert result["src_schema"] == expected["source_schema"]
+    assert result["src_table"] == expected["source_table"]
+    assert result.get("tgt_owner") == expected["target_schema"]
+    assert result.get("tgt_table") == expected["target_table"]
+    stated = ["source_schema", "source_table", "target_layer"]
+    if label.startswith(("c", "d", "e")):
+        stated.extend(["target_schema", "target_table"])
+    stated.append("load_type")
+    if expected["key_columns"]:
+        stated.append("key_columns")
+    assert result["stated_fields"] == stated
+
+
+@pytest.mark.parametrize(("wording", "expected"), [
+    ("as merge", "insert_update"), ("using upsert", "insert_update"),
+    ("with load insert/update", "insert_update"),
+    ("load type full reload", "truncate_load"),
+    ("as truncate insert", "truncate_load"), ("with mode type 1", "type1"),
+    ("using SCD2", "type2"), ("insert update olarak", "insert_update"),
+    ("truncate insert ile", "truncate_load"), ("tip 1 şeklinde", "type1"),
+    ("tarihçeli olarak", "type2"), ("yükleme tipi tip 2", "type2"),
+])
+def test_load_type_requires_an_assignment_construction(wording, expected):
+    result = normalize_mapping_request(f"Model HR.ORDERS into ODS, {wording}", {})
+    assert result["load_type"] == expected
+
+
+@pytest.mark.parametrize("wording", [
+    "truncate", "merge", "upsert", "type 1", "type 2", "history",
+    "SCD2", "insert update", "ekle güncelle", "tam yenile",
+    "Model HISTORY into ODS", "Model TRUNCATE into ODS",
+])
+def test_bare_load_words_never_prefill(wording):
+    result = normalize_mapping_request(f"Model HR.ORDERS into ODS, {wording}", {})
+    assert "load_type" not in result
+
+
+@pytest.mark.parametrize("message", [
+    "merge the customer name", "type 2 with the same key", "truncate schema",
+    "Model ORDERS into ODS", "merge HR.ORDERS into ODS on ORDER_ID",
+    "do not want to truncate HR.ORDERS into ODS",
+    "rather than truncate, merge the customer name",
+])
+def test_reviewed_non_assignment_phrases_have_no_load_or_keys(message):
+    result = normalize_mapping_request(message, {})
+    assert "load_type" not in result
+    assert "key_columns" not in result
+
+
+@pytest.mark.parametrize("hedge", [
+    "not", "no", "never", "don't", "dont", "don’t", "without", "avoid",
+    "rather than", "instead of", "except", "unless", "only if", "if", "should",
+    "?", "değil", "olmasın", "hariç", "yerine", "eğer", "istemiyorum",
+    "tarihçesiz",
+    "yapma", "etme", "tutma", "kullanma", "etmeden", "yapmayın", "tutmaz",
+])
+def test_any_hedge_anywhere_suppresses_assigned_load_type(hedge):
+    result = normalize_mapping_request(f"Model HR.ORDERS into ODS as truncate insert, {hedge}", {})
+    assert "load_type" not in result
+
+
+@pytest.mark.parametrize("message", [
+    "Model HR.ORDERS into ODS as merge, key ID?",
+    "Model HR.ORDERS into ODS as merge, key NOT",
+    "Model HR.ORDERS into ODS as merge, target table BAD?",
+])
+def test_invalid_identifier_does_not_hide_a_hedge(message):
+    result = normalize_mapping_request(message, {})
+    assert "load_type" not in result
+
+
+def test_valid_identifier_named_not_is_consumed_before_hedge_detection():
+    result = normalize_mapping_request("Model HR.ORDERS into ODS as merge, target table NOT", {})
+    assert result["target_table"] == "NOT"
+    assert result["load_type"] == "insert_update"
+
+
+@pytest.mark.parametrize(("message", "layer", "target", "owner"), [
+    ("Model HR.ORDERS, target table ODS", None, "ODS", None),
+    ("Model HR.ORDERS into DWH, target table EDW", "DWH", "EDW", "DWH"),
+    ("Model HR.ORDERS, hedef tablo DM", None, "DM", None),
+    ("Model HR.ORDERS into ODS, target table MERGE", "ODS", "MERGE", "DWH"),
+    ("Model HR.ORDERS into table CORE_ORDERS in the EDW layer", "EDW", "CORE_ORDERS", "DWH"),
+    ("Model HR.ORDERS into CORE_ORDERS in the EDW layer", "EDW", "EDW_HR_ORDERS", "DWH"),
+    ("I want to truncate HR.ORDERS into ODS", "ODS", "ODS_HR_ORDERS", "DWH"),
+    ("I want to merge HR.ORDERS into ODS on ORDER_ID", "ODS", "ODS_HR_ORDERS", "DWH"),
+])
+def test_target_requires_marker_and_layer_ignores_target_identifiers(message, layer, target, owner):
+    result = normalize_mapping_request(message, {})
+    assert result.get("target_layer") == layer
+    assert result.get("target_table") == target
+    assert result.get("target_schema") == owner
+    assert "load_type" not in result
+    assert "key_columns" not in result
+
+
+@pytest.mark.parametrize(("phrase", "layer"), [
+    ("into ODS", "ODS"), ("to DWH", "DWH"), ("in the EDW layer", "EDW"),
+    ("DM layer", "DM"), ("datamart katmanına", "DM"),
+    ("ODS katmanında", "ODS"), ("layer EDW", "EDW"),
+    ("katman DWH", "DWH"),
+])
+def test_layer_requires_an_explicit_construction(phrase, layer):
+    result = normalize_mapping_request(f"Model HR.ORDERS {phrase}", {})
+    assert result["target_layer"] == layer
+
+
+@pytest.mark.parametrize("message", [
+    "Model HR.ORDERS, target table ODS layer",
+    "Model HR.ORDERS, hedef tablo DM katmanı",
+    "Model HR.ORDERS, target table MERGE olarak",
+    "Model table HISTORY olarak",
+    "Model HR.ORDERS, key MERGE olarak",
+])
+def test_identifier_tokens_do_not_become_layer_or_load_constructions(message):
+    result = normalize_mapping_request(message, {})
+    assert "target_layer" not in result
+    assert "load_type" not in result
+
+
+@pytest.mark.parametrize(("message", "source", "target"), [
+    ("hedef tablo DWH.DIM_ORDERS, HR.ORDERS tablosunu EDW katmanına modelle",
+     ("HR", "ORDERS"), ("DWH", "DIM_ORDERS")),
+    ("target table DWH.DIM_ORDERS from HR.ORDERS",
+     ("HR", "ORDERS"), ("DWH", "DIM_ORDERS")),
+    ("Model ORDERS into ODS", (None, None), ("DWH", None)),
+    ("Model HISTORY into ODS", (None, None), ("DWH", None)),
+    ("Model HR.ORDERS into ODS, target table HR.ORDERS",
+     ("HR", "ORDERS"), (None, None)),
+])
+def test_source_and_target_positive_grammar(message, source, target):
+    result = normalize_mapping_request(message, {})
+    assert (result.get("source_schema"), result.get("source_table")) == source
+    assert (result.get("target_schema"), result.get("target_table")) == target
+
+
+@pytest.mark.parametrize(("owner", "table"), [
+    ("ODS", "CUSTOMERS"), ("DM", "SALES"), ("EDW", "FACT_SALES"),
+])
+def test_layer_word_as_qualified_source_owner_stays_an_identifier(owner, table):
+    result = normalize_mapping_request(f"Model {owner}.{table} as merge", {})
+    assert (result["source_schema"], result["source_table"]) == (owner, table)
+    assert "target_layer" not in result
+    assert result["load_type"] == "insert_update"
+
+
+def test_function_word_in_qualified_source_is_not_prefilled():
+    result = normalize_mapping_request("Model HR.ON into ODS as merge", {})
+    assert "source_table" not in result
+
+
+@pytest.mark.parametrize(("wording", "keys"), [
+    ("keys: A, B and C", ["A", "B", "C"]),
+    ("key:ID", ["ID"]),
+    ("anahtar: A ve B", ["A", "B"]),
+    ("key (A, B)", ["A", "B"]),
+    ("key A, A, B", ["A", "B"]),
+    ("key ID, hedef tablo DWH.DIM_ORDERS", ["ID"]),
+    ("key ID, EDW layer", ["ID"]),
+    ("key ID, as type 2", ["ID"]),
+    ("as merge on A and B", ["A", "B"]),
+    ("as merge on A, B", ["A", "B"]),
+    ("as merge on the ORDER_ID", ["ORDER_ID"]),
+    ("merge on A and B", None),
+    ("key ON", None),
+    ("key ORDER ID", None),
+    ("key A, BAD;DROP", None),
+    ('key "ID"', None),
+    ("key A, B, C, D, E, F, G, H, I", None),
+])
+def test_key_list_ends_at_new_construction_but_rejects_bad_list_tokens(wording, keys):
+    result = normalize_mapping_request(f"Model HR.ORDERS into ODS, {wording}", {})
+    assert result.get("key_columns") == keys
 
 
 def test_api_ask_returns_normalized_proposal_without_raw_llm_text(app_client, monkeypatch):

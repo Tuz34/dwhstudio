@@ -14,15 +14,20 @@ _IDENTIFIER = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 _DM_WARNING = "Datamart targets are supported only for Type 2 history."
 _TYPE2_NAME_WARNING = "Mapping name is longer than 31 characters; Type 2 requires a shorter name."
 _LAYERS = {"ODS": "ODS", "EDW": "EDW", "DWH": "DWH", "DM": "DM", "DATAMART": "DM", "DATA MART": "DM"}
-_LAYER_WORD = re.compile(r"(?<![A-Z0-9_.])(?:DATA\s+MART|DATAMART|EDW|DWH|ODS|DM)(?![A-Z0-9_.])")
+_LAYER_TOKEN = r"(?:DATA\s+MART|DATAMART|EDW|DWH|ODS|DM)"
+_LAYER_PATTERNS = (
+    re.compile(rf"\b(?:INTO|TO)(?:\s+THE)?\s+(?P<layer>{_LAYER_TOKEN})\b"),
+    re.compile(rf"\bIN\s+THE\s+(?P<layer>{_LAYER_TOKEN})\b"),
+    re.compile(rf"\b(?P<layer>{_LAYER_TOKEN})\s+(?:LAYER|KATMAN(?:I|INA|INDA)?)\b"),
+    re.compile(rf"\b(?:LAYER|KATMAN)\s+(?P<layer>{_LAYER_TOKEN})\b"),
+)
 _KEY_MARKER = re.compile(
     r"\b(?:PRIMARY\s+KEY|NATURAL\s+KEY|KEY\s+COLUMNS?|KEYS?|PK|"
     r"ANAHTAR(?:\s+KOLON(?:U|LARI)?)?)\b"
 )
 _TARGET_MARKER = re.compile(
-    r"\b(?:TARGET|HEDEF)\s+(?:(?:TABLE|TABLO(?:SU|SUNA|SUNU)?)(?:\s+(?:NAME|ADI))?\s+)?"
-    r"(?:(?:AS|NAMED|ADI)\s+|[:=]\s*)?(\S+)"
-    r"|\b(?:TO|INTO)\s+(?:(?:THE|A)\s+)?(?:TABLE\s+)?(\S+)"
+    r"\b(?:TARGET(?:\s+TABLE)?|HEDEF(?:\s+TABLO[A-Z]*)?|"
+    r"INTO\s+(?:THE\s+)?TABLE)\s*(?::|=)?\s+(?P<token>\S+)"
 )
 _FUNCTION_WORDS = frozenset({
     "THE", "A", "AN", "INTO", "TO", "FROM", "AS", "ON", "IN", "FOR", "WITH",
@@ -48,15 +53,26 @@ _KEY_BLOCKED = (_FUNCTION_WORDS | _CALENDAR_WORDS | frozenset({
     "KEYS", "PRIMARY", "NATURAL", "ANAHTAR",
 })) - {"A"}  # Explicit `key A, B` names columns; `a` is an article only in prose.
 _LOAD_PATTERNS = {
-    "type2": re.compile(r"\b(?:SCD\s*[-_]?\s*2|TYPE\s*[-_]?\s*2|TIP\s*[-_]?\s*2|TARIHCELI|HISTORY|HISTORICAL)\b"),
+    "type2": re.compile(r"\b(?:SCD\s*[-_]?\s*2|TYPE\s*[-_]?\s*2|TIP\s*[-_]?\s*2)(?:\s+HISTORY)?\b|\b(?:TARIHCELI|HISTORY|HISTORICAL)\b"),
     "type1": re.compile(r"\b(?:SCD\s*[-_]?\s*1|TYPE\s*[-_]?\s*1|TIP\s*[-_]?\s*1)\b"),
-    "truncate_load": re.compile(r"\b(?:TRUNCATE|FULL\s+RELOAD|FULL\s+LOAD|TAM\s+YUKLEME|TAM\s+YENILE(?:ME)?)\b"),
+    "truncate_load": re.compile(r"\b(?:TRUNCATE(?:\s+INSERT)?|FULL\s+RELOAD|FULL\s+LOAD|TAM\s+YUKLEME|TAM\s+YENILE(?:ME)?)\b"),
     "insert_update": re.compile(r"\b(?:INSERT\s*[/+&-]\s*UPDATE|INSERT\s+UPDATE|UPSERT|MERGE|EKLE\s*[/+&-]\s*GUNCELLE|EKLE\s+VE\s+GUNCELLE|VARSA\s+GUNCELLE\s+YOKSA\s+EKLE)\b"),
 }
+_LOAD_PREFIX = re.compile(
+    r"\b(?:(?:AS|USING|WITH)\s+(?:(?:A|AN|THE)\s+)?(?:(?:LOAD|MODE)\s+)?"
+    r"|LOAD\s+TYPE\s+|YUKLEME\s+TIPI\s+)$"
+)
+_LOAD_SUFFIX = re.compile(r"\s+(?:OLARAK|ILE|SEKLINDE)\b")
+_HEDGE = re.compile(
+    r"\?|\b(?:NOT|NO|NEVER|DON'?T|WITHOUT|AVOID|RATHER\s+THAN|INSTEAD\s+OF|"
+    r"EXCEPT|UNLESS|ONLY\s+IF|IF|SHOULD|DEGIL|OLMASIN|OLMADAN|HARIC|"
+    r"YERINE|EGER|ISTEMIYORUM|ASLA|TARIHCESIZ|TARIHSIZ)\b|"
+    r"\b(?:YAP|ET|TUT|KULLAN)(?:MA|ME|MADAN|MEDEN|MAYIN|MEYIN|MAZ|MEZ)\b"
+)
 
 
 def _plain(message: str) -> str:
-    text = message.replace("ı", "i").replace("İ", "I")
+    text = message.replace("ı", "i").replace("İ", "I").replace("’", "'")
     return "".join(
         char for char in unicodedata.normalize("NFKD", text)
         if not unicodedata.combining(char)
@@ -88,143 +104,163 @@ def _token_ref(token: str) -> tuple[str | None, str | None]:
     return _table_ref(token.strip('"\'(),.'))
 
 
+def _masked(text: str, spans: list[tuple[int, int]]) -> str:
+    chars = list(text)
+    for start, end in spans:
+        for index in range(start, end):
+            if chars[index] != "?":
+                chars[index] = " "
+    return "".join(chars)
+
+
 def _layer(text: str) -> str | None:
-    ranked = []
-    for match in _LAYER_WORD.finditer(text):
-        before = text[max(0, match.start() - 20):match.start()]
-        after = text[match.end():match.end() + 22]
-        if re.match(r"\s+STUDIO\b", after):
-            continue
-        score = 0
-        if re.search(r"\b(?:TO|INTO|TARGET|HEDEF)\s+$", before):
-            score += 3
-        if re.match(r"\s+(?:LAYER|KATMAN(?:I|INA|INDA)?)\b", after):
-            score += 2
-        if re.search(r"\bFROM\s+$", before) or re.match(r"(?:DEN|DAN)\b", after):
-            score -= 2
-        ranked.append((score, match.start(), _LAYERS[" ".join(match.group().split())]))
-    best = max(ranked) if ranked else None
-    return best[2] if best and best[0] >= 0 else None
-
-
-def _negated(text: str, match: re.Match[str]) -> bool:
-    before = text[max(0, match.start() - 90):match.start()]
-    before = re.split(r"[,;.!?]|\b(?:BUT|AMA|FAKAT)\b", before)[-1]
-    if any(word in {"NOT", "DON'T", "DONT", "NEVER", "WITHOUT", "NO", "ASLA"}
-           for word in before.split()[-6:]):
-        return True
-    after = text[match.end():match.end() + 50]
-    after = re.split(r"[,;.!?]|\b(?:BUT|AMA|FAKAT)\b", after)[0]
-    return any(
-        word in {"DEGIL", "OLMASIN", "OLMADAN", "HARIC", "ISTEMIYORUM"}
-        or re.fullmatch(r"[A-Z]+(?:MA|ME|SIZ|SUZ)", word)
-        for word in after.split()[:3]
-    )
-
-
-def _positive_loads(text: str) -> list[tuple[str, re.Match[str]]]:
-    return [
-        (kind, match)
-        for kind, pattern in _LOAD_PATTERNS.items()
-        for match in pattern.finditer(text)
-        if not _negated(text, match)
-    ]
-
-
-def _load_type(text: str) -> str | None:
-    found = {kind for kind, _match in _positive_loads(text)}
+    found = {
+        _LAYERS[" ".join(match.group("layer").split())]
+        for pattern in _LAYER_PATTERNS for match in pattern.finditer(text)
+    }
     return next(iter(found)) if len(found) == 1 else None
 
 
-def _key_tail(tail: str) -> list[str]:
-    tokens = tail.lstrip(" :=").split()[:20]
-    if tokens and tokens[0] in {"IS", "ARE", "OLARAK", "KOLONU", "COLUMN", "COLUMNS"}:
-        tokens = tokens[1:]
-    if tokens and tokens[0] in {"THE", "AN", "BIR"}:
-        tokens = tokens[1:]
+def _load_constructions(text: str) -> list[tuple[str, int, int]]:
+    found = []
+    for kind, pattern in _LOAD_PATTERNS.items():
+        for match in pattern.finditer(text):
+            prefix = _LOAD_PREFIX.search(text[:match.start()])
+            suffix = _LOAD_SUFFIX.match(text, match.end())
+            if prefix or suffix:
+                found.append((kind, prefix.start() if prefix else match.start(),
+                              suffix.end() if suffix else match.end()))
+    return found
+
+
+def _load_type(text: str) -> str | None:
+    if _HEDGE.search(text):
+        return None
+    found = _load_constructions(text)
+    return found[0][0] if len(found) == 1 else None
+
+
+def _key_boundary(text: str) -> bool:
+    if re.match(r"(?:TARGET|HEDEF|INTO|TO|IN|LAYER|KATMAN|AS|USING|WITH|"
+                r"LOAD|YUKLEME|MODEL|MODELLE|AKTAR|CREATE|TRANSFER)\b", text):
+        return True
+    if any(pattern.match(text) for pattern in _LAYER_PATTERNS):
+        return True
+    return any(start == 0 for _kind, start, _end in _load_constructions(text))
+
+
+def _key_tail(tail: str, offset: int, *, on_clause: bool = False) -> tuple[list[str], list[tuple[int, int]]]:
+    tokens = list(re.finditer(r"[^\s,():=]+|[,():=]", tail))
+    index = 0
+    if tokens and tokens[0].group() in {":", "="}:
+        index += 1
+    if on_clause and index < len(tokens) and tokens[index].group() in {"THE", "AN"}:
+        index += 1
+    if (on_clause and index + 1 < len(tokens) and tokens[index].group() == "A"
+            and tokens[index + 1].group() not in {",", "AND", "VE"}):
+        index += 1
     keys: list[str] = []
+    spans: list[tuple[int, int]] = []
     expect_name = True
-    for token in tokens:
-        if not expect_name and token in {"AND", "VE"}:
+    parenthesized = False
+    for token_match in tokens[index:]:
+        piece = token_match.group()
+        if keys and _key_boundary(tail[token_match.start():]):
+            return ([], spans) if parenthesized else (keys, spans)
+        if piece == "(" and not keys and not parenthesized:
+            parenthesized = True
+            continue
+        if piece == ")" and parenthesized and not expect_name:
+            return keys, spans
+        if piece in {",", "AND", "VE"}:
+            if expect_name:
+                return [], spans
             expect_name = True
             continue
-        if not expect_name and token in _KEY_BLOCKED:
-            break
         if not expect_name:
-            return [] if _identifier(token) else keys
-        parts = token.rstrip(",").split(",")
-        names = [_identifier(part) for part in parts]
-        if not parts or not all(names) or any(name in _KEY_BLOCKED for name in names):
-            return []
-        keys.extend(name for name in names if name not in keys)
-        expect_name = token.endswith(",")
-    return keys if keys and not expect_name and len(keys) <= 8 else []
+            if _identifier(piece) and not _HEDGE.fullmatch(piece):
+                spans.append((offset + token_match.start(), offset + token_match.end()))
+            return [], spans
+        sentence_end = piece.endswith(".") and piece.count(".") == 1
+        name = _identifier(piece[:-1] if sentence_end else piece)
+        if not name or name in _KEY_BLOCKED:
+            if name and not _HEDGE.fullmatch(name):
+                spans.append((offset + token_match.start(), offset + token_match.end()))
+            return [], spans
+        spans.append((offset + token_match.start(), offset + token_match.end()))
+        if name not in keys:
+            keys.append(name)
+        if len(keys) > 8:
+            return [], spans
+        expect_name = False
+        if sentence_end:
+            return keys, spans
+    return (keys if keys and not expect_name and not parenthesized else []), spans
 
 
-def _keys(text: str, load_type: str | None) -> list[str]:
+def _keys(text: str) -> tuple[list[str], list[tuple[int, int]]]:
     for marker in _KEY_MARKER.finditer(text):
         before = text[max(0, marker.start() - 28):marker.start()]
         if re.search(r"\b(?:COLUMN|COLUMNS|KOLON|KOLONU|KOLONLARI)(?:\s+NAMED)?\s+$", before):
             continue
-        return _key_tail(text[marker.end():])
-    match = re.search(r"\b([A-Z][A-Z0-9_]*)\s+ANAHTARI\b", text)
-    key = _identifier(match.group(1)) if match else None
-    if key and key not in _KEY_BLOCKED:
-        return [key]
-    if load_type in {"insert_update", "type1", "type2"}:
-        for kind, match in _positive_loads(text):
-            if kind != load_type:
-                continue
-            after = text[match.end():]
-            on = re.match(r"\s+ON\s+(?:(?:THE|A|AN)\s+)?", after)
+        return _key_tail(text[marker.end():], marker.end())
+    if not _HEDGE.search(text):
+        constructions = _load_constructions(text)
+        if len(constructions) == 1 and constructions[0][0] in {"insert_update", "type1", "type2"}:
+            end = constructions[0][2]
+            on = re.match(r"\s+ON\b", text[end:])
             if on:
-                return _key_tail(after[on.end():])
-    return []
+                return _key_tail(text[end + on.end():], end + on.end(), on_clause=True)
+    return [], []
 
 
-def _explicit_target(text: str) -> tuple[str | None, str | None]:
+def _explicit_target(text: str) -> tuple[str | None, str | None, list[tuple[int, int]]]:
+    references = []
+    spans = []
     for match in _TARGET_MARKER.finditer(text):
-        token = match.group(1) or match.group(2)
-        if match.group(2) and re.match(r"\s+(?:LAYER|KATMAN(?:I|INA|INDA)?)\b", text[match.end():]):
+        token = match.group("token")
+        if token in {"LAYER", "KATMAN"}:
             continue
         owner, table = _token_ref(token)
-        if table and table not in _FUNCTION_WORDS | {"ODS", "EDW", "DWH", "DM", "DATA", "DATAMART", "MART"}:
-            return owner, table
-    return None, None
+        if table:
+            spans.append(match.span("token"))
+            references.append((owner, table))
+    distinct = set(references)
+    return (*references[0], spans) if len(distinct) == 1 else (None, None, spans)
 
 
-def _explicit_source(text: str) -> tuple[str | None, str | None]:
+def _explicit_source(
+    text: str, target_spans: list[tuple[int, int]],
+) -> tuple[str | None, str | None, list[tuple[int, int]]]:
     owner_match = re.search(r"\b(?:SOURCE|KAYNAK)\s+SCHEMA\s+(\S+)", text)
     stated_owner = _identifier(owner_match.group(1)) if owner_match else None
-    # Qualified references win over nearby prose. Never mistake a target ref
-    # introduced by TARGET/TO/INTO for the source.
+    owner_spans = [owner_match.span(1)] if owner_match and stated_owner else []
+
+    def available(span: tuple[int, int]) -> bool:
+        return not any(span[0] < end and start < span[1]
+                       for start, end in [*target_spans, *owner_spans])
+
     for match in re.finditer(r"\S+", text):
+        span = match.span()
         owner, table = _token_ref(match.group())
-        before = text[max(0, match.start() - 40):match.start()]
-        is_target = re.search(
-            r"\b(?:TARGET|HEDEF|TO|INTO)\s+(?:(?:THE|A|AN)\s+)?(?:TABLE\s+)?$",
-            before,
-        )
-        if owner and table and owner not in _FUNCTION_WORDS and table not in _FUNCTION_WORDS and not is_target:
-            return owner, table
-    for match in re.finditer(r"\b([A-Z][A-Z0-9_]*)\s+(?:TABLE|TABLO[A-Z]*)\b", text):
-        before = text[max(0, match.start() - 18):match.start()]
-        if re.search(r"\b(?:SCHEMA|OWNER)\s+$", before):
-            continue
-        table = _identifier(match.group(1))
-        if table and table not in _FUNCTION_WORDS | {"ODS", "DWH", "EDW", "DM"}:
-            return stated_owner, table
-    for match in re.finditer(
-        r"\b(?:SOURCE|FROM|KAYNAK|TABLE|TABLO[A-Z]*)\s+"
-        r"(?:(?:THE|A|AN|BIR|BU|SU)\s+)?(\S+)", text,
+        if (available(span) and owner and table and owner not in _FUNCTION_WORDS
+                and table not in _FUNCTION_WORDS):
+            return owner, table, [span, *owner_spans]
+
+    candidates = []
+    for pattern in (
+        re.compile(r"\b(?P<token>[A-Z][A-Z0-9_]*)\s+(?:TABLE|TABLO[A-Z]*)\b"),
+        re.compile(r"\b(?:TABLE|TABLO[A-Z]*)\s+(?:(?:THE|A|AN|BIR|BU|SU)\s+)?(?P<token>\S+)"),
     ):
-        before = text[max(0, match.start() - 18):match.start()]
-        if re.search(r"\b(?:TARGET|HEDEF|TO|INTO)\s+$", before):
-            continue
-        owner, table = _token_ref(match.group(1))
-        if table and table not in _FUNCTION_WORDS | {"ODS", "DWH", "EDW", "DM"}:
-            return owner or stated_owner, table
-    return stated_owner, None
+        for match in pattern.finditer(text):
+            span = match.span("token")
+            owner, table = _token_ref(match.group("token"))
+            if available(span) and table and table not in _FUNCTION_WORDS:
+                candidates.append((span[0], owner or stated_owner, table, span))
+    if candidates:
+        _start, owner, table, span = min(candidates, key=lambda candidate: candidate[0])
+        return owner, table, [span, *owner_spans]
+    return stated_owner, None, owner_spans
 
 
 def _hint_source(raw: dict) -> tuple[str | None, str | None]:
@@ -235,31 +271,6 @@ def _hint_source(raw: dict) -> tuple[str | None, str | None]:
 def _hint_target(raw: dict) -> tuple[str | None, str | None]:
     owner, table = _table_ref(raw.get("target_table") or raw.get("tgt_table"))
     return owner or _identifier(raw.get("target_schema") or raw.get("tgt_owner")), table
-
-
-def _scrub_identifiers(text: str, source_table: str | None, target_table: str | None) -> str:
-    tokens = list(re.finditer(r"\S+", text))
-    names = {name for name in (source_table, target_table) if name}
-    markers = {"TABLE", "TABLO", "TABLOSU", "TABLOSUNU", "TABLOSUNDAN", "TABLOSUNA",
-               "TARGET", "HEDEF", "SOURCE", "KAYNAK", "FROM"}
-    articles = {"THE", "A", "AN", "BIR", "BU", "SU"}
-    clean = [match.group().strip('"\'(),.') for match in tokens]
-    masked = set()
-    for index, token in enumerate(clean):
-        if re.search(r"[A-Z][A-Z0-9_]*\.[A-Z][A-Z0-9_]*", token) or token in names:
-            masked.add(index)
-        if token in markers:
-            next_index = index + 1
-            while next_index < len(clean) and clean[next_index] in articles | markers:
-                masked.add(next_index)
-                next_index += 1
-            if next_index < len(clean):
-                masked.add(next_index)
-    chars = list(text)
-    for index in masked:
-        match = tokens[index]
-        chars[match.start():match.end()] = " " * (match.end() - match.start())
-    return "".join(chars)
 
 
 def _explicit_mapping_name(text: str) -> str | None:
@@ -295,9 +306,14 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
         return proposal
 
     text = _plain(message)
-    layer = _layer(text)
     stated: set[str] = set()
-    user_source_owner, user_source_table = _explicit_source(text)
+    explicit_owner, explicit_table, target_spans = _explicit_target(text)
+    user_source_owner, user_source_table, source_spans = _explicit_source(text, target_spans)
+    identifier_free = _masked(text, [*target_spans, *source_spans])
+    keys, key_spans = _keys(identifier_free)
+    intent = _masked(identifier_free, key_spans)
+    layer = _layer(intent)
+    load_type = _load_type(intent)
     hint_source_owner, hint_source_table = _hint_source(raw)
     if user_source_table:
         source_table = user_source_table
@@ -315,7 +331,6 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
 
     if layer:
         stated.add("target_layer")
-    explicit_owner, explicit_table = _explicit_target(text)
     hint_target_owner, hint_target_table = _hint_target(raw)
     if explicit_table:
         target_table = explicit_table
@@ -336,9 +351,11 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
     else:
         target_owner, target_table = hint_target_owner, hint_target_table
 
-    intent = _scrub_identifiers(text, source_table, target_table)
-    load_type = _load_type(intent)
-    keys = _keys(intent, load_type)
+    if source_table and target_table and source_table == target_table and (
+            source_owner == target_owner or source_owner is None or target_owner is None):
+        target_owner, target_table = None, None
+        stated.discard("target_schema")
+        stated.discard("target_table")
     explicit_name = _explicit_mapping_name(text)
 
     proposal: dict = {"operation": "CREATE"}

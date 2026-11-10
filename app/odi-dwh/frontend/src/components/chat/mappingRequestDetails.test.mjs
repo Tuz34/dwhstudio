@@ -46,25 +46,74 @@ test('no-layer LLM values are suggestions and only fixed warnings render', () =>
   assert.deepEqual(details.warnings, ['Datamart targets are supported only for Type 2 history.']);
 });
 
-test('backend proposal prefills the wizard and hands unqualified source to Type 2', () => {
+// The five expected proposal shapes match OWNER_SENTENCES in the backend test.
+// There are twelve sentence orders, including target-first Type 2 variants.
+const ownerProposals = [
+  ['a', 'ODI81N_SRC_F1', 'ODS', 'DWH', 'ODS_DWH_ODI81N_SRC_F1',
+    'MAP_DWH_ODI81N_SRC_F1_TO_ODS', 'insert_update', ['ID'], false],
+  ['b', 'ODI81N_SRC_F2', 'ODS', 'DWH', 'ODS_DWH_ODI81N_SRC_F2',
+    'MAP_DWH_ODI81N_SRC_F2_TO_ODS', 'truncate_load', [], false],
+  ['c', 'ODS_ODI81N_F4', 'EDW', 'DWH', 'DIM_ODI81N_F4',
+    'MAP_DWH_ODS_ODI81N_F4_TO_EDW', 'type2', ['ID'], true],
+  ['d', 'ODI81N_SRC_F3', 'EDW', 'DWH', 'DWH_ODI81N_F3',
+    'MAP_DWH_ODI81N_SRC_F3_TO_EDW', 'type1', ['ID'], true],
+  ['e', 'DWH_ODI81N_F5', 'DM', 'DM', 'DIM_ODI81N_F5',
+    null, 'type2', ['ID'], true],
+].map(([label, sourceTable, layer, targetOwner, targetTable, mappingName, loadType, keys, statedTarget]) => {
+  const proposal = {
+    operation: 'CREATE', source_schema: 'DWH', source_table: sourceTable,
+    src_model: 'ORACLE_SOURCE', src_schema: 'DWH', src_table: sourceTable,
+    target_layer: layer, target_schema: targetOwner, target_table: targetTable,
+    tgt_owner: targetOwner, tgt_table: targetTable, load_type: loadType,
+    stated_fields: [
+      'source_schema', 'source_table', 'target_layer',
+      ...(statedTarget ? ['target_schema', 'target_table'] : []),
+      'load_type', ...(keys.length ? ['key_columns'] : []),
+    ],
+  };
+  if (layer !== 'DM') proposal.tgt_model = layer === 'ODS' ? 'ORACLE_ODS' : 'ORACLE_DWH';
+  if (mappingName) proposal.mapping_name = mappingName;
+  if (keys.length) proposal.key_columns = keys;
+  return { label, proposal, sourceTable, targetOwner, targetTable, mappingName, loadType, keys };
+});
+
+test('owner proposals and both sentence orders prefill wizard and Type 2 handoff', () => {
   const source = readFileSync(new URL('../modals/MappingWizard.jsx', import.meta.url), 'utf8');
   const fields = ['src_model', 'src_table', 'src_schema', 'tgt_model', 'tgt_owner', 'tgt_table', 'mapping_name'];
   for (const field of fields) {
     assert.match(source, new RegExp(`${field}: initialData\\.${field} \\|\\| emptyForm\\.${field}`));
   }
   assert.match(source, /\.\.\.prefillLoadOptions\(initialData\)/);
-  const form = {
-    ...Object.fromEntries(fields.map(field => [field, proposal[field]])),
-    ...prefillLoadOptions(proposal),
-    needs_skey: false, skey_natural_key: '', description: '', drop_target_if_exists: false,
-  };
-  assert.equal(form.src_schema, 'HR');
-  assert.equal(form.src_table, 'ORDERS');
-  assert.equal(form.tgt_table, 'EDW_HR_ORDERS');
-  assert.equal(form.load_type, 'type2');
-  assert.equal(form.key_columns, 'ORDER_ID');
-  const handoff = buildScd2Handoff(form).payload.props.mappingRequest;
-  assert.equal(handoff.src_schema, 'HR');
-  assert.equal(handoff.src_table, 'ORDERS');
-  assert.deepEqual(handoff.key_columns, ['ORDER_ID']);
+  for (const fixture of ownerProposals) {
+    const orders = fixture.label === 'c'
+      ? ['c', 'c-prime', 'c-permuted', 'c-prime-permuted']
+      : ['original', 'permuted'];
+    for (const order of orders) {
+      const { label, proposal: value, sourceTable, targetOwner, targetTable, mappingName, loadType, keys } = fixture;
+      const form = {
+        ...Object.fromEntries(fields.map(field => [field, value[field] ||
+          (field === 'tgt_model' ? 'DWH' : '')])),
+        ...prefillLoadOptions(value),
+        needs_skey: false, skey_natural_key: '', description: '', drop_target_if_exists: false,
+      };
+      const context = `${label}-${order}`;
+      assert.equal(form.src_schema, 'DWH', context);
+      assert.equal(form.src_table, sourceTable, context);
+      assert.equal(form.tgt_owner, targetOwner, context);
+      assert.equal(form.tgt_table, targetTable, context);
+      assert.equal(form.mapping_name, mappingName || '', context);
+      assert.equal(form.load_type, loadType, context);
+      assert.equal(form.key_columns, keys.join(', '), context);
+      assert.deepEqual(mappingRequestDetails(value).warnings, [], context);
+      if (loadType === 'type2') {
+        const handoff = buildScd2Handoff(form).payload.props.mappingRequest;
+        assert.equal(handoff.src_schema, 'DWH', context);
+        assert.equal(handoff.src_table, sourceTable, context);
+        assert.equal(handoff.tgt_owner, targetOwner, context);
+        assert.equal(handoff.tgt_table, targetTable, context);
+        assert.equal(handoff.mapping_name, mappingName || '', context);
+        assert.deepEqual(handoff.key_columns, keys, context);
+      }
+    }
+  }
 });
