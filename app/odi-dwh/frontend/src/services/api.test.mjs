@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { getSchema, request } from './api.js';
+import { getSchema, planScd2, request } from './api.js';
 
 
 function installDocumentStub() {
@@ -48,6 +48,35 @@ test('request does not mutate caller options or object body', async () => {
   assert.deepEqual(body, { approved: true });
   assert.equal(captured.options.body, '{"approved":true}');
   assert.equal(captured.options.headers['X-CSRFToken'], 'test-csrf-token');
+});
+
+
+test('SCD2 errors keep the server status and code off the generic message', async () => {
+  installDocumentStub();
+  let seenOptions;
+  globalThis.fetch = async (_url, options) => {
+    seenOptions = options;
+    return {
+      ok: false,
+      status: 400,
+      headers: { get: () => 'application/json' },
+      json: async () => ({
+        status: 'invalid_request',
+        error_code: 'target_owner_not_allowed',
+        detail: 'internal-proxy-detail',
+      }),
+    };
+  };
+
+  await assert.rejects(
+    planScd2({ source_owner: 'SYS' }),
+    error => error.message === 'Request was rejected.'
+      && error.scd2.status === 'invalid_request'
+      && error.scd2.error_code === 'target_owner_not_allowed'
+      && error.scd2.detail === undefined
+      && !error.message.includes('internal-proxy-detail'),
+  );
+  assert.equal(seenOptions.captureScd2Error, undefined);
 });
 
 

@@ -32,8 +32,33 @@ function buildFetchOptions(options = {}) {
   return { ...options, method, headers, body };
 }
 
-async function responseError(res) {
+// SCD2 error bodies are status codes and count-only evidence. Other routes keep
+// the generic message and do not attach a response body.
+const SCD2_ERROR_KEYS = [
+  'status', 'error', 'error_code', 'error_type',
+  'mapping_name', 'scenario_name', 'scenario_version', 'scenario', 'target',
+  'steps', 'mismatches', 'available_versions',
+  'required_model_code', 'required_topology_steps', 'required_km', 'required_action',
+  'preflight', 'postflight', 'counts',
+  'manual_review_required', 'postflight_checks_passed', 'scenario_execution_completed',
+  'outcome_unknown', 'known_side_effects',
+  'raw_rows_included', 'pk_values_included', 'secret_printed',
+  'metadata_source', 'plan', 'ddl', 'warnings', 'blockers',
+  'stock_contract_valid', 'source_current_count_equal', 'mode',
+];
+
+function scd2ErrorPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const safe = {};
+  for (const key of SCD2_ERROR_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) safe[key] = payload[key];
+  }
+  return Object.keys(safe).length > 0 ? safe : null;
+}
+
+async function responseError(res, { captureScd2Error = false } = {}) {
   let errorType;
+  let scd2Error = null;
   const contentType = res.headers?.get?.('content-type') || '';
   if (contentType.includes('application/json') && typeof res.json === 'function') {
     try {
@@ -41,6 +66,7 @@ async function responseError(res) {
       if (typeof payload?.error_type === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(payload.error_type)) {
         errorType = payload.error_type;
       }
+      if (captureScd2Error) scd2Error = scd2ErrorPayload(payload);
     } catch {
       // Response bodies are deliberately not surfaced to the user.
     }
@@ -50,15 +76,19 @@ async function responseError(res) {
   const error = new Error(message);
   error.status = res.status;
   if (errorType) error.errorType = errorType;
+  if (scd2Error) error.scd2 = scd2Error;
   return error;
 }
 
 export async function request(url, options = {}) {
-  const fetchOptions = buildFetchOptions(options);
-  const res = await fetch(url, fetchOptions);
+  const captureScd2Error = options.captureScd2Error === true;
+  const fetchOptions = { ...options };
+  delete fetchOptions.captureScd2Error;
+  const built = buildFetchOptions(fetchOptions);
+  const res = await fetch(url, built);
 
   if (!res.ok) {
-    throw await responseError(res);
+    throw await responseError(res, { captureScd2Error });
   }
 
   const text = await res.text();
@@ -147,11 +177,19 @@ export const getMappingRuns  = ({ limit = 50, status } = {}) => {
   return apiGet('/api/mapping/runs', params);
 };
 
-// SCD2 (Type 2) builder: plan is a preview; generate and run need approved: true
-export const planScd2      = (body)   => apiPost('/api/scd2/plan', body);
-export const generateScd2  = (body)   => apiPost('/api/scd2/generate', body);
-export const runScd2       = (body)   => apiPost('/api/scd2/run', body);
-export const getScd2Postflight = (params) => apiGet('/api/scd2/postflight', params);
+// SCD2 (Type 2) builder: plan is a preview; generate and run need approved: true.
+// Error JSON is attached as error.scd2 so the wizard can show the server code.
+function scd2Post(url, body) {
+  return request(url, { method: 'POST', body, captureScd2Error: true });
+}
+
+export const planScd2      = (body)   => scd2Post('/api/scd2/plan', body);
+export const generateScd2  = (body)   => scd2Post('/api/scd2/generate', body);
+export const runScd2       = (body)   => scd2Post('/api/scd2/run', body);
+export const getScd2Postflight = (params) => {
+  const url = params ? `/api/scd2/postflight?${new URLSearchParams(params)}` : '/api/scd2/postflight';
+  return request(url, { method: 'GET', captureScd2Error: true });
+};
 
 
 // Mapping Snapshots
