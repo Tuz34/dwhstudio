@@ -70,3 +70,9 @@ def failure(payload: object, tool: str, mode: str, *, generator: bool = False) -
             return None
     return {"repository_outcome": outcome, "side_effects": side_effects, "error_type": payload["error_type"],
             **{key: payload[key] for key in FLAGS}}
+
+
+def mark_write_attempted(phase: Any) -> None:
+    """Record a write at the call that performs it. Exception type is not a signal."""
+    if phase is not None:
+        phase.attempted = True

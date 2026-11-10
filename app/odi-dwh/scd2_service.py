@@ -119,6 +119,17 @@ def plan_preview(body: Mapping[str, Any], services: Scd2Services) -> tuple[dict[
     )
 
 
+_EFFECT_FLAGS = ("side_effects", "target_created", "sequence_created")
+_EFFECT_COUNTER_SUFFIXES = ("_applied", "_created", "_changed")
+
+
+def _positive_effect_counter(step: Mapping[str, Any]) -> bool:
+    for key, value in step.items():
+        if type(value) is int and value > 0 and str(key).endswith(_EFFECT_COUNTER_SUFFIXES):
+            return True
+    return False
+
+
 def _km_extra(mapping: Mapping[str, Any] | None, mismatches: list[str]) -> dict[str, Any]:
     details = scd2_odi.km_mismatch_details(mapping) if "mapping_knowledge_modules" in mismatches else None
     return {"km_mismatch": details} if details else {}
@@ -134,8 +145,10 @@ def _generate_response(
     unknown = any(step.get("outcome_unknown") is True or step.get("repository_outcome") in {
         "unverified", "commit_outcome_unknown", "rollback_failed"
     } or ("side_effects" in step and step["side_effects"] is None) for step in steps)
-    known_effects = any(step.get(key) is True for step in steps
-                        for key in ("side_effects", "target_created", "sequence_created"))
+    flag_effects = any(step.get(key) is True for step in steps for key in _EFFECT_FLAGS)
+    # Counters count on failures only, so a successful payload keeps its existing flags.
+    counter_effects = http_status >= 400 and any(_positive_effect_counter(step) for step in steps)
+    known_effects = flag_effects or counter_effects
     manual = unknown or (http_status >= 400 and known_effects) or any(
         step.get("manual_review_required") is True or step.get("manual_recovery_review_required") is True for step in steps)
     return (
@@ -186,7 +199,7 @@ def _probe_block(plan: Mapping[str, Any], checks: Mapping[str, bool]) -> tuple[s
 
 
 def generate(
-    body: Mapping[str, Any], services: Scd2Services, *, approved: object
+    body: Mapping[str, Any], services: Scd2Services, *, approved: object, phase: Any = None,
 ) -> tuple[dict[str, Any], int]:
     """Approved flow: probe -> target DDL -> datastore -> mapping -> scenario."""
     if approved is not True:
@@ -247,6 +260,7 @@ def generate(
         connection_factory=services.ddl_connection,
         ddl_user=services.ddl_user,
         identity_proof=identity_proof,
+        phase=phase,
     )
     steps.append({"step": "target_ddl", **ddl})
     if ddl["status"] not in {"created", "already_exists_matching", "repaired_incomplete_target"}:
@@ -259,7 +273,7 @@ def generate(
         )
 
     if not checks["ikm_present"]:
-        ikm_step = scd2_odi.import_ikm(orchestrator, True)
+        ikm_step = scd2_odi.import_ikm(orchestrator, True, phase=phase)
         steps.append(ikm_step)
         if ikm_step["status"] != "passed":
             return _generate_response("partial_failure_ikm_import", plan, steps, 502)
@@ -267,7 +281,7 @@ def generate(
     if checks["target_datastore_exists"]:
         steps.append(scd2_odi.skipped("odi_datastore_register"))
     else:
-        register_step = scd2_odi.register_datastore(orchestrator, plan, True)
+        register_step = scd2_odi.register_datastore(orchestrator, plan, True, phase=phase)
         steps.append(register_step)
         if register_step["status"] != "passed":
             return _generate_response("partial_failure_datastore_register", plan, steps, 502)
@@ -275,12 +289,12 @@ def generate(
     if checks["mapping_exists"]:
         steps.append(scd2_odi.skipped("odi_mapping_create"))
     else:
-        mapping_step = scd2_odi.create_mapping(orchestrator, plan, True)
+        mapping_step = scd2_odi.create_mapping(orchestrator, plan, True, phase=phase)
         steps.append(mapping_step)
         if mapping_step["status"] != "passed":
             return _generate_response("partial_failure_mapping_create", plan, steps, 502)
 
-    scenario_step = scd2_odi.generate_scenario(orchestrator, plan, True)
+    scenario_step = scd2_odi.generate_scenario(orchestrator, plan, True, phase=phase)
     steps.append(scenario_step)
     if scenario_step["status"] not in {"passed", "skipped_exists"}:
         return _generate_response("partial_failure_scenario_generate", plan, steps, 502)
@@ -355,7 +369,7 @@ def _select_version(requested: str, available: list[str]) -> str | None:
 
 
 def run(
-    body: Mapping[str, Any], services: Scd2Services, *, approved: object
+    body: Mapping[str, Any], services: Scd2Services, *, approved: object, phase: Any = None,
 ) -> tuple[dict[str, Any], int]:
     """Approved flow: guards -> scenario run -> count-only postflight."""
     if approved is not True:
@@ -426,7 +440,8 @@ def run(
     if before.get("status") != "ok" or before.get("stock_contract_valid") is not True:
         return {"status": "blocked_count_preflight", "steps": steps, "preflight": before}, 503
     run_step = scd2_odi.run_scenario(
-        orchestrator, spec["scenario_name"], spec["scenario_version"], spec["context"], True
+        orchestrator, spec["scenario_name"], spec["scenario_version"], spec["context"], True,
+        phase=phase,
     )
     steps.append(run_step)
     after = scd2_postflight.collect_stock_postflight(

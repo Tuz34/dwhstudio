@@ -45,6 +45,17 @@ class MappingRunOutcome:
     status_code: int
 
 
+@dataclass
+class RemoteRunPhase:
+    """Set by the remote scenario call. An exception is not evidence of this phase."""
+
+    attempted: bool = False
+    batch_id: str = ""
+    scenario_name: str = ""
+    remote: dict[str, Any] | None = None
+    persist_failed: bool = False
+
+
 # ODI-87: temporary gate on this generic entry only. Low-level runners are not covered.
 # Remove or replace it only after a separately reviewed stock cutover proof.
 _CUTOVER_GATED_MAPPING = "MAP_ODS_PRODUCTS_TO_DIM_PRODUCT"
@@ -141,21 +152,30 @@ def _persist_run_state(
     overall_status: str,
     completed_steps: list[str],
     error: object = None,
-) -> None:
-    safe_error = app_module.redact_sensitive_text(str(error or ""), max_len=2000)
-    state = _state_payload(
-        options, batch_id, scenario_name, current_step, overall_status, completed_steps, safe_error
-    )
+    *,
+    surface: bool = False,
+) -> bool:
+    # Pre-run callers keep today's escape if redaction itself fails. Post-run
+    # callers pass surface=True so that failure stays on the known outcome.
+    safe_error = None
     try:
+        safe_error = app_module.redact_sensitive_text(str(error or ""), max_len=2000)
+        state = _state_payload(
+            options, batch_id, scenario_name, current_step, overall_status, completed_steps, safe_error
+        )
         with app_module.MappingStateManager() as manager:
             manager.upsert_state(state, thread_id=batch_id)
     except Exception as exc:
+        if safe_error is None and not surface:
+            raise
         app_module.logger.error(
             "Mapping run state persist failed (batch=%s mapping=%s): %s",
             batch_id,
             options.mapping_name,
             type(exc).__name__,
         )
+        return False
+    return True
 
 
 def _create_failure_alert(
@@ -261,7 +281,80 @@ def _unsupported_option_outcome(
     )
 
 
-def execute_mapping_run(app_module: Any, options: MappingRunOptions) -> MappingRunOutcome:
+def _begin_remote_run(
+    orchestrator: Any,
+    options: MappingRunOptions,
+    scenario_name: str,
+    batch_id: str,
+    phase: RemoteRunPhase,
+) -> dict[str, Any]:
+    """Mark the remote call, then invoke it. The marker is not inferred later."""
+    from odi_orchestrator import groovy_is_approved
+
+    phase.attempted = True
+    phase.batch_id = batch_id
+    phase.scenario_name = scenario_name
+    parsed = remote_run_contract.parse(orchestrator.run_scenario_remote(
+        approved=groovy_is_approved(), mapping_name=options.mapping_name,
+        scenario_name=scenario_name, version=options.version, context=options.context,
+    ), "run")
+    phase.remote = parsed
+    return parsed
+
+
+def _remote_run_payload(
+    options: MappingRunOptions,
+    batch_id: str,
+    scenario_name: str,
+    remote: dict[str, Any],
+    *,
+    persist_failed: bool,
+) -> tuple[dict[str, Any], int]:
+    if remote["status"] == "passed":
+        payload: dict[str, Any] = {
+            "status": "SUCCESS",
+            "batch_id": batch_id,
+            "scenario": scenario_name,
+            "version": options.version,
+            "context": options.context,
+            "truncate_target_table": options.truncate_target_table,
+            "remote": remote,
+        }
+        code = 200
+    else:
+        payload = {"status": remote["status"], "remote": remote, "batch_id": batch_id}
+        code = 504 if remote.get("error_code") == "RemoteTimeout" else 502
+    if persist_failed:
+        payload["state_persist_failed"] = True
+    return payload, code
+
+
+def preserved_remote_outcome(options: MappingRunOptions, phase: RemoteRunPhase) -> MappingRunOutcome | None:
+    """Return the known remote outcome when post-run work raises after the call."""
+    if not phase.attempted:
+        return None
+    remote = phase.remote
+    if isinstance(remote, dict):
+        payload, code = _remote_run_payload(
+            options, phase.batch_id, phase.scenario_name, remote, persist_failed=phase.persist_failed,
+        )
+        return MappingRunOutcome(payload, code)
+    return MappingRunOutcome(
+        {
+            "status": "unknown",
+            "batch_id": phase.batch_id,
+            "run_may_have_started": True,
+            "outcome_unknown": True,
+        },
+        502,
+    )
+
+
+def execute_mapping_run(
+    app_module: Any, options: MappingRunOptions, phase: RemoteRunPhase | None = None,
+) -> MappingRunOutcome:
+    if phase is None:
+        phase = RemoteRunPhase()
     # Same normalization as the route. Runs before any import, construction or state write.
     if str(options.mapping_name).strip().upper() == _CUTOVER_GATED_MAPPING:
         return MappingRunOutcome({"status": _CUTOVER_GATE_STATUS, "error": _CUTOVER_GATE_ERROR}, 409)
@@ -307,31 +400,25 @@ def execute_mapping_run(app_module: Any, options: MappingRunOptions) -> MappingR
         )
     completed_steps.append("generate_scenario")
 
-    run_result = remote_run_contract.parse(orchestrator.run_scenario_remote(
-        approved=groovy_is_approved(), mapping_name=options.mapping_name,
-        scenario_name=scenario_name, version=options.version, context=options.context,
-    ), "run")
+    run_result = _begin_remote_run(orchestrator, options, scenario_name, batch_id, phase)
     if run_result["status"] != "passed":
-        _persist_run_state(
+        phase.persist_failed = _persist_run_state(
             app_module, options, batch_id, scenario_name, "run_scenario",
             "RUN_UNKNOWN" if run_result["outcome_unknown"] else "RUN_FAILED", completed_steps,
-            run_result["error_code"],
-        )
+            run_result["error_code"], surface=True,
+        ) is False
         _create_failure_alert(app_module, options, batch_id, scenario_name, "run_scenario",
                               run_result["error_code"])
-        return MappingRunOutcome({"status": run_result["status"], "remote": run_result, "batch_id": batch_id},
-                                 504 if run_result["error_code"] == "RemoteTimeout" else 502)
+        payload, code = _remote_run_payload(
+            options, batch_id, scenario_name, run_result, persist_failed=phase.persist_failed,
+        )
+        return MappingRunOutcome(payload, code)
     completed_steps.append("run_scenario")
-    _persist_run_state(
-        app_module, options, batch_id, scenario_name, "run_scenario", "SUCCEEDED", completed_steps
+    phase.persist_failed = _persist_run_state(
+        app_module, options, batch_id, scenario_name, "run_scenario", "SUCCEEDED", completed_steps,
+        surface=True,
+    ) is False
+    payload, code = _remote_run_payload(
+        options, batch_id, scenario_name, run_result, persist_failed=phase.persist_failed,
     )
-    payload: MappingRunSuccess = {
-        "status": "SUCCESS",
-        "batch_id": batch_id,
-        "scenario": scenario_name,
-        "version": options.version,
-        "context": options.context,
-        "truncate_target_table": options.truncate_target_table,
-        "remote": run_result,
-    }
-    return MappingRunOutcome(payload, 200)
+    return MappingRunOutcome(payload, code)

@@ -10,6 +10,7 @@ from typing import Any
 import oracledb
 
 import execution_identity
+import repository_write_contract
 import scd2_builder
 
 logger = logging.getLogger("dwh_app.scd2_target_executor")
@@ -151,15 +152,21 @@ def _matches_contract(actual: list[dict[str, Any]], plan: Mapping[str, Any]) -> 
     return actual == expected
 
 
+def _execute_write(cursor: Any, statement: str, phase: Any) -> None:
+    repository_write_contract.mark_write_attempted(phase)
+    cursor.execute(statement)
+
+
 def _apply_grants(
     cursor: Any,
     plan: Mapping[str, Any],
     grants: list[tuple[str, str, str]],
     result: dict[str, Any],
+    phase: Any = None,
 ) -> None:
     for grant in grants:
         try:
-            cursor.execute(scd2_builder.render_grant_statement(plan, grant))
+            _execute_write(cursor, scd2_builder.render_grant_statement(plan, grant), phase)
             result["grants_applied"] += 1
         except oracledb.DatabaseError as exc:
             result["grants_failed"] += 1
@@ -171,6 +178,7 @@ def _recover_existing(
     plan: Mapping[str, Any],
     result: dict[str, Any],
     execution_username: str | None,
+    phase: Any = None,
 ) -> dict[str, Any]:
     """Existing matching table: verify the sequence and grants.
 
@@ -183,7 +191,7 @@ def _recover_existing(
     if not _sequence_exists(cursor, owner, sequence):
         result["write_operations_attempted"].append("create_sequence")
         try:
-            cursor.execute(scd2_builder.render_create_sequence(plan))
+            _execute_write(cursor, scd2_builder.render_create_sequence(plan), phase)
         except oracledb.DatabaseError as exc:
             result["status"] = "blocked_target_incomplete"
             result["missing"] = ["sequence"]
@@ -204,7 +212,7 @@ def _recover_existing(
         missing = [g for g in required if g not in present]
     if missing:
         result["write_operations_attempted"].append("grants")
-        _apply_grants(cursor, plan, missing, result)
+        _apply_grants(cursor, plan, missing, result, phase)
         repaired.append("grants")
     if result["grants_failed"] > 0:
         result["status"] = "blocked_target_incomplete"
@@ -260,6 +268,7 @@ def execute_target_ddl(
     connection_factory: Callable[[], Any],
     ddl_user: str = "APP_USER",  # kept for call compatibility; grants no longer depend on it
     identity_proof: execution_identity.ExecutionIdentityProof | None = None,
+    phase: Any = None,
 ) -> dict[str, Any]:
     """Create the SCD2 sequence and table only when both are absent.
 
@@ -299,7 +308,7 @@ def execute_target_ddl(
                 result["status"] = "blocked_target_exists_mismatch"
                 return result
             stage = "recover_existing"
-            return _recover_existing(cursor, plan, result, username)
+            return _recover_existing(cursor, plan, result, username, phase)
         stage = "preflight_sequence"
         sequence_present = _sequence_exists(cursor, owner, sequence)
         result["sequence_already_existed"] = sequence_present
@@ -307,11 +316,11 @@ def execute_target_ddl(
         if not sequence_present:
             stage = "create_sequence"
             result["write_operations_attempted"].append("create_sequence")
-            cursor.execute(scd2_builder.render_create_sequence(plan))
+            _execute_write(cursor, scd2_builder.render_create_sequence(plan), phase)
             result["sequence_created"] = True
         stage = "create_target"
         result["write_operations_attempted"].append("create_target")
-        cursor.execute(scd2_builder.render_create_table(plan))
+        _execute_write(cursor, scd2_builder.render_create_table(plan), phase)
         result["target_created"] = True
 
         stage = "verify_target"
@@ -327,7 +336,7 @@ def execute_target_ddl(
         grants = scd2_builder.required_grants(plan, username)
         if grants:
             result["write_operations_attempted"].append("grants")
-            _apply_grants(cursor, plan, grants, result)
+            _apply_grants(cursor, plan, grants, result, phase)
         result["status"] = "created" if result["grants_failed"] == 0 else "created_grants_incomplete"
         return result
     except oracledb.Error as exc:
