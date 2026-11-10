@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { FaBrain, FaUser, FaCopy, FaCheck, FaPlay, FaCircleInfo,
          FaTriangleExclamation, FaDiagramProject, FaMicrochip, FaRobot, FaCloud } from 'react-icons/fa6';
 import { isDmlAction } from './dmlActions';
+import { mappingRequestDetails } from './mappingRequestDetails';
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
@@ -190,6 +191,11 @@ function MappingRequestCard({ mappingRequest, onWizardOpen }) {
           <strong>Target:</strong> {mappingRequest.tgt_table}
         </p>
       )}
+      {mappingRequestDetails(mappingRequest).map(([label, value]) => (
+        <p key={label} className="text-xs text-slate-600 mb-1">
+          <strong>{label}:</strong> {value}
+        </p>
+      ))}
       <button
         onClick={() => onWizardOpen?.(mappingRequest)}
         className={`btn text-xs px-4 py-2 rounded-lg font-medium transition-colors ${btnColors[op] || btnColors.CREATE}`}
