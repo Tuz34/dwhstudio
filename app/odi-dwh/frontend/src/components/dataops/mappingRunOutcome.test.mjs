@@ -2,10 +2,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  MAY_HAVE_RUN_TEXT,
   NOT_REPORTED,
+  WITHHELD_ERROR,
+  applyRefreshToPanels,
+  mappingRunBadge,
   mappingRunOutcomeLines,
+  mappingRunToast,
   projectMappingRunOutcome,
   projectRunRefresh,
+  reconcileLastRuns,
 } from './mappingRunOutcome.js';
 
 // Shapes copied from mapping_run_service.py and the backend tests named below.
@@ -59,11 +65,54 @@ const SUCCESS_PAYLOAD = {
   remote: DONE_REMOTE,
 };
 
+const REQUEST = { mapping_name: 'MAP_HR_EMPLOYEES_TO_ODS', truncate_target_table: false };
+const REQUEST_TRUNCATE = { mapping_name: 'MAP_HR_EMPLOYEES_TO_ODS', truncate_target_table: true };
+
+const UNKNOWN_REMOTE = {
+  status: 'unknown',
+  error_code: 'ScenarioOutcomeUnknown',
+  outcome_unknown: true,
+  run_may_have_started: true,
+  side_effects: true,
+  session_status: null,
+};
+
+const TIMEOUT_REMOTE = {
+  status: 'unknown',
+  error_code: 'RemoteTimeout',
+  outcome_unknown: true,
+  run_may_have_started: true,
+  side_effects: true,
+};
+
 const OUTCOME_KEYS = [
-  'batchId', 'context', 'counts', 'error', 'failedStep', 'mapping',
-  'overallStatus', 'runMode', 'scenarioName', 'scenarioVersion',
-  'sessionId', 'successful',
+  'batchId', 'context', 'counts', 'error', 'failedStep', 'generation', 'mapping',
+  'outcomeClass', 'overallStatus', 'requestedMapping', 'requestedRunMode', 'runMode',
+  'scenarioName', 'scenarioVersion', 'sessionId', 'successful',
 ];
+
+function assertUnknownWording(outcome, mappingName) {
+  const badge = mappingRunBadge(outcome);
+  const toast = mappingRunToast(outcome, mappingName);
+  const text = [rendered(outcome), badge.label, badge.notice, toast.message].filter(Boolean).join('\n');
+  assert.equal(outcome.outcomeClass, 'unknown');
+  assert.equal(outcome.successful, false);
+  assert.equal(text.includes(MAY_HAVE_RUN_TEXT), true);
+  assert.equal(/not successful/i.test(text), false);
+  assert.equal(/\bfailed\b/i.test(text), false);
+  assert.equal(toast.type, 'warning');
+  assert.equal(badge.tone, 'warning');
+}
+
+function assertRequested(outcome, mode) {
+  const text = rendered(outcome);
+  assert.equal(outcome.requestedMapping, 'MAP_HR_EMPLOYEES_TO_ODS');
+  assert.equal(outcome.requestedRunMode, mode);
+  assert.equal(text.includes(`Requested mapping: MAP_HR_EMPLOYEES_TO_ODS`), true);
+  assert.equal(text.includes(`Requested run mode: ${mode}`), true);
+  assert.equal(text.includes('Requested mapping: not reported'), false);
+  assert.equal(text.includes('Requested run mode: not reported'), false);
+}
 
 function rendered(outcome) {
   return mappingRunOutcomeLines(outcome).map(([label, value]) => `${label}: ${value}`).join('\n');
@@ -71,6 +120,7 @@ function rendered(outcome) {
 
 test('a success payload is successful only from its status field', () => {
   const outcome = projectMappingRunOutcome({ httpStatus: 200, payload: SUCCESS_PAYLOAD });
+  assert.equal(outcome.outcomeClass, 'succeeded');
   assert.equal(outcome.successful, true);
   assert.equal(outcome.mapping, NOT_REPORTED);
   assert.equal(outcome.scenarioName, 'MAP_HR_EMPLOYEES_TO_ODS_SCN');
@@ -117,6 +167,7 @@ test('a failed step comes from current_step on the saved run record', () => {
       error: 'redacted short error',
     },
   });
+  assert.equal(outcome.outcomeClass, 'failed');
   assert.equal(outcome.successful, false);
   assert.equal(outcome.mapping, 'MAP_HR_EMPLOYEES_TO_ODS');
   assert.equal(outcome.scenarioName, 'MAP_HR_EMPLOYEES_TO_ODS_SCN');
@@ -125,7 +176,8 @@ test('a failed step comes from current_step on the saved run record', () => {
   assert.equal(outcome.runMode, 'truncated');
   assert.equal(outcome.overallStatus, 'RUN_FAILED');
   assert.equal(outcome.failedStep, 'run_scenario');
-  assert.equal(outcome.error, 'redacted short error');
+  assert.equal(outcome.error, WITHHELD_ERROR);
+  assert.equal(rendered(outcome).includes('redacted short error'), false);
   assert.equal(outcome.batchId, 'RUN-001');
   assert.equal(rendered(outcome).includes('2026-06-18'), false);
   assert.equal(rendered(outcome).includes('duration'), false);
@@ -137,10 +189,13 @@ test('an HTTP failure body names the remote error code and not a session id', ()
     httpStatus: 502,
     payload: { status: 'failed', remote: FAILED_REMOTE, batch_id: 'RUN-001' },
   });
+  assert.equal(outcome.outcomeClass, 'failed');
   assert.equal(outcome.successful, false);
   assert.equal(outcome.overallStatus, 'failed');
   assert.equal(outcome.failedStep, NOT_REPORTED);
   assert.equal(outcome.error, 'ScenarioRunFailed');
+  assert.equal(mappingRunToast(outcome, 'MAP_HR_EMPLOYEES_TO_ODS').message.includes('Scenario run failed'), true);
+  assert.equal(mappingRunToast(outcome, 'MAP_HR_EMPLOYEES_TO_ODS').message.includes(MAY_HAVE_RUN_TEXT), false);
   assert.equal(outcome.sessionId, NOT_REPORTED);
   assert.equal(rendered(outcome).includes('ERROR'), false);
 });
@@ -207,15 +262,20 @@ test('the IKM conflict message is the error text', () => {
   assert.equal(rendered(outcome).includes('option:'), false);
 });
 
-test('a thrown network error has no run fields', () => {
-  const outcome = projectMappingRunOutcome({ thrown: { message: 'Failed to fetch' } });
-  assert.equal(outcome.successful, false);
-  assert.equal(outcome.error, 'Failed to fetch');
+test('a thrown network error is unknown and hides the client message', () => {
+  const outcome = projectMappingRunOutcome({
+    thrown: { message: 'Failed to fetch' },
+    request: REQUEST,
+  });
+  assertUnknownWording(outcome, REQUEST.mapping_name);
+  assert.equal(outcome.error, NOT_REPORTED);
+  assert.equal(rendered(outcome).includes('Failed to fetch'), false);
   assert.equal(outcome.overallStatus, NOT_REPORTED);
   assert.equal(outcome.batchId, NOT_REPORTED);
   assert.equal(outcome.sessionId, NOT_REPORTED);
   assert.equal(outcome.counts, NOT_REPORTED);
   assert.equal(outcome.failedStep, NOT_REPORTED);
+  assertRequested(outcome, 'kept rows');
 });
 
 test('missing fields and a body without a status are not reported and not successful', () => {
@@ -252,18 +312,26 @@ test('an option-update failure shows the public error and the batch only', () =>
   assert.equal(rendered(outcome).includes('Service request failed.'), false);
 });
 
-test('counts render only finite numbers and a session id only from the top level', () => {
+test('a session id renders only from a top-level safe token and counts stay unreported', () => {
   const outcome = projectMappingRunOutcome({
     httpStatus: 200,
     payload: {
       status: 'SUCCESS',
       session_id: 'SESS-100',
       row_count: 4,
-      counts: { target_total: 3, source_current: 2, rows: [{ id: 1 }] },
+      counts: { target_total: 3, source_current: 2, customer_id: 123456, rows: [{ id: 1 }] },
     },
   });
+  const text = rendered(outcome);
   assert.equal(outcome.sessionId, 'SESS-100');
-  assert.equal(outcome.counts, 'row_count=4, source_current=2, target_total=3');
+  assert.equal(outcome.counts, NOT_REPORTED);
+  for (const leak of ['customer_id', '123456', 'target_total', 'source_current', 'row_count']) {
+    assert.equal(text.includes(leak), false, leak);
+  }
+  assert.equal(projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: { status: 'SUCCESS', session_id: 'db.example.local' },
+  }).sessionId, NOT_REPORTED);
 });
 
 test('raw data and secrets are not rendered', () => {
@@ -302,7 +370,7 @@ test('raw data and secrets are not rendered', () => {
   ]) {
     assert.equal(text.includes(secret), false, secret);
   }
-  assert.equal(outcome.error, NOT_REPORTED);
+  assert.equal(outcome.error, WITHHELD_ERROR);
   assert.equal(outcome.sessionId, NOT_REPORTED);
 });
 
@@ -347,7 +415,7 @@ test('refresh applies only the saved record with the same batch id', () => {
       overall_status: 'RUN_FAILED',
       current_step: 'run_scenario',
       truncate_target_table: false,
-      error: 'redacted short error',
+      error: 'customer_id=123456 at Loader.run(Loader.java:42) host=db.example.local',
     }],
     count: 1,
     limit: 50,
@@ -355,7 +423,9 @@ test('refresh applies only the saved record with the same batch id', () => {
   });
   assert.equal(fromHistory.applied, true);
   assert.equal(fromHistory.outcome.failedStep, 'run_scenario');
-  assert.equal(fromHistory.outcome.error, 'redacted short error');
+  assert.equal(fromHistory.outcome.error, 'ScenarioRunFailed');
+  assert.equal(rendered(fromHistory.outcome).includes('customer_id'), false);
+  assert.equal(rendered(fromHistory.outcome).includes('db.example.local'), false);
   assert.equal(fromHistory.outcome.counts, NOT_REPORTED);
 });
 
@@ -372,4 +442,200 @@ test('a gate response without a batch id is not replaced by saved state', () => 
   assert.equal(refreshed.applied, false);
   assert.equal(refreshed.outcome.error, GATE_ERROR);
   assert.equal(refreshed.outcome.successful, false);
+});
+
+test('a non-2xx body that claims SUCCESS is unknown and does not show SUCCESS', () => {
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 409,
+    payload: {
+      status: 'SUCCESS',
+      batch_id: 'RUN-FAKE1',
+      scenario: 'MAP_HR_EMPLOYEES_TO_ODS_SCN',
+      version: '001',
+    },
+    request: REQUEST,
+  });
+  const text = rendered(outcome);
+  assertUnknownWording(outcome, REQUEST.mapping_name);
+  assert.equal(outcome.overallStatus, NOT_REPORTED);
+  assert.equal(text.includes('SUCCESS'), false);
+  assert.equal(outcome.scenarioName, 'MAP_HR_EMPLOYEES_TO_ODS_SCN');
+  assertRequested(outcome, 'kept rows');
+});
+
+test('unknown, timeout, and each may-have-run flag use the check-before-retry wording', () => {
+  const cases = [
+    { httpStatus: 502, payload: { status: 'unknown', remote: UNKNOWN_REMOTE, batch_id: 'RUN-UNK1' } },
+    { httpStatus: 504, payload: { status: 'unknown', remote: TIMEOUT_REMOTE, batch_id: 'RUN-TIME1' } },
+    { httpStatus: 504, payload: { status: 'failed', remote: { error_code: 'RemoteTimeout', status: 'failed' }, batch_id: 'RUN-TIME2' } },
+    { httpStatus: 502, payload: { status: 'failed', remote: { error_code: 'RemoteTimeout' }, batch_id: 'RUN-TIME3' } },
+    { httpStatus: 502, payload: { remote: { outcome_unknown: true }, batch_id: 'RUN-UNK2' } },
+    { httpStatus: 502, payload: { remote: { run_may_have_started: true }, batch_id: 'RUN-UNK3' } },
+    { httpStatus: 502, payload: { remote: { side_effects: true }, batch_id: 'RUN-UNK4' } },
+    { httpStatus: 502, payload: { outcome_unknown: true, batch_id: 'RUN-UNK5' } },
+    { httpStatus: 502, payload: { run_may_have_started: true, batch_id: 'RUN-UNK6' } },
+    { httpStatus: 502, payload: { side_effects: true, batch_id: 'RUN-UNK7' } },
+    { httpStatus: 200, payload: { overall_status: 'RUN_UNKNOWN', batch_id: 'RUN-UNK8' } },
+    { httpStatus: 502, payload: { status: 'unknown', batch_id: 'RUN-UNK9' } },
+  ];
+  for (const input of cases) {
+    const outcome = projectMappingRunOutcome({ ...input, request: REQUEST });
+    assertUnknownWording(outcome, REQUEST.mapping_name);
+    assert.equal(rendered(outcome).includes('Failed to fetch'), false);
+  }
+});
+
+test('anomalous error text and arbitrary count keys are withheld', () => {
+  const leak = 'customer_id=123456 at Loader.run(Loader.java:42) host=db.example.local';
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 500,
+    payload: {
+      error: leak,
+      error_type: 'host=db.example.local',
+      counts: { customer_id: 123456 },
+      row_count: 9,
+      insert_count: 8,
+      status: 'RUN_FAILED',
+      batch_id: 'RUN-LEAK1',
+    },
+    request: REQUEST_TRUNCATE,
+  });
+  const text = rendered(outcome);
+  assert.equal(outcome.outcomeClass, 'failed');
+  assert.equal(outcome.error, WITHHELD_ERROR);
+  assert.equal(outcome.counts, NOT_REPORTED);
+  for (const secret of ['customer_id', '123456', 'Loader.java', 'db.example.local', 'row_count', 'insert_count']) {
+    assert.equal(text.includes(secret), false, secret);
+  }
+  assertRequested(outcome, 'truncated');
+
+  const typed = projectMappingRunOutcome({
+    httpStatus: 500,
+    payload: { error: leak, error_type: 'ValueError', status: 'RUN_FAILED' },
+  });
+  assert.equal(typed.error, `${WITHHELD_ERROR} error_type=ValueError`);
+  assert.equal(rendered(typed).includes('customer_id'), false);
+  assert.equal(rendered(typed).includes('Loader.java'), false);
+
+  const coded = projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: { status: 'failed', remote: { error_code: leak }, batch_id: 'RUN-LEAK2' },
+  });
+  assert.equal(coded.error, WITHHELD_ERROR);
+  assert.equal(rendered(coded).includes('customer_id'), false);
+});
+
+test('refresh for a closed, superseded, or different mapping panel is dropped', () => {
+  const started = projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: { status: 'failed', remote: FAILED_REMOTE, batch_id: 'RUN-001' },
+    request: REQUEST,
+    generation: 1,
+  });
+  const response = {
+    mapping_name: 'MAP_HR_EMPLOYEES_TO_ODS',
+    state: {
+      batch_id: 'RUN-001',
+      mapping_name: 'MAP_HR_EMPLOYEES_TO_ODS',
+      scenario_name: 'MAP_HR_EMPLOYEES_TO_ODS_SCN',
+      current_step: 'run_scenario',
+      overall_status: 'RUN_FAILED',
+      error: 'Operation failed.',
+    },
+  };
+
+  const still = projectRunRefresh(started, response, { ...started });
+  assert.equal(still.applied, true);
+  assert.equal(still.reason, 'applied');
+  assert.equal(still.outcome.failedStep, 'run_scenario');
+  assert.equal(still.outcome.requestedMapping, 'MAP_HR_EMPLOYEES_TO_ODS');
+  assert.equal(still.outcome.requestedRunMode, 'kept rows');
+  assert.equal(still.outcome.generation, 1);
+
+  const closed = projectRunRefresh(started, response, null);
+  assert.equal(closed.applied, false);
+  assert.equal(closed.reason, 'closed');
+  assert.equal(closed.outcome, null);
+
+  const newer = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: SUCCESS_PAYLOAD,
+    request: REQUEST_TRUNCATE,
+    generation: 2,
+  });
+  const superseded = projectRunRefresh(started, response, newer);
+  assert.equal(superseded.applied, false);
+  assert.equal(superseded.reason, 'superseded');
+  assert.equal(superseded.outcome, newer);
+
+  const mismatch = projectRunRefresh(started, {
+    mapping_name: 'MAP_OTHER',
+    state: {
+      batch_id: 'RUN-001',
+      mapping_name: 'MAP_OTHER',
+      overall_status: 'SUCCEEDED',
+      current_step: 'run_scenario',
+    },
+  }, started);
+  assert.equal(mismatch.applied, false);
+  assert.equal(mismatch.reason, 'mismatch');
+  assert.equal(mismatch.outcome, started);
+
+  const panels = { MAP_HR_EMPLOYEES_TO_ODS: newer };
+  const dropped = applyRefreshToPanels(panels, 'MAP_HR_EMPLOYEES_TO_ODS', started, response);
+  assert.equal(dropped.applied, false);
+  assert.equal(dropped.panels.MAP_HR_EMPLOYEES_TO_ODS, newer);
+
+  const closedPanels = applyRefreshToPanels({}, 'MAP_HR_EMPLOYEES_TO_ODS', started, response);
+  assert.equal(closedPanels.applied, false);
+  assert.deepEqual(closedPanels.panels, {});
+});
+
+test('requested mapping and run mode are shown on success and every failure class', () => {
+  const cases = [
+    ['succeeded', { httpStatus: 200, payload: SUCCESS_PAYLOAD, request: REQUEST_TRUNCATE }, 'truncated'],
+    ['failed', { httpStatus: 409, payload: GATE_PAYLOAD, request: REQUEST }, 'kept rows'],
+    ['failed', {
+      httpStatus: 502,
+      payload: { status: 'failed', remote: FAILED_REMOTE, batch_id: 'RUN-001' },
+      request: REQUEST,
+    }, 'kept rows'],
+    ['failed', {
+      httpStatus: 500,
+      payload: { error: 'Scenario option update failed.', batch_id: 'RUN-OPT1' },
+      request: REQUEST_TRUNCATE,
+    }, 'truncated'],
+    ['failed', {
+      httpStatus: 400,
+      payload: { error: 'Scenario generation failed.', batch_id: 'RUN-GEN1' },
+      request: REQUEST,
+    }, 'kept rows'],
+    ['unknown', { httpStatus: 409, payload: { status: 'SUCCESS' }, request: REQUEST }, 'kept rows'],
+    ['unknown', {
+      httpStatus: 502,
+      payload: { status: 'unknown', remote: UNKNOWN_REMOTE, batch_id: 'RUN-UNK1' },
+      request: REQUEST_TRUNCATE,
+    }, 'truncated'],
+    ['unknown', {
+      httpStatus: 504,
+      payload: { status: 'unknown', remote: TIMEOUT_REMOTE, batch_id: 'RUN-TIME1' },
+      request: REQUEST,
+    }, 'kept rows'],
+    ['unknown', { thrown: { message: 'Failed to fetch' }, request: REQUEST_TRUNCATE }, 'truncated'],
+  ];
+  for (const [expected, input, mode] of cases) {
+    const outcome = projectMappingRunOutcome(input);
+    assert.equal(outcome.outcomeClass, expected, JSON.stringify(input.payload || input.thrown));
+    assertRequested(outcome, mode);
+    if (expected === 'unknown') assertUnknownWording(outcome, REQUEST.mapping_name);
+  }
+});
+
+test('a panel whose mapping is no longer in the list is removed', () => {
+  const keep = { batchId: 'RUN-001' };
+  const panels = { MAP_KEEP: keep, MAP_GONE: { batchId: 'RUN-002' } };
+  const next = reconcileLastRuns(panels, ['MAP_KEEP', 'MAP_OTHER']);
+  assert.deepEqual(Object.keys(next), ['MAP_KEEP']);
+  assert.equal(next.MAP_KEEP, keep);
+  assert.equal(reconcileLastRuns(panels, ['MAP_KEEP', 'MAP_GONE']), panels);
 });

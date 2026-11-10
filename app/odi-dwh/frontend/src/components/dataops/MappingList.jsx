@@ -5,9 +5,12 @@ import clsx from 'clsx';
 import { buildRunMappingRequest, openRunDialogState, runModeWarning, selectRunMode } from './mappingRunDialog';
 import {
   NOT_REPORTED,
+  applyRefreshToPanels,
+  mappingRunBadge,
   mappingRunOutcomeLines,
+  mappingRunToast,
   projectMappingRunOutcome,
-  projectRunRefresh,
+  reconcileLastRuns,
 } from './mappingRunOutcome';
 
 const ODI_SCHEMA_TO_DB_SCHEMA = {
@@ -30,36 +33,46 @@ function displayDbTable(value) {
 
 function LastRunPanel({ outcome, onClose, onRefresh }) {
   const lines = mappingRunOutcomeLines(outcome).filter(([label]) => label !== 'Result');
+  const badge = mappingRunBadge(outcome);
+  const badgeClass = badge.tone === 'success'
+    ? 'bg-emerald-100 text-emerald-700'
+    : badge.tone === 'warning'
+      ? 'bg-amber-100 text-amber-800'
+      : 'bg-rose-100 text-rose-700';
+  const attention = outcome.outcomeClass === 'unknown'
+    ? 'border-amber-200 bg-amber-50'
+    : 'border-rose-100 bg-rose-50';
+  const attentionText = outcome.outcomeClass === 'unknown' ? 'text-amber-800' : 'text-rose-700';
   return (
     <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
       <div className="flex items-center justify-between gap-2 mb-3">
         <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Last run</span>
-        <span className={clsx(
-          'text-[9px] px-2 py-1 rounded-full font-black uppercase',
-          outcome.successful ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700',
-        )}>
-          {outcome.successful ? 'successful' : 'not successful'}
+        <span className={clsx('text-[9px] px-2 py-1 rounded-full font-black uppercase', badgeClass)}>
+          {badge.label}
         </span>
       </div>
+      {badge.notice && (
+        <p className="mb-3 text-[10px] font-semibold leading-4 text-amber-800">{badge.notice}</p>
+      )}
       <div className="grid grid-cols-2 gap-2 text-[10px]">
-        {lines.map(([label, value]) => (
-          <div
-            key={label}
-            className={clsx(
-              'bg-white rounded-lg border border-slate-100 p-2',
-              (label === 'Scenario' || label === 'Error' || label === 'Batch' || label === 'Session' || label === 'Counts') && 'col-span-2',
-              label === 'Error' && value !== NOT_REPORTED && !outcome.successful && 'border-rose-100 bg-rose-50',
-            )}
-          >
-            <div className="text-slate-400 font-bold uppercase mb-1">{label}</div>
-            <div className={clsx(
-              'font-mono break-all',
-              label === 'Error' && value !== NOT_REPORTED && !outcome.successful ? 'text-rose-700' : 'text-slate-700',
-            )}>
-              {value}
+        {lines.map(([label, value]) => {
+          const showAttention = label === 'Error' && value !== NOT_REPORTED && outcome.outcomeClass !== 'succeeded';
+          return (
+            <div
+              key={label}
+              className={clsx(
+                'bg-white rounded-lg border border-slate-100 p-2',
+                (label === 'Scenario' || label === 'Requested mapping' || label === 'Error' || label === 'Batch' || label === 'Session' || label === 'Counts') && 'col-span-2',
+                showAttention && attention,
+              )}
+            >
+              <div className="text-slate-400 font-bold uppercase mb-1">{label}</div>
+              <div className={clsx('font-mono break-all', showAttention ? attentionText : 'text-slate-700')}>
+                {value}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
       <div className="mt-3 flex justify-end gap-2">
         <button
@@ -103,6 +116,7 @@ export function MappingList() {
   const [runDialog, setRunDialog] = useState(null);
   const [lastRuns, setLastRuns] = useState({});
   const autoSelectedRef = useRef(false);
+  const runSeq = useRef(0);
 
   const showToast = useCallback((message, type = 'success') => {
     setToast({ message, type });
@@ -142,6 +156,7 @@ export function MappingList() {
         }
       });
       setMappings(unique);
+      setLastRuns((prev) => reconcileLastRuns(prev, unique.map((row) => row.MAPPING_NAME)));
       if (!detail && !autoSelectedRef.current && unique.length > 0) {
         autoSelectedRef.current = true;
         setTimeout(() => loadDetail(unique[0].MAPPING_NAME), 0);
@@ -174,36 +189,33 @@ export function MappingList() {
     if (!runDialog?.mappingName) return;
     const request = buildRunMappingRequest(runDialog);
     const name = request.mapping_name;
-    const truncateTargetTable = request.truncate_target_table;
+    const generation = runSeq.current + 1;
+    runSeq.current = generation;
     setRunDialog(null);
     setLastRuns((prev) => {
+      if (!prev[name]) return prev;
       const next = { ...prev };
       delete next[name];
       return next;
     });
     setRunStatus(p => ({ ...p, [name]: 'running' }));
+    const publish = (outcome) => {
+      setLastRuns((prev) => ({ ...prev, [name]: outcome }));
+      const toast = mappingRunToast(outcome, name);
+      showToast(toast.message, toast.type);
+      setRunStatus(p => ({ ...p, [name]: outcome.outcomeClass === 'succeeded' ? 'done' : 'error' }));
+    };
     try {
       const res = await runMapping(request);
-      const outcome = projectMappingRunOutcome({ httpStatus: 200, payload: res });
-      setLastRuns((prev) => ({ ...prev, [name]: outcome }));
-      if (outcome.successful) {
-        const mode = truncateTargetTable ? 'with target truncate' : 'without target truncate';
-        showToast(`${name} scenario ran successfully ${mode}.`, 'success');
-        setRunStatus(p => ({ ...p, [name]: 'done' }));
-      } else {
-        const reason = outcome.error !== NOT_REPORTED ? outcome.error : outcome.overallStatus;
-        showToast(`Scenario run failed: ${reason}`, 'error');
-        setRunStatus(p => ({ ...p, [name]: 'error' }));
-      }
+      publish(projectMappingRunOutcome({ httpStatus: 200, payload: res, request, generation }));
     } catch (e) {
-      const outcome = projectMappingRunOutcome({
+      publish(projectMappingRunOutcome({
         httpStatus: typeof e?.status === 'number' ? e.status : null,
         payload: e?.body,
         thrown: e,
-      });
-      setLastRuns((prev) => ({ ...prev, [name]: outcome }));
-      showToast(`Scenario run failed: ${e.message}`, 'error');
-      setRunStatus(p => ({ ...p, [name]: 'error' }));
+        request,
+        generation,
+      }));
     } finally {
       setTimeout(() => setRunStatus(p => { const n = {...p}; delete n[name]; return n; }), 4000);
     }
@@ -218,16 +230,18 @@ export function MappingList() {
   };
 
   const refreshLastRun = async (name) => {
-    const current = lastRuns[name];
-    if (!current) return;
+    const started = lastRuns[name];
+    if (!started) return;
     try {
       const response = await getMappingState(name);
-      const refreshed = projectRunRefresh(current, response);
-      if (!refreshed.applied) {
+      let decision = null;
+      setLastRuns((prev) => {
+        decision = applyRefreshToPanels(prev, name, started, response);
+        return decision.applied ? decision.panels : prev;
+      });
+      if (decision && !decision.applied && decision.reason === 'mismatch') {
         showToast('Saved state does not match this run.', 'error');
-        return;
       }
-      setLastRuns((prev) => ({ ...prev, [name]: refreshed.outcome }));
     } catch (err) {
       showToast(`Could not refresh run state: ${err.message}`, 'error');
     }
@@ -296,7 +310,7 @@ export function MappingList() {
       {/* Toast */}
       {toast && (
         <div className={clsx("fixed top-6 right-6 z-50 rounded-xl px-5 py-3 shadow-xl text-white text-sm font-medium animate-fade-in",
-          toast.type === 'success' ? 'bg-emerald-600' : 'bg-rose-600')}>
+          toast.type === 'success' ? 'bg-emerald-600' : toast.type === 'warning' ? 'bg-amber-600' : 'bg-rose-600')}>
           {toast.message}
         </div>
       )}
