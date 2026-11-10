@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { getOdiMappings, getOdiMappingDetail, runMapping, getMappingState, deleteMapping } from '../../services/api';
 import { useDispatch } from '../../store/AppContext';
 import clsx from 'clsx';
+import { buildRunMappingRequest, openRunDialogState, runModeWarning, selectRunMode } from './mappingRunDialog';
 
 const ODI_SCHEMA_TO_DB_SCHEMA = {
   SRC_HR: 'HR',
@@ -105,21 +106,19 @@ export function MappingList() {
 
   const openRunDialog = (name, e) => {
     e.stopPropagation();
-    setRunDialog({ mappingName: name, truncateTargetTable: true });
+    // Non-destructive by default; truncate is only ever an explicit operator choice.
+    setRunDialog(openRunDialogState(name));
   };
 
   const handleRun = async () => {
     if (!runDialog?.mappingName) return;
-    const name = runDialog.mappingName;
-    const truncateTargetTable = runDialog.truncateTargetTable;
+    const request = buildRunMappingRequest(runDialog);
+    const name = request.mapping_name;
+    const truncateTargetTable = request.truncate_target_table;
     setRunDialog(null);
     setRunStatus(p => ({ ...p, [name]: 'running' }));
     try {
-      const res = await runMapping({
-        mapping_name: name,
-        truncate_target_table: truncateTargetTable,
-        approved: true,
-      });
+      const res = await runMapping(request);
       if (res.error) throw new Error(res.error);
       const mode = truncateTargetTable ? 'with target truncate' : 'without target truncate';
       showToast(`${name} scenario ran successfully ${mode}.`, 'success');
@@ -213,7 +212,7 @@ export function MappingList() {
                   type="radio"
                   name="target-run-mode"
                   checked={runDialog.truncateTargetTable === true}
-                  onChange={() => setRunDialog(prev => ({ ...prev, truncateTargetTable: true }))}
+                  onChange={() => setRunDialog(prev => selectRunMode(prev, true))}
                   className="mt-1 h-4 w-4 accent-violet-600"
                 />
                 <span>
@@ -226,7 +225,7 @@ export function MappingList() {
                   type="radio"
                   name="target-run-mode"
                   checked={runDialog.truncateTargetTable === false}
-                  onChange={() => setRunDialog(prev => ({ ...prev, truncateTargetTable: false }))}
+                  onChange={() => setRunDialog(prev => selectRunMode(prev, false))}
                   className="mt-1 h-4 w-4 accent-violet-600"
                 />
                 <span>
@@ -234,6 +233,11 @@ export function MappingList() {
                   <span className="block text-xs leading-5 text-slate-500">Keeps existing target rows and appends new rows.</span>
                 </span>
               </label>
+              {runModeWarning(runDialog) && (
+                <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+                  {runModeWarning(runDialog)}
+                </p>
+              )}
             </div>
             <div className="flex justify-end gap-2 border-t border-slate-100 px-5 py-4">
               <button
