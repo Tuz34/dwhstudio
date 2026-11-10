@@ -32,8 +32,13 @@ function buildFetchOptions(options = {}) {
   return { ...options, method, headers, body };
 }
 
+function plainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 // SCD2 error bodies are status codes and count-only evidence. Other routes keep
-// the generic message and do not attach a response body.
+// the generic message and do not attach a response body. The mapping run opts in
+// separately and keeps its JSON on error.body.
 const SCD2_ERROR_KEYS = [
   'status', 'error', 'error_code', 'error_type',
   'mapping_name', 'scenario_name', 'scenario_version', 'scenario', 'target',
@@ -48,7 +53,7 @@ const SCD2_ERROR_KEYS = [
 ];
 
 function scd2ErrorPayload(payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  if (!plainObject(payload)) return null;
   const safe = {};
   for (const key of SCD2_ERROR_KEYS) {
     if (Object.prototype.hasOwnProperty.call(payload, key)) safe[key] = payload[key];
@@ -56,13 +61,16 @@ function scd2ErrorPayload(payload) {
   return Object.keys(safe).length > 0 ? safe : null;
 }
 
-async function responseError(res, { captureScd2Error = false } = {}) {
+async function responseError(res, { captureErrorBody = false, captureScd2Error = false } = {}) {
   let errorType;
+  let capturedBody;
   let scd2Error = null;
   const contentType = res.headers?.get?.('content-type') || '';
   if (contentType.includes('application/json') && typeof res.json === 'function') {
     try {
       const payload = await res.json();
+      // Only the mapping run opts in. The Error message stays the generic status text.
+      if (captureErrorBody && plainObject(payload)) capturedBody = payload;
       if (typeof payload?.error_type === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(payload.error_type)) {
         errorType = payload.error_type;
       }
@@ -76,19 +84,22 @@ async function responseError(res, { captureScd2Error = false } = {}) {
   const error = new Error(message);
   error.status = res.status;
   if (errorType) error.errorType = errorType;
+  if (capturedBody) error.body = capturedBody;
   if (scd2Error) error.scd2 = scd2Error;
   return error;
 }
 
 export async function request(url, options = {}) {
+  const captureErrorBody = options.captureErrorBody === true;
   const captureScd2Error = options.captureScd2Error === true;
-  const fetchOptions = { ...options };
-  delete fetchOptions.captureScd2Error;
-  const built = buildFetchOptions(fetchOptions);
-  const res = await fetch(url, built);
+  const fetchable = { ...options };
+  delete fetchable.captureErrorBody;
+  delete fetchable.captureScd2Error;
+  const fetchOptions = buildFetchOptions(fetchable);
+  const res = await fetch(url, fetchOptions);
 
   if (!res.ok) {
-    throw await responseError(res, { captureScd2Error });
+    throw await responseError(res, { captureErrorBody, captureScd2Error });
   }
 
   const text = await res.text();
@@ -168,7 +179,9 @@ export const preflightMappingTarget = (body) => apiPost('/api/mapping/target-pre
 export const generateMapping = (body)    => apiPost('/api/mapping/generate', body);
 export const updateMapping   = (body)    => apiPost('/api/mapping/update', body);
 export const deleteMapping   = (body)    => apiPost('/api/mapping/delete', body);
-export const runMapping      = (body)    => apiPost('/api/mapping/run', body);
+// captureErrorBody keeps the JSON for the run panel. Other posts still drop it.
+export const runMapping = (body) =>
+  request('/api/mapping/run', { method: 'POST', body, captureErrorBody: true });
 export const validateExpression = (body) => apiPost('/api/mapping/validate-expression', body);
 export const getMappingState = (name) => apiGet(`/api/mapping/state/${encodeURIComponent(name)}`);
 export const getMappingRuns  = ({ limit = 50, status } = {}) => {
