@@ -230,11 +230,12 @@ test('HTTP 200 with an unrecognised status is unknown, including partial and an 
   assert.equal(mappingRunToast(empty, REQUEST.mapping_name).type, 'warning');
 });
 
-test('a success status still wins when an error string is also present', () => {
+test('a proven success still wins when an error string is also present', () => {
   const outcome = projectMappingRunOutcome({
     httpStatus: 200,
-    payload: { status: 'SUCCESS', error: 'Scenario generation failed.', batch_id: 'RUN-OK' },
+    payload: { ...SUCCESS_PAYLOAD, error: 'Scenario generation failed.', batch_id: 'RUN-OK' },
   });
+  assert.equal(outcome.outcomeClass, 'succeeded');
   assert.equal(outcome.successful, true);
   assert.equal(outcome.error, 'Scenario generation failed.');
 });
@@ -293,8 +294,14 @@ test('missing fields and a body without a status are not reported and not succes
     assert.equal(value, NOT_REPORTED);
   }
 
-  const onlyStatus = projectMappingRunOutcome({ httpStatus: 200, payload: { status: 'SUCCESS' } });
-  assert.equal(onlyStatus.successful, true);
+  const onlyStatus = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: { status: 'SUCCESS' },
+    request: REQUEST,
+  });
+  assertUnknownWording(onlyStatus, REQUEST.mapping_name);
+  assert.equal(onlyStatus.overallStatus, NOT_REPORTED);
+  assert.equal(rendered(onlyStatus).includes('SUCCESS'), false);
   assert.equal(onlyStatus.mapping, NOT_REPORTED);
   assert.equal(onlyStatus.scenarioName, NOT_REPORTED);
   assert.equal(onlyStatus.scenarioVersion, NOT_REPORTED);
@@ -923,4 +930,145 @@ test('dotted versions and backend identifiers are displayed only inside the remo
   assert.equal(hiddenText.includes('MAP_HR-EMPLOYEES'), false);
   assert.equal(hiddenText.includes('GLOBAL/DEV'), false);
   assert.equal(hiddenText.includes('1234567890123'), false);
+});
+
+test('a contradictory body is unknown and a dropped session guard would misclassify it', () => {
+  const ikmError = "The mapping's IKM does not expose the TRUNCATE_TARGET_TABLE option. Run with truncate_target_table=false or change the IKM.";
+  const cases = [
+    ['validation started', {
+      httpStatus: 400,
+      payload: { error: 'Invalid context.', run_may_have_started: true },
+    }],
+    ['validation foreign status', {
+      httpStatus: 400,
+      payload: { error: 'Invalid context.', status: 'blocked' },
+    }],
+    ['validation remote', {
+      httpStatus: 400,
+      payload: { error: 'Invalid context.', remote: { status: 'blocked' } },
+    }],
+    ['gate outcome unknown', {
+      httpStatus: 409,
+      payload: { ...GATE_PAYLOAD, outcome_unknown: true },
+    }],
+    ['gate status unknown', {
+      httpStatus: 409,
+      payload: { ...GATE_PAYLOAD, status: 'unknown' },
+    }],
+    ['gate remote', {
+      httpStatus: 409,
+      payload: { ...GATE_PAYLOAD, remote: { status: 'blocked' } },
+    }],
+    ['ikm outcome unknown', {
+      httpStatus: 409,
+      payload: { status: 'ikm_option_unsupported', error: ikmError, outcome_unknown: true },
+    }],
+    ['ikm status unknown', {
+      httpStatus: 409,
+      payload: { status: 'unknown', error: ikmError, outcome_unknown: true },
+    }],
+    ['option status unknown', {
+      httpStatus: 500,
+      payload: { error: 'Scenario option update failed.', status: 'unknown', batch_id: 'RUN-OPT1' },
+    }],
+    ['option outcome unknown', {
+      httpStatus: 500,
+      payload: { error: 'Scenario option update failed.', outcome_unknown: true, batch_id: 'RUN-OPT1' },
+    }],
+    ['option foreign status', {
+      httpStatus: 500,
+      payload: { error: 'Scenario option update failed.', status: 'blocked', batch_id: 'RUN-OPT1' },
+    }],
+    ['generation status unknown', {
+      httpStatus: 400,
+      payload: { error: 'Scenario generation failed.', status: 'unknown', batch_id: 'RUN-GEN1' },
+    }],
+    ['generation outcome unknown', {
+      httpStatus: 400,
+      payload: { error: 'Scenario generation failed.', outcome_unknown: true, batch_id: 'RUN-GEN1' },
+    }],
+    ['success claim with ERROR session', {
+      httpStatus: 200,
+      payload: {
+        status: 'SUCCESS',
+        remote: {
+          ...DONE_REMOTE,
+          session_status: 'ERROR',
+          error_code: 'ScenarioRunFailed',
+          run_may_have_started: true,
+          side_effects: true,
+          outcome_unknown: false,
+        },
+      },
+    }],
+    ['saved RUN_FAILED with remote started', {
+      httpStatus: 200,
+      payload: {
+        overall_status: 'RUN_FAILED',
+        remote: {
+          status: 'blocked',
+          run_may_have_started: true,
+          side_effects: true,
+          outcome_unknown: false,
+        },
+        batch_id: 'RUN-001',
+      },
+    }],
+    ['saved RUN_FAILED with remote and clear flags', {
+      httpStatus: 200,
+      payload: {
+        overall_status: 'RUN_FAILED',
+        remote: blockedRemote('ApprovalRequired'),
+        batch_id: 'RUN-001',
+      },
+    }],
+    // Full success except session_status. Fails if the DONE guard is removed.
+    ['DONE session guard', {
+      httpStatus: 200,
+      payload: {
+        status: 'SUCCESS',
+        remote: { ...DONE_REMOTE, session_status: 'ERROR' },
+      },
+    }],
+    // Full resolved ERROR except session_status. Fails if that guard is removed.
+    ['resolved ERROR session guard', {
+      httpStatus: 502,
+      payload: {
+        status: 'failed',
+        remote: { ...FAILED_REMOTE, session_status: 'DONE' },
+        batch_id: 'RUN-001',
+      },
+    }],
+  ];
+  for (const [label, input] of cases) {
+    const outcome = projectMappingRunOutcome({ ...input, request: REQUEST });
+    assert.equal(outcome.outcomeClass, 'unknown', label);
+    assertUnknownWording(outcome, REQUEST.mapping_name);
+  }
+
+  const claimed = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: {
+      status: 'SUCCESS',
+      remote: {
+        ...DONE_REMOTE,
+        session_status: 'ERROR',
+        error_code: 'ScenarioRunFailed',
+      },
+    },
+    request: REQUEST,
+  });
+  assert.equal(claimed.overallStatus, NOT_REPORTED);
+  const claimedText = rendered(claimed);
+  assert.equal(claimedText.includes('SUCCESS'), false);
+  assert.equal(claimedText.includes('ScenarioRunFailed'), false);
+
+  const savedOk = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: { overall_status: 'SUCCEEDED', batch_id: 'RUN-001', current_step: 'run_scenario' },
+    request: REQUEST,
+  });
+  assert.equal(savedOk.outcomeClass, 'succeeded');
+  assert.equal(savedOk.successful, true);
+  assert.equal(savedOk.overallStatus, 'SUCCEEDED');
 });

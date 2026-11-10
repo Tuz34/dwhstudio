@@ -35,7 +35,9 @@ const REMOTE_ERROR_CODES = new Set([
 
 // Closed `failed` set. Classification matches the whole shape
 // (HTTP status + status + flags + sentence or code), not one field.
-// Anything that is not a proven success and not in this set is `unknown`.
+// `hasUncertaintyEvidence` runs before any class. A contradictory body is
+// `unknown`. Anything that is not a proven success and not in this set is
+// `unknown`.
 //
 // Sources for the shapes:
 // - routes/mapping_write.py:208-221 and app.py:196-199 (validation / approval 400)
@@ -176,63 +178,26 @@ function blockFlagsClear(body, remote) {
   ));
 }
 
-function isProvenSuccess(httpStatus, body) {
-  if (!resolvedHttp(httpStatus)) return false;
+// Live finished success. remote_run_contract.py accepts `passed` only with
+// session DONE, no error code, and outcome_unknown false.
+function isDefiniteDoneSuccessBody(body) {
   const remote = remoteOf(body);
-  // outcome_unknown contradicts a finished success. run_may_have_started does
-  // not: remote_run_contract sets it for a finished DONE session.
-  if (body.outcome_unknown === true || remote?.outcome_unknown === true) return false;
-  const top = statusTokens(body);
-  if (top.length === 0 || !top.every(isSuccessWord)) return false;
-  const remoteStatus = typeof remote?.status === 'string' ? remote.status.trim() : '';
-  if (remoteStatus === '') return true;
-  if (isUnknownWord(remoteStatus)) return false;
-  return isSuccessWord(remoteStatus) || remoteStatus.toLowerCase() === 'passed';
+  if (!remote) return false;
+  if (typeof body.status !== 'string' || body.status.trim().toUpperCase() !== 'SUCCESS') return false;
+  if (body.overall_status != null && !isSuccessWord(body.overall_status)) return false;
+  if (body.outcome_unknown === true) return false;
+  if (typeof remote.status !== 'string' || remote.status.trim() !== 'passed') return false;
+  if (remote.session_status !== 'DONE') return false;
+  if (remote.error_code != null) return false;
+  if (remote.outcome_unknown !== false) return false;
+  return true;
 }
 
-function isValidationFailure(httpStatus, body) {
-  return httpStatus === 400 && VALIDATION_ERRORS.includes(body.error);
-}
-
-function isFixedGate(httpStatus, body) {
-  return httpStatus === 409 && body.status === FIXED_GATE_STATUS && body.error === FIXED_GATE_ERROR;
-}
-
-function isIkmFailure(httpStatus, body) {
-  return httpStatus === 409
-    && body.status === 'ikm_option_unsupported'
-    && typeof body.error === 'string'
-    && IKM_ERROR.test(body.error);
-}
-
-function isOptionUpdateFailure(httpStatus, body) {
-  return httpStatus === 500 && body.error === OPTION_UPDATE_ERROR;
-}
-
-function isGenerationFailure(httpStatus, body) {
-  return httpStatus === 400 && body.error === GENERATION_ERROR;
-}
-
-function isHealthBlock(httpStatus, body) {
+// Resolved scenario failure. The session check is load-bearing: without it a
+// DONE or missing session would be classified failed.
+function isDefiniteResolvedErrorBody(body) {
   const remote = remoteOf(body);
-  if ((httpStatus !== 400 && httpStatus !== 503) || !remote) return false;
-  if (body.status !== 'blocked' || remote.status !== 'blocked') return false;
-  if (!blockFlagsClear(body, remote) || remote.session_status != null) return false;
-  // Any code, including RemoteTimeout. The health probe does not start a run.
-  return typeof remote.error_code === 'string' && remote.error_code.length > 0;
-}
-
-function isRunBlock(httpStatus, body) {
-  const remote = remoteOf(body);
-  if (httpStatus !== 502 || !remote) return false;
-  if (body.status !== 'blocked' || remote.status !== 'blocked') return false;
-  if (!blockFlagsClear(body, remote) || remote.session_status != null) return false;
-  return RUN_BLOCK_CODES.has(remote.error_code);
-}
-
-function isResolvedRunError(httpStatus, body) {
-  const remote = remoteOf(body);
-  if (httpStatus !== RESOLVED_ERROR.httpStatus || !remote) return false;
+  if (!remote) return false;
   if (body.status !== RESOLVED_ERROR.status || remote.status !== RESOLVED_ERROR.status) return false;
   if (remote.session_status !== RESOLVED_ERROR.sessionStatus) return false;
   if (remote.error_code !== RESOLVED_ERROR.errorCode) return false;
@@ -241,13 +206,118 @@ function isResolvedRunError(httpStatus, body) {
   return true;
 }
 
-function isPersistedRunFailed(httpStatus, body) {
-  if (!resolvedHttp(httpStatus) || body.overall_status !== PERSISTED_RUN_FAILED) return false;
-  if (body.outcome_unknown === true || body.run_may_have_started === true || body.side_effects === true) {
+// True when the body contradicts a definite outcome. Start and side-effect
+// flags are expected on the two finished shapes and nowhere else.
+function hasUncertaintyEvidence(body) {
+  if (!plainObject(body)) return false;
+  const remote = remoteOf(body);
+  const places = remote ? [body, remote] : [body];
+  for (const place of places) {
+    if (isUnknownWord(place.status) || isUnknownWord(place.overall_status)) return true;
+    if (place.outcome_unknown === true) return true;
+  }
+  const started = body.run_may_have_started === true
+    || body.side_effects === true
+    || remote?.run_may_have_started === true
+    || remote?.side_effects === true;
+  if (!started) return false;
+  return !isDefiniteDoneSuccessBody(body) && !isDefiniteResolvedErrorBody(body);
+}
+
+function contradictsMemberStatus(body, expectedStatus) {
+  const statusSet = body.status != null;
+  const overallSet = body.overall_status != null;
+  if (expectedStatus == null) return statusSet || overallSet;
+  if (body.status !== expectedStatus) return true;
+  return overallSet;
+}
+
+function contradictsMemberRemote(body, allowsRemote) {
+  return !allowsRemote && remoteOf(body) != null;
+}
+
+function acceptsPreRunMember(body, expectedStatus, allowsRemote) {
+  return hasUncertaintyEvidence(body) === false
+    && !contradictsMemberStatus(body, expectedStatus)
+    && !contradictsMemberRemote(body, allowsRemote);
+}
+
+function isProvenSuccess(httpStatus, body) {
+  return resolvedHttp(httpStatus) && isDefiniteDoneSuccessBody(body);
+}
+
+// Saved state read of a finished success: overall_status SUCCEEDED, no remote.
+function isPersistedSucceeded(httpStatus, body) {
+  if (!resolvedHttp(httpStatus) || body.overall_status !== 'SUCCEEDED') return false;
+  if (remoteOf(body)) return false;
+  if (hasUncertaintyEvidence(body)) return false;
+  if (body.run_may_have_started === true || body.side_effects === true || body.outcome_unknown === true) {
     return false;
   }
+  if (body.status != null && !isSuccessWord(body.status)) return false;
+  return true;
+}
+
+function isValidationFailure(httpStatus, body) {
+  return httpStatus === 400
+    && VALIDATION_ERRORS.includes(body.error)
+    && acceptsPreRunMember(body, null, false);
+}
+
+function isFixedGate(httpStatus, body) {
+  return httpStatus === 409
+    && body.error === FIXED_GATE_ERROR
+    && acceptsPreRunMember(body, FIXED_GATE_STATUS, false);
+}
+
+function isIkmFailure(httpStatus, body) {
+  return httpStatus === 409
+    && typeof body.error === 'string'
+    && IKM_ERROR.test(body.error)
+    && acceptsPreRunMember(body, 'ikm_option_unsupported', false);
+}
+
+function isOptionUpdateFailure(httpStatus, body) {
+  return httpStatus === 500
+    && body.error === OPTION_UPDATE_ERROR
+    && acceptsPreRunMember(body, null, false);
+}
+
+function isGenerationFailure(httpStatus, body) {
+  return httpStatus === 400
+    && body.error === GENERATION_ERROR
+    && acceptsPreRunMember(body, null, false);
+}
+
+function isHealthBlock(httpStatus, body) {
   const remote = remoteOf(body);
-  if (remote?.outcome_unknown === true || isUnknownWord(remote?.status)) return false;
+  if ((httpStatus !== 400 && httpStatus !== 503) || !remote) return false;
+  if (!acceptsPreRunMember(body, 'blocked', true) || remote.status !== 'blocked') return false;
+  if (!blockFlagsClear(body, remote) || remote.session_status != null) return false;
+  // Any code, including RemoteTimeout. The health probe does not start a run.
+  return typeof remote.error_code === 'string' && remote.error_code.length > 0;
+}
+
+function isRunBlock(httpStatus, body) {
+  const remote = remoteOf(body);
+  if (httpStatus !== 502 || !remote) return false;
+  if (!acceptsPreRunMember(body, 'blocked', true) || remote.status !== 'blocked') return false;
+  if (!blockFlagsClear(body, remote) || remote.session_status != null) return false;
+  return RUN_BLOCK_CODES.has(remote.error_code);
+}
+
+function isResolvedRunError(httpStatus, body) {
+  return httpStatus === RESOLVED_ERROR.httpStatus && isDefiniteResolvedErrorBody(body);
+}
+
+function isPersistedRunFailed(httpStatus, body) {
+  if (!resolvedHttp(httpStatus) || body.overall_status !== PERSISTED_RUN_FAILED) return false;
+  // Saved-state shape only: the state endpoint does not return remote or flags.
+  if (remoteOf(body)) return false;
+  if (body.run_may_have_started === true || body.side_effects === true || body.outcome_unknown === true) {
+    return false;
+  }
+  if (isUnknownWord(body.status) || isUnknownWord(body.overall_status)) return false;
   if (statusTokens(body).some(isSuccessWord)) return false;
   return true;
 }
@@ -264,13 +334,15 @@ function isClosedFailure(httpStatus, body) {
     || isPersistedRunFailed(httpStatus, body);
 }
 
-// `succeeded` is only a resolved 2xx whose status says success.
-// `failed` is only the closed set above.
-// Every other body, including a redacted 500, 2xx {}, 2xx partial, a non-2xx
+// Uncertainty is decided before any class. A proven success is only the
+// finished DONE shape or a saved SUCCEEDED with no remote. `failed` is only
+// the closed set above. Every other body, including a redacted 500, 2xx {},
+// 2xx partial, a success claim that is not the finished shape, a non-2xx
 // SUCCESS, remote unknown, HTTP 504, and a missing body, is `unknown`.
 function classifyOutcome(httpStatus, body) {
   if (!body) return 'unknown';
-  if (isProvenSuccess(httpStatus, body)) return 'succeeded';
+  if (hasUncertaintyEvidence(body)) return 'unknown';
+  if (isProvenSuccess(httpStatus, body) || isPersistedSucceeded(httpStatus, body)) return 'succeeded';
   if (isClosedFailure(httpStatus, body)) return 'failed';
   return 'unknown';
 }
