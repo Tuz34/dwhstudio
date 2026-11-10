@@ -683,6 +683,7 @@ GRAMMAR_WORDS = [
     "AS", "USING", "WITH", "OLARAK", "ILE", "SEKLINDE", "TARGET",
     "TABLE", "HEDEF", "INTO", "TO", "LAYER", "KATMAN",
     "NOT", "NO", "NEVER", "SHOULD", "AVOID", "IF", "DEGIL", "YAPMASIN",
+    "GEREKSIZ", "SKIP", "DISABLE", "ATLA",
 ]
 
 
@@ -695,7 +696,8 @@ def test_grammar_word_property_fixture_is_nonempty_and_covers_each_category():
         {"ODS", "DWH", "EDW", "DM", "DATAMART", "DATA", "MART"},
         {"KEY", "KEYS", "ANAHTAR", "PK", "PRIMARY", "NATURAL"},
         {"AS", "USING", "WITH", "OLARAK", "ILE", "SEKLINDE", "TARGET", "HEDEF", "INTO", "LAYER"},
-        {"NOT", "NO", "NEVER", "SHOULD", "AVOID", "IF", "DEGIL", "YAPMASIN"},
+        {"NOT", "NO", "NEVER", "SHOULD", "AVOID", "IF", "DEGIL", "YAPMASIN",
+         "GEREKSIZ", "SKIP", "DISABLE", "ATLA"},
     ):
         assert category <= words
 
@@ -866,6 +868,76 @@ def test_precise_negative_forms_still_clear_assigned_load(negative):
 def test_unclosed_quote_leaves_trailing_hedge_visible():
     result = normalize_mapping_request('Model HR.ORDERS into ODS as truncate insert "unbalanced do not', {})
     assert "load_type" not in result
+
+
+@pytest.mark.parametrize("negative", [
+    "yüklenmesin", "silinmesin", "kullanılmasın", "yapılmasın",
+    "edilmesin", "yüklenmeden", "silinmeyecek", "kullanılmayacak",
+    "yapılmaz", "yaptırmasın", "sildirmeyin", "güncelletmesin",
+])
+def test_passive_and_causative_negatives_clear_assigned_load(negative):
+    result = normalize_mapping_request(
+        f"DWH.X tablosunu ODS katmanına truncate insert olarak modelle, {negative}", {})
+    assert "load_type" not in result
+
+
+@pytest.mark.parametrize("affirmative", [
+    "yüklensin", "silinsin", "yapılsın", "yüklenecek",
+])
+def test_affirmative_passives_keep_assigned_load(affirmative):
+    result = normalize_mapping_request(
+        f"DWH.X tablosunu ODS katmanına insert update olarak modelle, {affirmative}", {})
+    assert result["load_type"] == "insert_update"
+
+
+@pytest.mark.parametrize("hedge", [
+    "gerek yok", "gereksiz", "gerekmez", "gerekmiyor", "skip truncate",
+    "skipping", "disable truncate", "disabled", "omit", "exclude", "excluding",
+    "ignore", "atla", "atlayın", "devre dışı", "kapalı", "iptal",
+])
+def test_new_hedge_vocabulary_clears_assigned_load(hedge):
+    result = normalize_mapping_request(
+        f"Model HR.ORDERS into ODS as truncate insert, {hedge}", {})
+    assert "load_type" not in result
+
+
+@pytest.mark.parametrize("affirmative", [
+    "yapmak", "etmek", "yapması", "etmesi", "yapmaya", "etmeye",
+    "yapmayı", "etmeyi", "yapmada", "etmede", "yapmam gerek",
+])
+def test_auxiliary_infinitives_and_verbal_nouns_keep_assigned_load(affirmative):
+    result = normalize_mapping_request(
+        f"DWH.X tablosunu ODS katmanına insert update olarak {affirmative}, anahtar ID", {})
+    assert result["load_type"] == "insert_update"
+    assert result["key_columns"] == ["ID"]
+
+
+@pytest.mark.parametrize("possessive", ["customer's", "customer’s", "Customer's", "CUSTOMER'S"])
+def test_english_possessive_is_not_a_source_identifier(possessive):
+    result = normalize_mapping_request(
+        f"Model the {possessive} table into the ODS layer as truncate insert", {})
+    assert "source_table" not in result
+    assert "target_table" not in result
+    assert result["target_layer"] == "ODS"
+    assert result["load_type"] == "truncate_load"
+
+
+@pytest.mark.parametrize("contraction", ["DON'T", "CAN'T", "WON'T", "ISN'T", "DON’T"])
+def test_uppercase_english_contractions_remain_hedges(contraction):
+    result = normalize_mapping_request(
+        f"Model HR.ORDERS into ODS as truncate insert, {contraction}", {})
+    assert "load_type" not in result
+
+
+@pytest.mark.parametrize("source_ref", [
+    "F1'i", "F1'ı", "F1'in", "F1'ın", "F1'nin", "F1'deki", "F1'daki",
+    "F1'dan", "F1'den", "F1’den",
+])
+def test_unqualified_case_suffixes_still_bind_table_marker(source_ref):
+    result = normalize_mapping_request(f"{source_ref} tablosunu ODS katmanına as merge", {})
+    assert result["source_table"] == "F1"
+    assert result["target_layer"] == "ODS"
+    assert result["load_type"] == "insert_update"
 
 
 def test_api_ask_returns_normalized_proposal_without_raw_llm_text(app_client, monkeypatch):

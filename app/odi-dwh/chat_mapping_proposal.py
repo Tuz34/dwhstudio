@@ -23,6 +23,7 @@ _WORD_CASE_SUFFIX = re.compile(r"([A-Z][A-Z0-9_]*)['’]([A-Z]{1,6})\Z")
 _QUOTED = {'"': '"', "'": "'", '`': '`', '“': '”', '‘': '’'}
 _PUNCTUATION = frozenset(",.():=?!/+&-")
 _DATIVE_SUFFIXES = frozenset({"A", "E", "YA", "YE"})
+_CASE_LAYER_WORDS = frozenset(_LAYERS) | {"MART"}
 _FUNCTION_WORDS = frozenset({
     "THE", "A", "AN", "INTO", "TO", "FROM", "AS", "ON", "IN", "FOR", "WITH",
     "AND", "OR", "OF", "IS", "ARE", "BY", "USE", "USING", "BIR", "BU", "SU",
@@ -77,12 +78,21 @@ _LOAD_PHRASES = {
 _HEDGE_EXACT = frozenset({
     "NOT", "NO", "NEVER", "DONT", "WITHOUT", "EXCEPT", "UNLESS", "IF", "CANNOT",
     "OLMASIN", "OLMADAN", "HARIC", "YERINE", "EGER", "ASLA", "HAYIR",
+    "GEREKSIZ", "GEREKMEZ", "GEREKMIYOR", "SKIP", "SKIPPING", "DISABLE",
+    "DISABLED", "OMIT", "EXCLUDE", "EXCLUDING", "IGNORE", "ATLA", "ATLAYIN",
+    "KAPALI", "IPTAL",
 })
-_AUX_NEGATIVE = re.compile(r"(?:YAP|ET)(?:(?:MA|ME)[A-Z]*|MIYOR[A-Z]*)\Z")
-_OTHER_NEGATIVE = re.compile(
-    r"(?:YUKLE|SIL|AT|KULLAN|TUT|OL|EKLE|GUNCELLE)"
+_NEGATIVE_ENDING = (
     r"(?:(?:MA|ME)(?:SIN(?:IZ)?|YIN(?:IZ)?|DAN|DEN|Z|DI[A-Z]*|"
-    r"YACAK[A-Z]*|YECEK[A-Z]*|MALI[A-Z]*|MELI[A-Z]*)|MIYOR[A-Z]*)\Z"
+    r"YACAK[A-Z]*|YECEK[A-Z]*|MALI[A-Z]*|MELI[A-Z]*)|MIYOR[A-Z]*)"
+)
+_AUX_NEGATIVE = re.compile(
+    rf"(?:YAP(?:IL|TIR|TIRIL)?|ET|EDIL|ETTIR(?:IL)?){_NEGATIVE_ENDING}\Z"
+)
+_OTHER_NEGATIVE = re.compile(
+    rf"(?:YUKLE(?:N|T|TIL)?|SIL(?:IN|DIR|DIRIL)?|AT(?:IL|TIR|TIRIL)?|"
+    rf"KULLAN(?:IL|DIR|DIRIL)?|TUT(?:UL|TUR|TURUL)?|OL(?:UN|DUR|DURUL)?|"
+    rf"EKLE(?:N|T|TIL)?|GUNCELLE(?:N|T|TIL)?){_NEGATIVE_ENDING}\Z"
 )
 _ISTEM_NEGATIVE = re.compile(r"ISTEM(?:IYOR[A-Z]*|EM|EZ|EDIM|EYIZ)\Z")
 _AVOID_FORMS = frozenset({"AVOID", "AVOIDS", "AVOIDING", "AVOIDED"})
@@ -97,17 +107,26 @@ class _Token:
     case_suffix: str = ""
 
 
-def _plain(message: str) -> str:
+def _plain(message: str, *, uppercase: bool = True) -> str:
     text = message.replace("ı", "i").replace("İ", "I")
-    return "".join(
+    plain = "".join(
         char for char in unicodedata.normalize("NFKD", text)
         if not unicodedata.combining(char)
-    ).upper()
+    )
+    return plain.upper() if uppercase else plain
+
+
+def _case_suffix_allowed(base: str, suffix: str, original_base: str) -> bool:
+    return suffix != "S" and not (suffix == "T" and base.endswith("N")) and bool(original_base) and (
+        "." in base or "_" in base or any(char.isdigit() for char in base) or
+        original_base.isupper() or base in _CASE_LAYER_WORDS
+    )
 
 
 def _lex(message: str) -> list[_Token]:
     """A dotted name or a quoted span is one opaque grammar token."""
-    text = _plain(message)
+    case_text = _plain(message, uppercase=False)
+    text = case_text.upper()
     tokens = []
     index = 0
     while index < len(text):
@@ -121,6 +140,8 @@ def _lex(message: str) -> list[_Token]:
         if match:
             end = match.end()
             suffix = _CASE_SUFFIX.match(text, end) if dotted else None
+            if suffix and suffix.group(1) == "S":
+                suffix = None
             if suffix:
                 end = suffix.end()
             if end < len(text) and text[end] in ";'\"`“”‘’":
@@ -135,7 +156,11 @@ def _lex(message: str) -> list[_Token]:
             else:
                 value = match.group().replace("’", "'")
                 word_suffix = _WORD_CASE_SUFFIX.fullmatch(value)
-                if word_suffix and not (word_suffix.group(2) == "T" and word_suffix.group(1).endswith("N")):
+                if word_suffix and _case_suffix_allowed(
+                    word_suffix.group(1), word_suffix.group(2),
+                    case_text[index:index + len(word_suffix.group(1))]
+                    if len(case_text) == len(text) else "",
+                ):
                     tokens.append(_Token("word", word_suffix.group(1), word_suffix.group(2)))
                 else:
                     tokens.append(_Token("word", value))
@@ -286,6 +311,7 @@ def _hedge_word(word: str) -> bool:
         return False
     return bool(
         word in _HEDGE_EXACT or word in _AVOID_FORMS or word in _SHOULD_FORMS or
+        word in {"YAPMA", "ETME"} or
         "N'T" in word or word.startswith("DEGIL") or
         _AUX_NEGATIVE.fullmatch(word) or _OTHER_NEGATIVE.fullmatch(word) or
         _ISTEM_NEGATIVE.fullmatch(word) or _LOAD_PRIVATIVE.fullmatch(word)
@@ -304,7 +330,9 @@ def _hedged(tokens: list[_Token], taken: set[int]) -> bool:
         if _hedge_word(word):
             return True
         if (_sequence(tokens, index, ("RATHER", "THAN"), taken) or
-                _sequence(tokens, index, ("INSTEAD", "OF"), taken)):
+                _sequence(tokens, index, ("INSTEAD", "OF"), taken) or
+                _sequence(tokens, index, ("GEREK", "YOK"), taken) or
+                _sequence(tokens, index, ("DEVRE", "DISI"), taken)):
             return True
     return False
 
