@@ -252,7 +252,7 @@ def test_missing_ikm_is_imported_before_registration(plan, monkeypatch):
     monkeypatch.setattr(
         scd2_service.scd2_odi,
         "import_ikm",
-        lambda orchestrator, approved: calls.append(approved) or {"step": "odi_ikm_import", "status": "passed"},
+        lambda orchestrator, approved, phase=None: calls.append(approved) or {"step": "odi_ikm_import", "status": "passed"},
     )
     orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": probe_payload(ikm_present=False)})
     payload, status = scd2_service.generate(
@@ -268,7 +268,7 @@ def test_ikm_import_failure_stops(plan, monkeypatch):
     monkeypatch.setattr(
         scd2_service.scd2_odi,
         "import_ikm",
-        lambda orchestrator, approved: {"step": "odi_ikm_import", "status": "failed", "error_type": "X"},
+        lambda orchestrator, approved, phase=None: {"step": "odi_ikm_import", "status": "failed", "error_type": "X"},
     )
     orchestrator = FakeOrchestrator(plan, responses={"scd2_probe.groovy": probe_payload(ikm_present=False)})
     payload, _ = scd2_service.generate(

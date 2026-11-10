@@ -441,8 +441,11 @@ def _counts_ok(result: Mapping[str, Any], keys: tuple[str, ...]) -> bool:
     return all(type(result.get(key)) is int and result[key] >= 0 for key in keys)
 
 
-def register_datastore(orchestrator: Any, plan: Mapping[str, Any], approved: object) -> dict[str, Any]:
+def register_datastore(
+    orchestrator: Any, plan: Mapping[str, Any], approved: object, *, phase: Any = None,
+) -> dict[str, Any]:
     params = scd2_builder.groovy_params(plan)
+    write_contract.mark_write_attempted(phase)
     output = _run(orchestrator, SCRIPT_REGISTER, params, approved)
     payload, failure = _parse_envelope(SCRIPT_REGISTER, "odi_datastore_register", output)
     if failure is not None:
@@ -474,8 +477,11 @@ def register_datastore(orchestrator: Any, plan: Mapping[str, Any], approved: obj
     )
 
 
-def create_mapping(orchestrator: Any, plan: Mapping[str, Any], approved: object) -> dict[str, Any]:
+def create_mapping(
+    orchestrator: Any, plan: Mapping[str, Any], approved: object, *, phase: Any = None,
+) -> dict[str, Any]:
     params = {**_project_params(), **scd2_builder.groovy_params(plan)}
+    write_contract.mark_write_attempted(phase)
     output = _run(orchestrator, SCRIPT_MAPPING, params, approved)
     payload, failure = _parse_envelope(SCRIPT_MAPPING, "odi_mapping_create", output)
     if failure is not None:
@@ -510,12 +516,13 @@ def create_mapping(orchestrator: Any, plan: Mapping[str, Any], approved: object)
     )
 
 
-def import_ikm(orchestrator: Any, approved: object) -> dict[str, Any]:
+def import_ikm(orchestrator: Any, approved: object, *, phase: Any = None) -> dict[str, Any]:
     """Reuse the existing fixed, absent-only SDK-reference IKM importer."""
     from config import ODI_PROJECT
     from dim_product_odi_scd2_ikm_import import normalize_dim_product_odi_scd2_ikm_import
 
     params = {"odi.oracle_home": orchestrator.odi_home, "odi.project": ODI_PROJECT}
+    write_contract.mark_write_attempted(phase)
     output = _run(orchestrator, SCRIPT_IKM_IMPORT, params, approved)
     try:
         normalized = normalize_dim_product_odi_scd2_ikm_import(json.loads(str(output)))
@@ -534,9 +541,10 @@ def import_ikm(orchestrator: Any, approved: object) -> dict[str, Any]:
 
 
 def generate_scenario(
-    orchestrator: Any, plan: Mapping[str, Any], approved: object
+    orchestrator: Any, plan: Mapping[str, Any], approved: object, *, phase: Any = None,
 ) -> dict[str, Any]:
     """Absent-only scenario generation through the existing generator."""
+    write_contract.mark_write_attempted(phase)
     result = orchestrator.generate_scenario_metadata(
         approved=approved is True,
         mapping_name=plan["mapping_name"],
@@ -562,8 +570,11 @@ def run_scenario(
     version: str,
     context: str,
     approved: object,
+    *,
+    phase: Any = None,
 ) -> dict[str, Any]:
     """Run one `<mapping>_SCN` scenario through the existing safe wrapper."""
+    write_contract.mark_write_attempted(phase)
     result = remote_run_contract.parse(orchestrator.run_scenario_remote(
         approved=approved is True,
         mapping_name=scenario_name[:-4] if scenario_name.endswith("_SCN") else "",
