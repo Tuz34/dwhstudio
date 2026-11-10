@@ -7,7 +7,6 @@ import { generateScd2, getScd2Postflight, planScd2, runScd2 } from '../../servic
 import {
   SOURCE_OWNERS,
   TARGET_OWNERS,
-  acceptWrite,
   applyPrefill,
   buildGenerateRequest,
   buildPlanRequest,
@@ -16,6 +15,7 @@ import {
   canGenerate,
   canRefreshEvidence,
   createWriteGate,
+  dialogWriteDecision,
   emptyScd2Form,
   postflightRows,
   projectGenerate,
@@ -26,6 +26,7 @@ import {
   replaceWriteGate,
   REVIEW_SENTENCE,
   setWriteConfirmation,
+  UNRESOLVED_CLOSE_SENTENCE,
   settleWrite,
   stageSucceeded,
   validateScd2Form,
@@ -147,6 +148,8 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   const [runGate, setRunGate] = useState(() => createWriteGate({ lockAfterSuccess: false }));
   const generateGateRef = useRef(generateGate);
   const runGateRef = useRef(runGate);
+  const closeArmedRef = useRef(false);
+  const [closeArmed, setCloseArmed] = useState(false);
 
   useEffect(() => {
     mounted.current = true;
@@ -202,6 +205,15 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
 
   const handleClose = () => {
     if (!shouldDismissModal(writeBusy())) return;
+    const decision = dialogWriteDecision(generateGateRef.current, runGateRef.current);
+    const closing = decision.close({ confirmed: closeArmedRef.current });
+    if (!closing.close) {
+      closeArmedRef.current = true;
+      setCloseArmed(true);
+      return;
+    }
+    closeArmedRef.current = false;
+    setCloseArmed(false);
     beginRequest();
     setStep(0);
     setError('');
@@ -226,11 +238,15 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       const view = projectPlan(payload);
       setPlanView(view);
       if (view.success) {
-        const generateLocked = generateGateRef.current.phase === 'needs_review';
-        const runLocked = runGateRef.current.phase === 'needs_review';
-        resetWrites();
-        if (!generateLocked) setGenerateView(null);
-        if (!runLocked) {
+        const decision = dialogWriteDecision(generateGateRef.current, runGateRef.current);
+        const next = decision.afterPlan(
+          createWriteGate({ lockAfterSuccess: true }),
+          createWriteGate({ lockAfterSuccess: false }),
+        );
+        if (next.reset) {
+          commitGenerateGate(next.generateGate);
+          commitRunGate(next.runGate);
+          setGenerateView(null);
           setRunView(null);
           setEvidence(null);
         }
@@ -248,9 +264,10 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   }
 
   async function handleGenerate() {
-    const decision = acceptWrite(generateGateRef.current, { ready: canGenerate(planView) });
-    if (!decision.accepted) return;
-    commitGenerateGate(decision.gate);
+    const decision = dialogWriteDecision(generateGateRef.current, runGateRef.current);
+    const accepted = decision.accept(generateGateRef.current, { ready: canGenerate(planView) });
+    if (!accepted.accepted) return;
+    commitGenerateGate(accepted.gate);
     const id = beginRequest();
     setLoading(true);
     setError('');
@@ -272,7 +289,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       }
     } catch (err) {
       if (!stillCurrent(id)) return;
-      const view = projectRejected(err, { write: true });
+      const view = projectRejected(err, { write: true, route: 'generate' });
       setGenerateView(view);
       commitGenerateGate(settleFromView(generateGateRef.current, view));
       if (!view.needsReview) {
@@ -285,9 +302,10 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   }
 
   async function handleRun() {
-    const decision = acceptWrite(runGateRef.current, { ready: stageSucceeded(generateView) });
-    if (!decision.accepted) return;
-    commitRunGate(decision.gate);
+    const decision = dialogWriteDecision(generateGateRef.current, runGateRef.current);
+    const accepted = decision.accept(runGateRef.current, { ready: stageSucceeded(generateView) });
+    if (!accepted.accepted) return;
+    commitRunGate(accepted.gate);
     const id = beginRequest();
     setLoading(true);
     setError('');
@@ -311,7 +329,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       }
     } catch (err) {
       if (!stillCurrent(id)) return;
-      const view = projectRejected(err, { write: true });
+      const view = projectRejected(err, { write: true, route: 'run' });
       setRunView(view);
       setEvidence(view.evidence);
       commitRunGate(settleFromView(runGateRef.current, view));
@@ -354,20 +372,24 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
   }
 
   const busy = writesInFlight([generateGate, runGate]);
+  const decision = dialogWriteDecision(generateGate, runGate);
   const evidenceAllowed = canRefreshEvidence({ loading, gates: [generateGate, runGate] }) && validation.ok;
   const generateButton = writeButtonState(generateGate, {
     ready: canGenerate(planView),
+    dialogLocked: decision.locked,
     idleLabel: 'Generate',
     pendingLabel: 'Generating...',
     doneLabel: 'Generated',
   });
   const runButton = writeButtonState(runGate, {
     ready: stageSucceeded(generateView),
+    dialogLocked: decision.locked,
     idleLabel: 'Run',
     pendingLabel: 'Running...',
     doneLabel: 'Ran',
     repeatLabel: 'Run again',
   });
+  const reviewBanners = decision.banners({ step, generateView, runView });
 
   const shownEvidence = evidence || runView?.evidence || null;
 
@@ -395,6 +417,23 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       </div>
 
       {busy ? <p className="mb-4 text-sm text-amber-800">{WRITE_IN_FLIGHT_NOTE}</p> : null}
+      {reviewBanners.map((view, index) => (
+        <div key={`${view.status || 'review'}-${index}`} className="mb-4">
+          <ReviewPanel view={view} />
+        </div>
+      ))}
+      {closeArmed ? (
+        <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+          <p>{UNRESOLVED_CLOSE_SENTENCE}</p>
+          <button
+            type="button"
+            onClick={handleClose}
+            className="mt-3 px-4 py-2 rounded-lg border border-amber-300 text-sm font-medium text-amber-950 hover:bg-amber-100"
+          >
+            Close dialog
+          </button>
+        </div>
+      ) : null}
 
       {step === 0 && (
         <div className="space-y-4">
@@ -540,7 +579,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
             <p className="text-slate-600">Generate creates the target, the ODI mapping, and the scenario.</p>
             <p className="font-mono text-slate-700">{form.mapping_name}</p>
           </div>
-          {!generateButton.finished && generateGate.phase !== 'needs_review' && (
+          {!decision.locked && !generateButton.finished && generateGate.phase !== 'needs_review' && (
             <label className="flex items-start gap-2 text-sm text-slate-700">
               <input
                 type="checkbox"
@@ -559,7 +598,6 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
               <p>Version: <span className="font-mono">{generateView.scenario_version}</span></p>
             </div>
           )}
-          {generateView?.needsReview ? <ReviewPanel view={generateView} /> : null}
           {generateView?.needsReview ? <EvidencePanel evidence={evidence} /> : null}
           {generateView && !generateView.success && !generateView.needsReview ? <ErrorBanner message={generateView.message} /> : null}
           {!generateView && <ErrorBanner message={error} />}
@@ -576,7 +614,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
             </p>
           </div>
           {runButton.notice ? <p className="text-sm font-medium text-amber-800">{runButton.notice}</p> : null}
-          {runGate.phase !== 'needs_review' && (
+          {!decision.locked && runGate.phase !== 'needs_review' && (
             <label className="flex items-start gap-2 text-sm text-slate-700">
               <input
                 type="checkbox"
@@ -587,7 +625,6 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
               <span>I approve the Type 2 scenario run.</span>
             </label>
           )}
-          {runView?.needsReview ? <ReviewPanel view={runView} /> : null}
           {runView && !runView.needsReview && (
             <div className={clsx(
               'rounded-xl border p-4 text-sm',
@@ -624,21 +661,49 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
         </button>
         <div className="flex gap-2">
           {step === 0 && (
-            <button
-              type="button"
-              onClick={() => {
-                if (writeBusy() || !validation.ok || loading) return;
-                setStep(1);
-                loadPlan();
-              }}
-              disabled={!validation.ok || loading || busy}
-              className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
-            >
-              Next
-            </button>
+            <>
+              {decision.locked && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!evidenceAllowed) return;
+                    refreshEvidence();
+                  }}
+                  disabled={!evidenceAllowed}
+                  className="px-4 py-2 rounded-lg border border-slate-200 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Refresh evidence
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  if (writeBusy() || !validation.ok || loading) return;
+                  setStep(1);
+                  loadPlan();
+                }}
+                disabled={!validation.ok || loading || busy}
+                className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                Next
+              </button>
+            </>
           )}
           {step === 1 && (
             <>
+              {decision.locked && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!evidenceAllowed) return;
+                    refreshEvidence();
+                  }}
+                  disabled={!evidenceAllowed}
+                  className="px-4 py-2 rounded-lg border border-slate-200 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Refresh evidence
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => {
@@ -666,7 +731,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
           )}
           {step === 2 && (
             <>
-              {generateGate.phase === 'needs_review' && (
+              {(decision.locked || generateGate.phase === 'needs_review') && (
                 <button
                   type="button"
                   onClick={() => {

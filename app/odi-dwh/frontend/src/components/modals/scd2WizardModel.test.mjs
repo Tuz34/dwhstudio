@@ -12,7 +12,10 @@ import {
   buildRunRequest,
   canGenerate,
   canRefreshEvidence,
+  classifyWriteOutcome,
   createWriteGate,
+  DEFINITE_FAILURE_ROWS,
+  dialogWriteDecision,
   emptyScd2Form,
   PREFILL_ALIASES,
   projectApiError,
@@ -24,6 +27,7 @@ import {
   replaceWriteGate,
   REVIEW_SENTENCE,
   setWriteConfirmation,
+  UNRESOLVED_CLOSE_SENTENCE,
   settleWrite,
   stageSucceeded,
   STATUS_OK_SCOPE,
@@ -440,28 +444,34 @@ test('a non-2xx response is a failed stage even when the body looks successful',
     scenario_name: 'MAP_ODS_CUST_TO_DIM_CUST_SCN',
   };
   assert.equal(projectGenerate(body).success, true);
-  const rejected = projectRejected({ status: 502, message: 'Service request failed.', scd2: body });
+  const rejected = projectRejected({ status: 502, message: 'Service request failed.', scd2: body }, { route: 'generate' });
   assert.equal(rejected.success, false);
   assert.equal(rejected.ok, false);
-  assert.equal(rejected.rejected, true);
+  assert.equal(rejected.needsReview, true);
+  assert.equal(rejected.outcome, 'needs_review');
+  assert.equal(rejected.rejected, false);
   assert.equal(stageSucceeded(rejected), false);
   assert.equal(rejected.scenario_version, '');
   assert.match(rejected.message, /HTTP 502/);
   assert.match(rejected.message, /generated/);
+  assert.match(rejected.message, /may have started or partly completed/);
   assert.equal(rejected.message.includes('Service request failed'), false);
 
   const detailed = projectRejected({
     status: 502,
     scd2: { status: 'run_failed', error_code: 'scenario_failed', error: 'session ERROR' },
-  });
+  }, { route: 'run' });
+  assert.equal(detailed.needsReview, true);
+  assert.equal(detailed.outcome, 'needs_review');
   assert.match(detailed.message, /HTTP 502/);
   assert.match(detailed.message, /run_failed/);
   assert.match(detailed.message, /scenario_failed/);
   assert.match(detailed.message, /session ERROR/);
   assert.equal(stageSucceeded(detailed), false);
 
-  const network = projectRejected(new Error('Failed to fetch'));
+  const network = projectRejected(new Error('Failed to fetch'), { route: 'generate' });
   assert.equal(network.success, false);
+  assert.equal(network.needsReview, true);
   assert.equal(network.http_status, null);
   assert.match(network.message, /Failed to fetch/);
 });
@@ -697,12 +707,14 @@ test('a definite failure can be retried after a fresh confirmation', () => {
     status: 'run_failed',
     manual_review_required: false,
     outcome_unknown: false,
+    known_side_effects: false,
     scenario_execution_completed: false,
     scenario: { name: 'MAP_ODS_CUST_TO_DIM_CUST_SCN', version: '001', context: 'GLOBAL' },
     steps: [{ step: 'odi_scenario_run', status: 'blocked', side_effects: false, remote: { run_may_have_started: false } }],
     postflight: { status: 'ok', counts: { target_total: 1, target_current: 1, rows_with_effective_to_set: 0 } },
   });
-  assert.equal(cleanRun.needsReview, false);
+  assert.equal(cleanRun.needsReview, true);
+  assert.equal(cleanRun.outcome, 'needs_review');
   assert.equal(cleanRun.success, false);
 });
 
@@ -871,4 +883,292 @@ test('the mapping wizard hand-off fills the Type 2 identity fields', () => {
   assert.equal(ready.request.target_table, 'DIM_CUSTOMER');
   assert.equal(ready.request.mapping_name, 'MAP_ODS_CUST_TO_DIM_CUST');
   assert.deepEqual(ready.request.natural_key, ['CUST_ID']);
+});
+
+
+const QUIET_FLAGS = {
+  outcome_unknown: false,
+  manual_review_required: false,
+  known_side_effects: false,
+};
+
+function quietStatus(status, extra = {}) {
+  return { status, ...QUIET_FLAGS, ...extra };
+}
+
+function assertWriteClass(row) {
+  const outcome = classifyWriteOutcome({
+    route: row.route,
+    httpStatus: row.http,
+    payload: row.payload,
+    resolved: row.resolved === true,
+  });
+  assert.equal(outcome, row.expected, row.name);
+  if (row.resolved === true) {
+    const view = row.route === 'run' ? projectRun(row.payload) : projectGenerate(row.payload);
+    assert.equal(view.outcome, row.expected, `${row.name} view`);
+    assert.equal(view.success, row.expected === 'succeeded', `${row.name} success`);
+    return;
+  }
+  const error = row.payload == null
+    ? { status: row.http, message: row.name }
+    : { status: row.http, message: row.name, scd2: row.payload };
+  const view = projectRejected(error, { route: row.route });
+  assert.equal(view.outcome, row.expected, `${row.name} rejected`);
+  if (row.expected === 'needs_review') {
+    assert.equal(view.needsReview, true, row.name);
+    assert.equal(view.rejected, false, row.name);
+    assert.equal(view.message.includes(REVIEW_SENTENCE), true, row.name);
+  } else if (row.expected === 'failed') {
+    assert.equal(view.needsReview, false, row.name);
+    assert.equal(view.rejected, true, row.name);
+    assert.equal(view.message.includes(REVIEW_SENTENCE), false, row.name);
+  }
+}
+
+test('every reviewed generate and run outcome uses the closed failure table', () => {
+  const approval = { error: 'approved:true is required for SCD2 generation.' };
+  const redacted500 = { error: 'SCD2 generation failed.', error_type: 'RuntimeError' };
+  const generatedReject = {
+    status: 'generated',
+    scenario_version: '001',
+    mapping_name: 'MAP_ODS_CUST_TO_DIM_CUST',
+    scenario_name: 'MAP_ODS_CUST_TO_DIM_CUST_SCN',
+    ...QUIET_FLAGS,
+  };
+  const generateBlocked = [
+    'blocked_dm_model_missing',
+    'blocked_target_model_missing',
+    'blocked_target_model_not_oracle',
+    'blocked_source_model_missing',
+    'blocked_source_datastore_missing',
+    'blocked_project_folder_missing',
+    'blocked_lkm_missing',
+    'blocked_scenario_name_collision',
+    'blocked_mapping_exists_unrelated',
+    'blocked_existing_object_mismatch',
+    'blocked_execution_identity',
+    'blocked_grantee_missing',
+    'blocked_target_exists_mismatch',
+  ];
+  const runBlocked = [
+    'blocked_target_not_scd2',
+    'blocked_scenario_name_collision',
+    'blocked_scenario_missing',
+    'blocked_existing_object_mismatch',
+    'blocked_scenario_version_missing',
+    'blocked_execution_identity',
+  ];
+  const runUnavailable = ['blocked_agent_preflight', 'target_metadata_unavailable', 'blocked_count_preflight'];
+  const partials = [
+    'partial_failure_target_ddl',
+    'partial_failure_target_grants',
+    'partial_failure_ikm_import',
+    'partial_failure_datastore_register',
+    'partial_failure_mapping_create',
+    'partial_failure_scenario_generate',
+  ];
+  const rows = [
+    {
+      name: 'generate 200 generated',
+      route: 'generate',
+      http: 200,
+      resolved: true,
+      expected: 'succeeded',
+      payload: {
+        ...GENERATED,
+        ...QUIET_FLAGS,
+        steps: GENERATED.steps.map(step => (
+          step.step === 'target_ddl' ? { ...step, target_created: true, grants_applied: 2 } : step
+        )),
+      },
+    },
+    {
+      name: 'run 200 run_completed',
+      route: 'run',
+      http: 200,
+      resolved: true,
+      expected: 'succeeded',
+      payload: {
+        ...RUN_COMPLETED,
+        outcome_unknown: false,
+        manual_review_required: false,
+        scenario_execution_completed: true,
+        steps: [
+          { step: 'remote_agent_health', status: 'passed' },
+          { step: 'odi_scenario_run', status: 'passed', session_status: 'DONE', side_effects: true, run_may_have_started: true },
+        ],
+        postflight: { ...RUN_COMPLETED.postflight, source_current_count_equal: true, stock_contract_valid: true },
+      },
+    },
+    { name: 'generate 400 invalid_request', route: 'generate', http: 400, expected: 'failed', payload: quietStatus('invalid_request', { error_code: 'target_owner_not_allowed' }) },
+    { name: 'generate 400 blocked_until_approval', route: 'generate', http: 400, expected: 'failed', payload: quietStatus('blocked_until_approval') },
+    { name: 'generate 400 approval error', route: 'generate', http: 400, expected: 'failed', payload: approval },
+    { name: 'generate 404 blocked_source_not_found', route: 'generate', http: 404, expected: 'failed', payload: quietStatus('blocked_source_not_found') },
+    { name: 'generate 503 source_metadata_unavailable', route: 'generate', http: 503, expected: 'failed', payload: quietStatus('source_metadata_unavailable') },
+    ...generateBlocked.map(status => ({
+      name: `generate 409 ${status}`,
+      route: 'generate',
+      http: 409,
+      expected: 'failed',
+      payload: quietStatus(status),
+    })),
+    { name: 'generate 502 failed_odi_probe', route: 'generate', http: 502, expected: 'failed', payload: quietStatus('failed_odi_probe') },
+    { name: 'generate 409 blocked_ddl_privilege', route: 'generate', http: 409, expected: 'failed', payload: quietStatus('blocked_ddl_privilege') },
+    { name: 'generate 409 blocked_name_in_use', route: 'generate', http: 409, expected: 'failed', payload: quietStatus('blocked_name_in_use') },
+    { name: 'generate 502 failed', route: 'generate', http: 502, expected: 'failed', payload: quietStatus('failed') },
+    { name: 'generate 429', route: 'generate', http: 429, expected: 'failed', payload: null },
+    { name: 'generate 502 failed_odi_probe review', route: 'generate', http: 502, expected: 'needs_review', payload: quietStatus('failed_odi_probe', { outcome_unknown: true, manual_review_required: true }) },
+    { name: 'generate 409 blocked_ddl_privilege review', route: 'generate', http: 409, expected: 'needs_review', payload: quietStatus('blocked_ddl_privilege', { outcome_unknown: true, manual_review_required: true }) },
+    { name: 'generate 409 blocked_name_in_use review', route: 'generate', http: 409, expected: 'needs_review', payload: quietStatus('blocked_name_in_use', { outcome_unknown: true, manual_review_required: true }) },
+    { name: 'generate 502 failed review', route: 'generate', http: 502, expected: 'needs_review', payload: quietStatus('failed', { outcome_unknown: true, manual_review_required: true }) },
+    { name: 'generate blocked_target_incomplete sequence', route: 'generate', http: 409, expected: 'needs_review', payload: quietStatus('blocked_target_incomplete', { outcome_unknown: true, manual_review_required: true }) },
+    { name: 'generate blocked_target_incomplete grants', route: 'generate', http: 409, expected: 'needs_review', payload: quietStatus('blocked_target_incomplete', { grants_applied: 4, grants_failed: 1 }) },
+    // Flags are false and the applied counter is zero. A flags-false check classifies this as failed.
+    { name: 'flags-false blocked_target_incomplete', route: 'generate', http: 409, expected: 'needs_review', payload: quietStatus('blocked_target_incomplete', { grants_applied: 0, grants_failed: 1 }) },
+    ...partials.map(status => ({
+      name: `generate 502 ${status}`,
+      route: 'generate',
+      http: 502,
+      expected: 'needs_review',
+      payload: quietStatus(status),
+    })),
+    { name: 'run 400 invalid_request', route: 'run', http: 400, expected: 'failed', payload: quietStatus('invalid_request') },
+    { name: 'run 400 blocked_until_approval', route: 'run', http: 400, expected: 'failed', payload: quietStatus('blocked_until_approval') },
+    { name: 'run 400 approval error', route: 'run', http: 400, expected: 'failed', payload: approval },
+    ...runBlocked.map(status => ({
+      name: `run 409 ${status}`,
+      route: 'run',
+      http: 409,
+      expected: 'failed',
+      payload: quietStatus(status),
+    })),
+    ...runUnavailable.map(status => ({
+      name: `run 503 ${status}`,
+      route: 'run',
+      http: 503,
+      expected: 'failed',
+      payload: quietStatus(status),
+    })),
+    { name: 'run 502 failed_odi_probe', route: 'run', http: 502, expected: 'failed', payload: quietStatus('failed_odi_probe') },
+    { name: 'run 429', route: 'run', http: 429, expected: 'failed', payload: null },
+    { name: 'run 502 run_unknown', route: 'run', http: 502, expected: 'needs_review', payload: { status: 'run_unknown', scenario_execution_completed: null, manual_review_required: true, steps: [{ run_may_have_started: true }] } },
+    { name: 'run 502 run_failed', route: 'run', http: 502, expected: 'needs_review', payload: { status: 'run_failed', scenario_execution_completed: false, manual_review_required: true, steps: [{ run_may_have_started: true }] } },
+    { name: 'run 502 run_completed_postflight_failed', route: 'run', http: 502, expected: 'needs_review', payload: { status: 'run_completed_postflight_failed', scenario_execution_completed: true, manual_review_required: true, steps: [{ run_may_have_started: true }] } },
+    // No warning flags. The old check treated these as definite failures.
+    { name: 'flags-false generate 500', route: 'generate', http: 500, expected: 'needs_review', payload: redacted500 },
+    { name: 'flags-false run 500', route: 'run', http: 500, expected: 'needs_review', payload: redacted500 },
+    { name: 'flags-false generate 502 generated', route: 'generate', http: 502, expected: 'needs_review', payload: generatedReject },
+    { name: 'flags-false run 502 generated', route: 'run', http: 502, expected: 'needs_review', payload: generatedReject },
+    { name: 'near-miss manual_review_required', route: 'run', http: 409, expected: 'needs_review', payload: quietStatus('blocked_target_not_scd2', { manual_review_required: true }) },
+    { name: 'near-miss grants_applied', route: 'generate', http: 409, expected: 'needs_review', payload: quietStatus('blocked_grantee_missing', { grants_applied: 4 }) },
+    { name: 'near-miss nested grants_applied', route: 'generate', http: 409, expected: 'needs_review', payload: quietStatus('blocked_grantee_missing', { steps: [{ grants_applied: 4 }] }) },
+    { name: 'near-miss wrong http', route: 'generate', http: 500, expected: 'needs_review', payload: quietStatus('blocked_dm_model_missing') },
+  ];
+
+  for (const row of rows) assertWriteClass(row);
+
+  for (const row of DEFINITE_FAILURE_ROWS) {
+    const payload = row.status
+      ? quietStatus(row.status)
+      : (row.http === 429 ? null : approval);
+    assertWriteClass({
+      name: `table ${row.route} ${row.http} ${row.status || 'no-status'}`,
+      route: row.route,
+      http: row.http,
+      payload,
+      expected: 'failed',
+    });
+    if (!row.status) continue;
+    assertWriteClass({
+      name: `table ${row.route} ${row.status} manual_review_required`,
+      route: row.route,
+      http: row.http,
+      payload: quietStatus(row.status, { manual_review_required: true }),
+      expected: 'needs_review',
+    });
+    assertWriteClass({
+      name: `table ${row.route} ${row.status} grants_applied`,
+      route: row.route,
+      http: row.http,
+      payload: quietStatus(row.status, { grants_applied: 4 }),
+      expected: 'needs_review',
+    });
+    assertWriteClass({
+      name: `table ${row.route} ${row.status} wrong http`,
+      route: row.route,
+      http: row.http === 409 ? 400 : 409,
+      payload: quietStatus(row.status),
+      expected: 'needs_review',
+    });
+  }
+
+  for (const route of ['generate', 'run']) {
+    const timeout = projectRejected(Object.assign(new Error('timeout'), { status: undefined }), { route });
+    assert.equal(timeout.outcome, 'needs_review', route);
+    assert.equal(timeout.http_status, null, route);
+  }
+
+  const rateLimit = projectRejected({ status: 429, message: 'Too many requests. Try again shortly.' }, { route: 'generate' });
+  assert.equal(rateLimit.outcome, 'failed');
+  let gate = settleWrite(acceptWrite(arm(createWriteGate()), { ready: true }).gate, { ok: false, review: false });
+  assert.equal(acceptWrite(arm(gate), { ready: true }).accepted, true);
+});
+
+
+test('a needs-review gate locks both writes, every step, and close', () => {
+  let generate = arm(createWriteGate({ lockAfterSuccess: true }));
+  generate = settleWrite(acceptWrite(generate, { ready: true }).gate, { ok: true });
+  let run = arm(createWriteGate());
+  run = settleWrite(acceptWrite(run, { ready: true }).gate, { review: true });
+  const runView = { needsReview: true, detail: 'run_unknown', status: 'run_unknown', message: REVIEW_SENTENCE };
+
+  const afterRun = dialogWriteDecision(generate, run);
+  const planned = afterRun.afterPlan(createWriteGate({ lockAfterSuccess: true }), createWriteGate());
+  assert.equal(planned.reset, false);
+  assert.equal(planned.generateGate, generate);
+  assert.equal(planned.runGate, run);
+  const reconfirmed = setWriteConfirmation(planned.generateGate, true);
+  const generateAttempt = dialogWriteDecision(planned.generateGate, planned.runGate).accept(reconfirmed, { ready: true });
+  assert.equal(generateAttempt.accepted, false);
+  assert.equal(generateAttempt.reason, 'needs_review');
+  assert.equal(canRefreshEvidence({ loading: false, gates: [planned.generateGate, planned.runGate] }), true);
+
+  let generateReview = arm(createWriteGate({ lockAfterSuccess: true }));
+  generateReview = settleWrite(acceptWrite(generateReview, { ready: true }).gate, { review: true });
+  const runArmed = arm(createWriteGate());
+  assert.equal(acceptWrite(runArmed, { ready: true }).accepted, true);
+  const runAttempt = dialogWriteDecision(generateReview, runArmed).accept(runArmed, { ready: true });
+  assert.equal(runAttempt.accepted, false);
+  assert.equal(runAttempt.reason, 'needs_review');
+  const keptGenerate = dialogWriteDecision(generateReview, runArmed).afterPlan(
+    createWriteGate({ lockAfterSuccess: true }),
+    createWriteGate(),
+  );
+  assert.equal(keptGenerate.reset, false);
+  assert.equal(keptGenerate.generateGate, generateReview);
+
+  for (const step of [0, 1, 2, 3]) {
+    const banners = afterRun.banners({ step, generateView: null, runView });
+    assert.equal(banners.length, 1, `step ${step}`);
+    assert.equal(banners[0].detail, 'run_unknown', `step ${step}`);
+  }
+  const generateBanners = dialogWriteDecision(generateReview, createWriteGate());
+  for (const step of [0, 1, 2, 3]) {
+    assert.equal(generateBanners.banners({ step, generateView: { needsReview: true, detail: 'partial_failure_target_ddl' }, runView: null }).length, 1, `generate step ${step}`);
+  }
+
+  const open = dialogWriteDecision(createWriteGate({ lockAfterSuccess: true }), createWriteGate());
+  for (const step of [0, 1, 2, 3]) {
+    assert.equal(open.banners({ step, generateView: null, runView: null }).length, 0, `clear step ${step}`);
+  }
+  assert.equal(open.close({ confirmed: false }).close, true);
+  assert.equal(open.close({ confirmed: false }).needsConfirm, false);
+  assert.equal(open.close({ confirmed: false }).message, '');
+
+  const firstClose = afterRun.close({ confirmed: false });
+  assert.equal(firstClose.close, false);
+  assert.equal(firstClose.needsConfirm, true);
+  assert.equal(firstClose.message, UNRESOLVED_CLOSE_SENTENCE);
+  assert.equal(afterRun.close({ confirmed: true }).close, true);
 });

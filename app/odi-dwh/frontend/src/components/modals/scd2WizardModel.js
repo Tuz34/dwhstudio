@@ -34,10 +34,10 @@ const EVIDENCE_FLAGS = [
 
 export const STATUS_OK_SCOPE = 'The count check passed. It does not prove row-level equality.';
 export const REVIEW_SENTENCE = 'This operation may have started or partly completed and must be checked before it is tried again.';
+export const UNRESOLVED_CLOSE_SENTENCE = 'An operation in this dialog is unresolved and must be checked before it is tried again.';
 export const WRITE_IN_FLIGHT_NOTE = 'This request is still running. Do not reload this page. If the page is reloaded anyway, check the evidence before running again.';
 
 const PROOF_FLAGS = new Set(['business_parity_proven', 'physical_noop_proven']);
-const SUCCESS_STATUSES = new Set(['generated', 'run_completed']);
 const UNKNOWN_REPOSITORY = new Set(['unverified', 'commit_outcome_unknown', 'rollback_failed']);
 
 const PREFILL_NOTES = {
@@ -471,10 +471,10 @@ export function writesInFlight(gates) {
   return Array.isArray(gates) && gates.some(gate => gate?.phase === 'in_flight');
 }
 
-export function writeButtonState(gate, { ready, idleLabel, pendingLabel, doneLabel, repeatLabel }) {
+export function writeButtonState(gate, { ready, idleLabel, pendingLabel, doneLabel, repeatLabel, dialogLocked = false }) {
   const finished = Boolean(gate?.lockAfterSuccess && gate.completedCount > 0);
   const inFlight = gate?.phase === 'in_flight';
-  const reviewLocked = gate?.phase === 'needs_review';
+  const reviewLocked = gate?.phase === 'needs_review' || dialogLocked === true;
   const repeat = !finished && !reviewLocked && (gate?.completedCount || 0) > 0;
   const armed = Boolean(gate?.confirmed) && gate.confirmToken !== gate.consumedToken;
   const enabled = !finished && !inFlight && !reviewLocked && ready === true && armed;
@@ -489,7 +489,60 @@ export function writeButtonState(gate, { ready, idleLabel, pendingLabel, doneLab
   return { enabled, label, finished, inFlight, repeat, notice };
 }
 
+// Definite failures are this closed list only: route, HTTP status, top status.
+// Each row is a reviewer "F" outcome proven to return before a target write or
+// a scenario start. A hit is still needs-review when the body carries a review
+// signal. No other body is a failure because its warning flags are false.
+// status '' means the JSON has no top-level status string.
+export const DEFINITE_FAILURE_ROWS = Object.freeze([
+  // generate — validation and catalog, before the orchestrator writes
+  Object.freeze({ route: 'generate', http: 400, status: 'invalid_request' }), // scd2_service.py:58 via :194-196
+  Object.freeze({ route: 'generate', http: 400, status: 'blocked_until_approval' }), // scd2_service.py:192-193
+  Object.freeze({ route: 'generate', http: 400, status: '' }), // app.py:196-198 via routes/scd2_write.py:37-39
+  Object.freeze({ route: 'generate', http: 404, status: 'blocked_source_not_found' }), // scd2_service.py:91-92
+  Object.freeze({ route: 'generate', http: 503, status: 'source_metadata_unavailable' }), // scd2_service.py:89-90
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_dm_model_missing' }), // scd2_service.py:163-167, :218-221
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_target_model_missing' }), // scd2_service.py:168, :218-221
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_target_model_not_oracle' }), // scd2_service.py:169-170, :218-221
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_source_model_missing' }), // scd2_service.py:171-172, :218-221
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_source_datastore_missing' }), // scd2_service.py:173-176, :218-221
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_project_folder_missing' }), // scd2_service.py:177-178, :218-221
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_lkm_missing' }), // scd2_service.py:179-180, :218-221
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_scenario_name_collision' }), // scd2_service.py:181-182, :218-221
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_mapping_exists_unrelated' }), // scd2_service.py:183-184, :218-221
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_existing_object_mismatch' }), // scd2_service.py:223-228
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_execution_identity' }), // scd2_service.py:242-243, before execute_target_ddl
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_grantee_missing' }), // scd2_target_executor.py:289-293, no DDL
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_target_exists_mismatch' }), // scd2_target_executor.py:298-300, before recover
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_ddl_privilege' }), // scd2_target_executor.py:217-221, :333-340; scd2_service.py:252-259
+  Object.freeze({ route: 'generate', http: 409, status: 'blocked_name_in_use' }), // scd2_target_executor.py:222-223, :333-340; scd2_service.py:252-259
+  Object.freeze({ route: 'generate', http: 502, status: 'failed' }), // scd2_target_executor.py:224, :333-340; scd2_service.py:252-259
+  Object.freeze({ route: 'generate', http: 502, status: 'failed_odi_probe' }), // scd2_service.py:215-216; probe is read-only scd2_odi.py:160-161
+  Object.freeze({ route: 'generate', http: 429, status: '' }), // routes/scd2_write.py:32 limiter, before the handler, no SCD2 body
+  // run — guards that return before run_scenario
+  Object.freeze({ route: 'run', http: 400, status: 'invalid_request' }), // scd2_service.py:363-366
+  Object.freeze({ route: 'run', http: 400, status: 'blocked_until_approval' }), // scd2_service.py:361-362
+  Object.freeze({ route: 'run', http: 400, status: '' }), // app.py:196-198 via routes/scd2_write.py:56-58
+  Object.freeze({ route: 'run', http: 409, status: 'blocked_target_not_scd2' }), // scd2_service.py:377-378
+  Object.freeze({ route: 'run', http: 409, status: 'blocked_scenario_name_collision' }), // scd2_service.py:385-386
+  Object.freeze({ route: 'run', http: 409, status: 'blocked_scenario_missing' }), // scd2_service.py:387-388
+  Object.freeze({ route: 'run', http: 409, status: 'blocked_existing_object_mismatch' }), // scd2_service.py:394-398
+  Object.freeze({ route: 'run', http: 409, status: 'blocked_scenario_version_missing' }), // scd2_service.py:400-405
+  Object.freeze({ route: 'run', http: 409, status: 'blocked_execution_identity' }), // scd2_service.py:419-420
+  Object.freeze({ route: 'run', http: 503, status: 'blocked_agent_preflight' }), // scd2_service.py:372-373; remote_run_contract.py:85-86
+  Object.freeze({ route: 'run', http: 503, status: 'target_metadata_unavailable' }), // scd2_service.py:375-376
+  Object.freeze({ route: 'run', http: 503, status: 'blocked_count_preflight' }), // scd2_service.py:426-427, before :428
+  Object.freeze({ route: 'run', http: 502, status: 'failed_odi_probe' }), // scd2_service.py:382-383; probe is read-only scd2_odi.py:160-161
+  Object.freeze({ route: 'run', http: 429, status: '' }), // routes/scd2_write.py:51 limiter, before the handler, no SCD2 body
+]);
+
+const EFFECT_KEY_RE = /(applied|created|changed)/i;
+const MAY_HAVE_RE = /may_have_/i;
+const PARTIAL_STATUS_RE = /^partial_failure(?:_|$)/;
+const UNKNOWN_TOP_STATUS = new Set(['run_unknown', 'outcome_unknown']);
+
 function topLevelUncertainty(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
   if (payload.outcome_unknown === true) return true;
   if (payload.manual_review_required === true) return true;
   if (payload.manual_recovery_review_required === true) return true;
@@ -499,39 +552,115 @@ function topLevelUncertainty(payload) {
   return false;
 }
 
-function reviewStatus(status) {
-  return status === 'run_unknown' || status === 'outcome_unknown' || status.startsWith('partial_failure');
-}
-
-function treeHasUncertainty(value, seen) {
+// Positive evidence that a write may have started or changed something.
+// False, missing, and zero are not evidence of a clean failure.
+function responseHasReviewSignal(value, seen = new Set()) {
   if (!value || typeof value !== 'object') return false;
   if (seen.has(value)) return false;
   seen.add(value);
-  if (Array.isArray(value)) return value.some(item => treeHasUncertainty(item, seen));
+  if (Array.isArray(value)) return value.some(item => responseHasReviewSignal(item, seen));
+  if (value.outcome_unknown === true) return true;
+  if (value.manual_review_required === true) return true;
+  if (value.manual_recovery_review_required === true) return true;
+  if (value.known_side_effects === true) return true;
   const status = typeof value.status === 'string' ? value.status : '';
-  if (reviewStatus(status)) return true;
-  if (topLevelUncertainty(value)) return true;
-  if (value.known_side_effects === true && !SUCCESS_STATUSES.has(status)) return true;
+  if (PARTIAL_STATUS_RE.test(status) || UNKNOWN_TOP_STATUS.has(status)) return true;
+  if (Object.prototype.hasOwnProperty.call(value, 'scenario_execution_completed') && value.scenario_execution_completed == null) return true;
   if (Object.prototype.hasOwnProperty.call(value, 'side_effects') && value.side_effects == null) return true;
   if (typeof value.repository_outcome === 'string' && UNKNOWN_REPOSITORY.has(value.repository_outcome)) return true;
   for (const [key, item] of Object.entries(value)) {
-    if (/may_have_/i.test(key) && item === true) return true;
-    if (item && typeof item === 'object' && treeHasUncertainty(item, seen)) return true;
+    if (MAY_HAVE_RE.test(key) && item === true) return true;
+    if (EFFECT_KEY_RE.test(key) && typeof item === 'number' && item > 0) return true;
+    if (EFFECT_KEY_RE.test(key) && item === true) return true;
+    if (item && typeof item === 'object' && responseHasReviewSignal(item, seen)) return true;
   }
   return false;
 }
 
-// Needs review when the server cannot promise that nothing started or changed:
-// outcome_unknown, run_unknown, manual_review_required, partial_failure_*,
-// known_side_effects on a non-success, side_effects null, an unverified
-// repository outcome, scenario_execution_completed null, or any *_may_have_*
-// flag. A clean generated / run_completed body is not reviewed just because
-// the successful run reports run_may_have_started.
 export function hasReviewSignal(payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
-  const status = typeof payload.status === 'string' ? payload.status : '';
-  if (SUCCESS_STATUSES.has(status) && !topLevelUncertainty(payload)) return false;
-  return treeHasUncertainty(payload, new Set());
+  return responseHasReviewSignal(payload);
+}
+
+function topStatus(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+  if (!Object.prototype.hasOwnProperty.call(payload, 'status')) return '';
+  if (typeof payload.status !== 'string') return null;
+  return payload.status;
+}
+
+function matchesDefiniteFailure(route, httpStatus, payload) {
+  if (!Number.isInteger(httpStatus)) return false;
+  const status = topStatus(payload);
+  if (status == null) return false;
+  const listed = DEFINITE_FAILURE_ROWS.some(row => (
+    row.http === httpStatus
+    && row.status === status
+    && (route == null || row.route === route)
+  ));
+  if (!listed) return false;
+  if (responseHasReviewSignal(payload)) return false;
+  return true;
+}
+
+function isResolvedSuccess(route, payload, resolved) {
+  if (resolved !== true || topLevelUncertainty(payload)) return false;
+  const status = typeof payload?.status === 'string' ? payload.status : '';
+  if (route === 'generate') {
+    const scenarioVersion = typeof payload?.scenario_version === 'string' ? payload.scenario_version : '';
+    return status === 'generated' && scenarioVersion.length > 0;
+  }
+  if (route === 'run') {
+    return status === 'run_completed' && Boolean(scenarioObject(payload?.scenario)) && projectPostflight(payload?.postflight)?.ok === true;
+  }
+  return false;
+}
+
+// succeeded | failed | needs_review. `failed` is only a closed-table hit
+// with no review signal. Every other non-success is needs_review.
+export function classifyWriteOutcome({ route = null, httpStatus = null, payload = null, resolved = false } = {}) {
+  if (isResolvedSuccess(route, payload, resolved)) return 'succeeded';
+  if (matchesDefiniteFailure(route, httpStatus, payload)) return 'failed';
+  return 'needs_review';
+}
+
+function bannerView(view) {
+  if (view?.needsReview) return view;
+  return { needsReview: true, detail: '', message: REVIEW_SENTENCE };
+}
+
+// One decision for both write gates. Either needs_review locks Generate and Run.
+export function dialogWriteDecision(generateGate, runGate) {
+  const locked = generateGate?.phase === 'needs_review' || runGate?.phase === 'needs_review';
+  return {
+    locked,
+    accept(gate, { ready } = {}) {
+      if (locked) return { accepted: false, reason: 'needs_review', gate };
+      return acceptWrite(gate, { ready });
+    },
+    afterPlan(nextGenerate, nextRun) {
+      if (locked) return { generateGate, runGate, reset: false };
+      return {
+        generateGate: replaceWriteGate(generateGate, nextGenerate),
+        runGate: replaceWriteGate(runGate, nextRun),
+        reset: true,
+      };
+    },
+    close({ confirmed = false } = {}) {
+      if (!locked || confirmed === true) return { close: true, needsConfirm: false, message: '' };
+      return { close: false, needsConfirm: true, message: UNRESOLVED_CLOSE_SENTENCE };
+    },
+    banners({ step = 0, generateView = null, runView = null } = {}) {
+      if (locked) {
+        const items = [];
+        if (generateGate?.phase === 'needs_review') items.push(bannerView(generateView));
+        if (runGate?.phase === 'needs_review') items.push(bannerView(runView));
+        return items;
+      }
+      if (step === 2 && generateView?.needsReview) return [generateView];
+      if (step === 3 && runView?.needsReview) return [runView];
+      return [];
+    },
+  };
 }
 
 function reviewCopy(parts) {
@@ -543,14 +672,13 @@ function reviewCopy(parts) {
 export function projectGenerate(payload) {
   const status = typeof payload?.status === 'string' ? payload.status : '';
   const scenarioVersion = typeof payload?.scenario_version === 'string' ? payload.scenario_version : '';
-  const needsReview = hasReviewSignal(payload);
-  const ok = status === 'generated' && scenarioVersion.length > 0 && !needsReview;
+  const outcome = classifyWriteOutcome({ route: 'generate', httpStatus: 200, payload, resolved: true });
+  const needsReview = outcome === 'needs_review';
+  const ok = outcome === 'succeeded';
   if (!ok) {
     const failure = describeFailure(payload);
     const review = needsReview ? reviewCopy([status, typeof payload?.error_code === 'string' ? payload.error_code : '']) : null;
-    const message = review
-      ? review.message
-      : (status === 'generated' ? 'generated response is missing scenario_version.' : failure.message);
+    const message = review ? review.message : failure.message;
     return {
       ok: false,
       success: false,
@@ -679,8 +807,9 @@ export function projectRun(payload) {
   const scenario = scenarioObject(payload?.scenario);
   const evidence = projectPostflight(payload?.postflight);
   const session = sessionStatus(payload?.steps);
-  const needsReview = hasReviewSignal(payload);
-  const ok = status === 'run_completed' && Boolean(scenario) && evidence?.ok === true && !needsReview;
+  const outcomeClass = classifyWriteOutcome({ route: 'run', httpStatus: 200, payload, resolved: true });
+  const needsReview = outcomeClass === 'needs_review';
+  const ok = outcomeClass === 'succeeded';
   const failure = ok ? null : describeFailure(payload);
   const review = needsReview
     ? reviewCopy([status, typeof payload?.error_code === 'string' ? payload.error_code : ''])
@@ -692,7 +821,7 @@ export function projectRun(payload) {
     ok,
     success: ok,
     needsReview,
-    outcome: ok ? 'succeeded' : (needsReview ? 'needs_review' : 'failed'),
+    outcome: ok ? 'succeeded' : outcomeClass,
     status,
     detail: review ? review.detail : '',
     message,
@@ -708,7 +837,7 @@ export function payloadFromApiError(error) {
   return null;
 }
 
-export function projectRejected(error, { write = false } = {}) {
+export function projectRejected(error, { write = false, route = null } = {}) {
   const httpStatus = Number.isInteger(error?.status) ? error.status : null;
   const body = payloadFromApiError(error);
   const serverStatus = typeof body?.status === 'string' ? body.status : '';
@@ -719,7 +848,14 @@ export function projectRejected(error, { write = false } = {}) {
   if (serverStatus) parts.push(serverStatus);
   if (errorCode) parts.push(errorCode);
   if (serverError) parts.push(serverError);
-  const needsReview = hasReviewSignal(body) || (write === true && body == null);
+  const writeRoute = route === 'generate' || route === 'run' ? route : null;
+  const isWrite = write === true || writeRoute != null;
+  const needsReview = isWrite && classifyWriteOutcome({
+    route: writeRoute,
+    httpStatus,
+    payload: body,
+    resolved: false,
+  }) === 'needs_review';
   if (needsReview) {
     const fallback = typeof error?.message === 'string' && error.message ? error.message : '';
     const review = reviewCopy(parts.length ? parts : [fallback]);
