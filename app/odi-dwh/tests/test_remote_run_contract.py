@@ -303,7 +303,9 @@ def isolated_http_handler(filename, function, body):
     handler.decorator_list = []
     namespace = {"jsonify": jsonify, "request": request, "groovy_approval_context": oo.groovy_approval_context,
                  "execute_mapping_run": service.execute_mapping_run,
-                 "validate_mapping_run_options": service.validate_mapping_run_options}
+                 "validate_mapping_run_options": service.validate_mapping_run_options,
+                 "RemoteRunPhase": service.RemoteRunPhase,
+                 "preserved_remote_outcome": service.preserved_remote_outcome}
     compiled = compile(ast.Module(body=[approval, handler], type_ignores=[]), filename, "exec")
     for code in compiled.co_consts:
         if isinstance(code, CodeType) and code.co_name in {"_approval_error", function}:

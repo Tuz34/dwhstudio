@@ -4,7 +4,12 @@ import json
 
 from flask import Blueprint, jsonify, request
 
-from mapping_run_service import execute_mapping_run, validate_mapping_run_options
+from mapping_run_service import (
+    RemoteRunPhase,
+    execute_mapping_run,
+    preserved_remote_outcome,
+    validate_mapping_run_options,
+)
 from odi_orchestrator import groovy_approval_context
 from routes.deps import get_app_module
 from routes.error_responses import redacted_operation_result, redacted_write_error
@@ -219,12 +224,17 @@ def api_mapping_run():
     )
     if validation_error or options is None:
         return jsonify({"error": validation_error}), 400
+    phase = RemoteRunPhase()
     try:
         with groovy_approval_context(body.get("approved")):
-            outcome = execute_mapping_run(app_module, options)
+            outcome = execute_mapping_run(app_module, options, phase)
         return jsonify(outcome.payload), outcome.status_code
     except Exception as exc:
-        return redacted_write_error("mapping run", exc)
+        preserved = preserved_remote_outcome(options, phase, exc)
+        if preserved is None:
+            return redacted_write_error("mapping run", exc)
+        app_module.logger.error("mapping run outcome preserved: %s", type(exc).__name__)
+        return jsonify(preserved.payload), preserved.status_code
 
 
 @bp.route("/api/mapping/generate-graph", methods=["POST"])

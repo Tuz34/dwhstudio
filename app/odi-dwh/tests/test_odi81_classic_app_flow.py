@@ -416,7 +416,7 @@ def test_classic_run_route_passes_version_context_and_truncate(app_client, monke
 
     seen: dict = {}
 
-    def fake_execute(_app, options):
+    def fake_execute(_app, options, _phase=None):
         seen["options"] = options
         return MappingRunOutcome({
             "status": "SUCCESS",

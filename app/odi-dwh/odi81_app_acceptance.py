@@ -395,6 +395,8 @@ def _accept_classic_run(flow: str, context: str, status: int, payload: Mapping[s
     """Accept the generic scenario payload only when version, context and mode match."""
     if status != 200 or payload.get("status") != "SUCCESS":
         raise isolated._Blocked("HttpFailed")
+    if payload.get("state_persist_failed") is True:
+        raise isolated._Blocked("HttpFailed")
     expected = classic_run_body(flow, context)
     if payload.get("scenario") != f"{expected['mapping_name']}_SCN":
         raise isolated._Blocked("HttpFailed")
