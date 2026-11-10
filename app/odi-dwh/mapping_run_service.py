@@ -50,7 +50,11 @@ class MappingRunOutcome:
 
 @dataclass
 class RemoteRunPhase:
-    """Request-local phase. A repository write and the remote call set it explicitly."""
+    """Request-local phase. A repository write and the remote call set it explicitly.
+
+    history_uncommitted is set immediately before a history write and cleared
+    only when the state manager reports committed is True.
+    """
 
     attempted: bool = False
     kind: str = ""
@@ -58,6 +62,8 @@ class RemoteRunPhase:
     scenario_name: str = ""
     remote: dict[str, Any] | None = None
     persist_failed: bool = False
+    history_uncommitted: bool = False
+    pending_outcome: MappingRunOutcome | None = None
     options: MappingRunOptions | None = None
 
     def response_for_escape(self, exc: BaseException) -> MappingRunOutcome | None:
@@ -167,6 +173,24 @@ def _explicitly_committed(result: Any) -> bool:
     return getattr(result, "committed", None) is True
 
 
+def _accept_commit(phase: RemoteRunPhase | None, result: Any) -> bool:
+    """The in-flight history marker ends only when COMMIT was observed."""
+    if not _explicitly_committed(result):
+        return False
+    if phase is not None:
+        phase.history_uncommitted = False
+    return True
+
+
+def _with_history_warning(payload: dict[str, Any]) -> dict[str, Any]:
+    body = dict(payload)
+    body["state_persist_failed"] = True
+    status = body.get("status")
+    key = status if isinstance(status, str) and status in _HISTORY_WARNINGS else "failed"
+    body["warning"] = _HISTORY_WARNINGS[key]
+    return body
+
+
 def _log_persist_failure(app_module: Any, batch_id: str, options: MappingRunOptions, exc: BaseException) -> None:
     app_module.logger.error(
         "Mapping run state persist failed (batch=%s mapping=%s): %s",
@@ -187,12 +211,15 @@ def _persist_run_state(
     error: object = None,
     *,
     surface: bool = False,
+    phase: RemoteRunPhase | None = None,
 ) -> bool:
-    """Return True only when the audit row was committed.
+    """Return True when the audit row was committed, or no result object came back.
 
     Post-run callers pass surface=True. A database or OS failure then returns
     False. Building or redacting the state lets programming faults propagate.
-    A close error after COMMIT still counts as committed.
+    A close error after COMMIT still counts as committed. Callers set
+    phase.history_uncommitted before this call; it is cleared only here, and
+    only when committed is True.
     """
     safe_error = None
     result = None
@@ -204,20 +231,22 @@ def _persist_run_state(
         with app_module.MappingStateManager() as manager:
             result = manager.upsert_state(state, thread_id=batch_id)
     except _AUDIT_WRITE_ERRORS as exc:
-        if _explicitly_committed(result):
+        if _accept_commit(phase, result):
             return True
         _log_persist_failure(app_module, batch_id, options, exc)
         return False
     except Exception as exc:
-        if _explicitly_committed(result):
+        if _accept_commit(phase, result):
             return True
         if surface or safe_error is None or isinstance(exc, _PROGRAMMING_FAULTS):
             raise
         _log_persist_failure(app_module, batch_id, options, exc)
         return False
+    if _accept_commit(phase, result):
+        return True
     if result is None:
         return True
-    return _explicitly_committed(result)
+    return False
 
 
 def _create_failure_alert(
@@ -267,12 +296,19 @@ def _failure_outcome(
     error: str,
     public_error: str,
     status_code: int,
+    phase: RemoteRunPhase,
 ) -> MappingRunOutcome:
-    _persist_run_state(
-        app_module, options, batch_id, scenario_name, step, "RUN_FAILED", completed_steps, error
+    outcome = MappingRunOutcome({"error": public_error, "batch_id": batch_id}, status_code)
+    phase.pending_outcome = outcome
+    phase.history_uncommitted = True
+    persisted = _persist_run_state(
+        app_module, options, batch_id, scenario_name, step, "RUN_FAILED", completed_steps, error,
+        phase=phase,
     )
     _create_failure_alert(app_module, options, batch_id, scenario_name, step, error)
-    return MappingRunOutcome({"error": public_error, "batch_id": batch_id}, status_code)
+    if persisted:
+        return outcome
+    return MappingRunOutcome(_with_history_warning(outcome.payload), status_code)
 
 
 def _json_line(line: str) -> dict[str, Any] | None:
@@ -303,16 +339,13 @@ def _unsupported_option_outcome(
     scenario_name: str,
     completed_steps: list[str],
     option: str,
+    phase: RemoteRunPhase,
 ) -> MappingRunOutcome:
     message = (
         f"The mapping's IKM does not expose the {option} option. "
         "Run with truncate_target_table=false or change the IKM."
     )
-    _persist_run_state(
-        app_module, options, batch_id, scenario_name, "update_km", "RUN_FAILED",
-        completed_steps, message,
-    )
-    return MappingRunOutcome(
+    outcome = MappingRunOutcome(
         {
             "status": "ikm_option_unsupported",
             "option": option,
@@ -321,6 +354,15 @@ def _unsupported_option_outcome(
         },
         409,
     )
+    phase.pending_outcome = outcome
+    phase.history_uncommitted = True
+    persisted = _persist_run_state(
+        app_module, options, batch_id, scenario_name, "update_km", "RUN_FAILED",
+        completed_steps, message, phase=phase,
+    )
+    if persisted:
+        return outcome
+    return MappingRunOutcome(_with_history_warning(outcome.payload), 409)
 
 
 def _begin_remote_run(
@@ -383,7 +425,8 @@ def preserved_remote_outcome(
         remote = phase.remote
         if isinstance(remote, dict):
             payload, code = _remote_run_payload(
-                options, phase.batch_id, phase.scenario_name, remote, persist_failed=phase.persist_failed,
+                options, phase.batch_id, phase.scenario_name, remote,
+                persist_failed=phase.persist_failed or phase.history_uncommitted,
             )
             return MappingRunOutcome(payload, code)
         return MappingRunOutcome(
@@ -395,6 +438,9 @@ def preserved_remote_outcome(
             },
             502,
         )
+    pending = phase.pending_outcome
+    if phase.history_uncommitted and pending is not None:
+        return MappingRunOutcome(_with_history_warning(pending.payload), pending.status_code)
     if phase.kind == "repository" and exc is not None:
         return MappingRunOutcome(
             {
@@ -450,12 +496,12 @@ def execute_mapping_run(
     unsupported_option = _unsupported_ikm_option(option_result)
     if unsupported_option is not None:
         return _unsupported_option_outcome(
-            app_module, options, batch_id, scenario_name, completed_steps, unsupported_option
+            app_module, options, batch_id, scenario_name, completed_steps, unsupported_option, phase,
         )
     if not _options_updated(option_result):
         return _failure_outcome(
             app_module, options, batch_id, scenario_name, "update_km", completed_steps,
-            "MappingOptionsFailed", "Scenario option update failed.", 500,
+            "MappingOptionsFailed", "Scenario option update failed.", 500, phase,
         )
     completed_steps.append("update_km")
 
@@ -467,16 +513,17 @@ def execute_mapping_run(
     if not _scenario_ready(generation_result, scenario_name, options.version):
         return _failure_outcome(
             app_module, options, batch_id, scenario_name, "generate_scenario", completed_steps,
-            "ScenarioGenerationFailed", "Scenario generation failed.", 400,
+            "ScenarioGenerationFailed", "Scenario generation failed.", 400, phase,
         )
     completed_steps.append("generate_scenario")
 
     run_result = _begin_remote_run(orchestrator, options, scenario_name, batch_id, phase)
     if run_result["status"] != "passed":
+        phase.history_uncommitted = True
         phase.persist_failed = _persist_run_state(
             app_module, options, batch_id, scenario_name, "run_scenario",
             "RUN_UNKNOWN" if run_result["outcome_unknown"] else "RUN_FAILED", completed_steps,
-            run_result["error_code"], surface=True,
+            run_result["error_code"], surface=True, phase=phase,
         ) is False
         _create_failure_alert(app_module, options, batch_id, scenario_name, "run_scenario",
                               run_result["error_code"])
@@ -485,9 +532,10 @@ def execute_mapping_run(
         )
         return MappingRunOutcome(payload, code)
     completed_steps.append("run_scenario")
+    phase.history_uncommitted = True
     phase.persist_failed = _persist_run_state(
         app_module, options, batch_id, scenario_name, "run_scenario", "SUCCEEDED", completed_steps,
-        surface=True,
+        surface=True, phase=phase,
     ) is False
     payload, code = _remote_run_payload(
         options, batch_id, scenario_name, run_result, persist_failed=phase.persist_failed,

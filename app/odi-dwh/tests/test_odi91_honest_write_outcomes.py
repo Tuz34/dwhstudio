@@ -86,6 +86,16 @@ def _assert_no_leak(response, caplog):
     assert LEAK not in caplog.text
 
 
+def _assert_history_fault_logged_once(caplog, class_name):
+    errors = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "dwh_app" and record.levelname == "ERROR"
+    ]
+    assert errors == [f"mapping run outcome preserved: {class_name}"]
+    assert all(LEAK not in message and "Canonical" not in message for message in errors)
+
+
 def _assert_our_logs_hide_the_token(response, caplog):
     """Flask's own traceback log is pre-existing. Responses and our logger stay clean."""
     assert LEAK not in response.get_data(as_text=True)
@@ -110,8 +120,8 @@ def test_remote_done_then_post_run_exception_keeps_success(app_client, monkeypat
     assert body["remote"]["status"] == "passed"
     assert body["remote"]["session_status"] == "DONE"
     assert body["remote"]["run_may_have_started"] is True
-    assert "state_persist_failed" not in body
-    assert "warning" not in body
+    assert body["state_persist_failed"] is True
+    assert body["warning"] == "The run completed but its history record could not be saved."
     assert body.get("error") != "mapping run failed."
     _assert_no_leak(response, caplog)
 
@@ -131,8 +141,8 @@ def test_remote_unknown_then_post_run_exception_keeps_unknown(app_client, monkey
     assert body["batch_id"].startswith("RUN-")
     assert body["remote"]["outcome_unknown"] is True
     assert body["remote"]["run_may_have_started"] is True
-    assert "state_persist_failed" not in body
-    assert "warning" not in body
+    assert body["state_persist_failed"] is True
+    assert body["warning"] == "The run outcome is unknown but its history record could not be saved."
     assert body.get("error") != "mapping run failed."
     _assert_no_leak(response, caplog)
 
@@ -426,6 +436,8 @@ class _Cursor:
             raise OSError("cursor close failed")
 
     def fetchone(self):
+        if self.conn.fail == "absent":
+            return (0,)
         return (1,)
 
 
@@ -451,7 +463,7 @@ class _Conn:
         return True
 
 
-def _audit_manager(fail):
+def _audit_manager(fail, *, real_table_check=False):
     import mapping_state_manager as state_module
 
     class Manager(state_module.MappingStateManager):
@@ -464,9 +476,23 @@ def _audit_manager(fail):
             Manager.last = self
 
         def ensure_table(self):
+            if real_table_check:
+                return super().ensure_table()
             return None
 
     return Manager
+
+
+def _use_real_table_check():
+    import mapping_state_manager as state_module
+
+    previous = state_module.MappingStateManager._table_ensured
+    state_module.MappingStateManager._table_ensured = False
+    return state_module, previous
+
+
+def _restore_table_check(state_module, previous):
+    state_module.MappingStateManager._table_ensured = previous
 
 
 def _silence_rag(monkeypatch):
@@ -559,9 +585,238 @@ def test_key_error_while_building_state_keeps_the_outcome(app_client, monkeypatc
     assert body["batch_id"].startswith("RUN-")
     assert body["remote"]["session_status"] == "DONE"
     assert body["remote"]["run_may_have_started"] is True
+    assert body["state_persist_failed"] is True
+    assert body["warning"] == COMPLETED_WARNING
+    assert "error" not in body
+    _assert_history_fault_logged_once(caplog, "KeyError")
+    _assert_no_leak(response, caplog)
+
+
+def test_missing_audit_table_after_done_sets_persist_warning(app_client, monkeypatch, caplog):
+    state_module, previous = _use_real_table_check()
+    try:
+        _silence_rag(monkeypatch)
+        response = _post(
+            app_client, monkeypatch, _pipeline(done()),
+            state_manager=_audit_manager("absent", real_table_check=True),
+        )
+    finally:
+        _restore_table_check(state_module, previous)
+    body = response.get_json()
+    assert response.status_code == 200
+    assert body["status"] == "SUCCESS"
+    assert body["batch_id"].startswith("RUN-")
+    assert body["remote"]["session_status"] == "DONE"
+    assert body["state_persist_failed"] is True
+    assert body["warning"] == COMPLETED_WARNING
+    assert "error" not in body
+    assert "Canonical" not in response.get_data(as_text=True)
+    assert "MAPPING_RUN_STATE" not in response.get_data(as_text=True)
+    _assert_history_fault_logged_once(caplog, "RuntimeError")
+
+
+@pytest.mark.parametrize(
+    ("remote", "http_status", "status", "warning"),
+    [
+        (remote_run_contract.transport_failure("run", "RemoteTimeout"), 504, "unknown", UNKNOWN_WARNING),
+        (_failed_remote(), 502, "failed", FAILED_WARNING),
+    ],
+)
+@pytest.mark.parametrize("fault", ["absent", "key_error"])
+def test_history_fault_after_remote_sets_matching_warning(
+    app_client, monkeypatch, caplog, remote, http_status, status, warning, fault,
+):
+    state_module, previous = _use_real_table_check()
+    try:
+        _silence_rag(monkeypatch)
+        if fault == "key_error":
+            import mapping_run_service as service
+
+            monkeypatch.setattr(service, "_state_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError(LEAK)))
+            manager = None
+            class_name = "KeyError"
+        else:
+            manager = _audit_manager("absent", real_table_check=True)
+            class_name = "RuntimeError"
+        response = _post(app_client, monkeypatch, _pipeline(remote), state_manager=manager)
+    finally:
+        _restore_table_check(state_module, previous)
+    body = response.get_json()
+    assert response.status_code == http_status
+    assert body["status"] == status
+    assert body["batch_id"].startswith("RUN-")
+    assert body["state_persist_failed"] is True
+    assert body["warning"] == warning
+    assert LEAK not in response.get_data(as_text=True)
+    assert "Canonical" not in response.get_data(as_text=True)
+    _assert_history_fault_logged_once(caplog, class_name)
+
+
+@pytest.mark.parametrize(
+    ("remote", "http_status", "status"),
+    [
+        (done(), 200, "SUCCESS"),
+        (_failed_remote(), 502, "failed"),
+        (_blocked_remote(), 502, "blocked"),
+        (remote_run_contract.transport_failure("run", "RemoteTimeout"), 504, "unknown"),
+    ],
+)
+def test_committed_history_row_has_no_persist_flag(app_client, monkeypatch, remote, http_status, status):
+    _silence_rag(monkeypatch)
+    manager = _audit_manager(None)
+    response = _post(app_client, monkeypatch, _pipeline(remote), state_manager=manager)
+    body = response.get_json()
+    assert response.status_code == http_status
+    assert body["status"] == status
     assert "state_persist_failed" not in body
     assert "warning" not in body
-    _assert_no_leak(response, caplog)
+    assert manager.last.audit.committed is True
+
+
+def _reject_options(pipeline):
+    pipeline.update_mapping = lambda **_kwargs: "FAILED: options"
+
+
+def _reject_generation(pipeline):
+    pipeline.generate_scenario_metadata = lambda **_kwargs: {"status": "failed"}
+
+
+def _reject_ikm(pipeline):
+    pipeline.update_mapping = lambda **_kwargs: (
+        '{"status":"ikm_option_unsupported","option":"TRUNCATE_TARGET_TABLE"}'
+    )
+
+
+@pytest.mark.parametrize(
+    ("setup", "http_status", "error"),
+    [
+        (_reject_options, 500, "Scenario option update failed."),
+        (_reject_generation, 400, "Scenario generation failed."),
+    ],
+)
+@pytest.mark.parametrize("fault", ["absent", "key_error"])
+def test_pre_run_history_fault_keeps_the_failure_body(
+    app_client, monkeypatch, caplog, setup, http_status, error, fault,
+):
+    state_module, previous = _use_real_table_check()
+    try:
+        _silence_rag(monkeypatch)
+        pipeline = _pipeline(done())
+        setup(pipeline)
+        if fault == "key_error":
+            import mapping_run_service as service
+
+            monkeypatch.setattr(
+                service, "_state_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError(LEAK)),
+            )
+            manager = None
+        else:
+            manager = _audit_manager("absent", real_table_check=True)
+        response = _post(app_client, monkeypatch, pipeline, state_manager=manager)
+    finally:
+        _restore_table_check(state_module, previous)
+    body = response.get_json()
+    assert response.status_code == http_status
+    assert body["error"] == error
+    assert body["batch_id"].startswith("RUN-")
+    assert body["state_persist_failed"] is True
+    assert body["warning"] == FAILED_WARNING
+    assert "repository_outcome_unknown" not in response.get_data(as_text=True)
+    assert LEAK not in response.get_data(as_text=True)
+    assert "Canonical" not in response.get_data(as_text=True)
+    assert "MAPPING_RUN_STATE" not in response.get_data(as_text=True)
+
+
+def test_pre_run_ikm_history_fault_keeps_the_conflict_body(app_client, monkeypatch):
+    state_module, previous = _use_real_table_check()
+    try:
+        _silence_rag(monkeypatch)
+        pipeline = _pipeline(done())
+        _reject_ikm(pipeline)
+        response = _post(
+            app_client, monkeypatch, pipeline,
+            state_manager=_audit_manager("absent", real_table_check=True),
+        )
+    finally:
+        _restore_table_check(state_module, previous)
+    body = response.get_json()
+    assert response.status_code == 409
+    assert body["status"] == "ikm_option_unsupported"
+    assert body["option"] == "TRUNCATE_TARGET_TABLE"
+    assert body["error"].startswith("The mapping's IKM does not expose the TRUNCATE_TARGET_TABLE option.")
+    assert body["batch_id"].startswith("RUN-")
+    assert body["state_persist_failed"] is True
+    assert body["warning"] == FAILED_WARNING
+    assert set(body) == {"status", "option", "error", "batch_id", "state_persist_failed", "warning"}
+
+
+@pytest.mark.parametrize(
+    ("setup", "http_status", "expected_keys", "error"),
+    [
+        (_reject_options, 500, {"error", "batch_id"}, "Scenario option update failed."),
+        (_reject_generation, 400, {"error", "batch_id"}, "Scenario generation failed."),
+    ],
+)
+def test_pre_run_committed_history_keeps_the_main_body(
+    app_client, monkeypatch, setup, http_status, expected_keys, error,
+):
+    _silence_rag(monkeypatch)
+    pipeline = _pipeline(done())
+    setup(pipeline)
+    manager = _audit_manager(None)
+    response = _post(app_client, monkeypatch, pipeline, state_manager=manager)
+    body = response.get_json()
+    assert response.status_code == http_status
+    assert set(body) == expected_keys
+    assert body["error"] == error
+    assert body["batch_id"].startswith("RUN-")
+    assert manager.last.audit.committed is True
+
+
+def test_pre_run_ikm_committed_history_keeps_the_conflict_body(app_client, monkeypatch):
+    _silence_rag(monkeypatch)
+    pipeline = _pipeline(done())
+    _reject_ikm(pipeline)
+    manager = _audit_manager(None)
+    response = _post(app_client, monkeypatch, pipeline, state_manager=manager)
+    body = response.get_json()
+    assert response.status_code == 409
+    assert set(body) == {"status", "option", "error", "batch_id"}
+    assert body["status"] == "ikm_option_unsupported"
+    assert manager.last.audit.committed is True
+
+
+def test_global_handler_flags_uncommitted_history(app_client, caplog):
+    import app as app_module
+    import mapping_run_service as service
+    import repository_write_contract
+
+    phase = service.RemoteRunPhase(
+        attempted=True,
+        kind="remote",
+        batch_id="RUN-SYNTH",
+        scenario_name="MAP_TEST_SCN",
+        remote=done(),
+        history_uncommitted=True,
+        options=service.MappingRunOptions("MAP_TEST", "001", "GLOBAL", False),
+    )
+    with app_module.app.test_request_context("/api/mapping/run", method="POST"):
+        repository_write_contract.bind_request_phase(phase)
+        response, status = app_module.catch_all(KeyError(LEAK))
+    body = response.get_json()
+    assert status == 200
+    assert body["status"] == "SUCCESS"
+    assert body["batch_id"] == "RUN-SYNTH"
+    assert body["remote"]["session_status"] == "DONE"
+    assert body["state_persist_failed"] is True
+    assert body["warning"] == COMPLETED_WARNING
+    assert LEAK not in response.get_data(as_text=True)
+    errors = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "dwh_app" and record.levelname == "ERROR"
+    ]
+    assert errors == ["Unhandled request failed: KeyError"]
 
 
 @pytest.mark.parametrize("method", ["update_mapping", "generate_scenario_metadata"])
