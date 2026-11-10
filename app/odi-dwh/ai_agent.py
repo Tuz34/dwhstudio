@@ -124,10 +124,11 @@ SURROGATE KEY (SKEY) RULES:
 AUTONOMOUS MAPPING RULES:
 - The user may write in Turkish or English. Each of the following phrases is a MAPPING_CREATE request. Turkish: "mapping olustur", "mapping yap", "aktarim olustur"; English: "create mapping", "create a mapping", "make a mapping", "ETL mapping", "create a transfer". ("ETL mapping" is used in both languages.)
 - THE SOURCE SYSTEM IS NOW ORACLE (Oracle->Oracle ETL). Source schemas: HR, SH (examples). DO NOT ASSUME MS SQL Server / AdventureWorks.
-- Source model name depends on the source schema: src_model: "ORACLE_HR" or "ORACLE_SH"; tgt_model: "DWH".
-- Prefix the target table name with the source schema (e.g. HR.EMPLOYEES -> ODS_HR_EMPLOYEES, SH.SALES -> ODS_SH_SALES).
-- Extract the source and target tables from the prompt. Example: "Employees" -> "HR.EMPLOYEES" (Oracle source) and "ODS_HR_EMPLOYEES" (Oracle target DWH).
-- Mapping naming rule: MAP_<SOURCE_SCHEMA>_<TABLE>_TO_ODS. Examples: MAP_HR_EMPLOYEES_TO_ODS, MAP_SH_SALES_TO_ODS.
+- Source model name depends on the source schema: src_model: "ORACLE_HR" or "ORACLE_SH". ODS, DWH and EDW use the DWH target schema; DM/datamart uses DM when that topology is available.
+- Follow the layer the user names: ODS uses ODS_<SOURCE_SCHEMA>_<TABLE> and _TO_ODS; DWH uses <SOURCE_SCHEMA>_<TABLE> and _TO_DWH; EDW uses EDW_<SOURCE_SCHEMA>_<TABLE> and _TO_EDW. There is no single generic DM target-table naming rule, so leave the name for the wizard unless the user explicitly names a target table.
+- Extract source and target tables from the prompt. Do not assume that a request is for ODS when another layer is named.
+- Include load_type only when the user explicitly asks for insert/update (upsert/merge), truncate/full reload, Type 1 or Type 2 history. Values: insert_update, truncate_load, type1, type2.
+- Include key_columns only when the user explicitly names key columns; use an array of uppercase column identifiers. Never infer keys from table names or the layer.
 - For mapping requests, do not generate SQL -- instead extract the mapping parameters in the JSON format below.
 - When a mapping request is detected, prefix the description with "MAPPING_REQUEST".
 - The queries array must be empty; add a "mapping_request" object instead.

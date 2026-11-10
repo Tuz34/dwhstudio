@@ -6,6 +6,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from ai_egress import CLAUDE_ORIGIN, CONFIG_LOCK, endpoint_origin, validate_endpoint
+from chat_mapping_proposal import normalize_mapping_request
 from routes.deps import get_app_module
 from routes.error_responses import redacted_write_error
 
@@ -244,11 +245,22 @@ def api_ask():
         result, raw = app_module.ask_ai(user_msg, schema, history)
 
         if "mapping_request" in result and result["mapping_request"]:
+            proposal = normalize_mapping_request(user_msg, result["mapping_request"])
+            if proposal is None:
+                return jsonify({
+                    "aciklama": "The mapping proposal could not be validated. Please restate the request.",
+                    "queries": [],
+                    "raw": "",
+                })
             return jsonify({
-                "aciklama": result.get("aciklama", result.get("description", "")),
+                "aciklama": (
+                    "MAPPING_REQUEST: Review the proposed mapping in the wizard."
+                    if proposal.get("target_layer")
+                    else result.get("aciklama", result.get("description", ""))
+                ),
                 "queries": [],
-                "mapping_request": result["mapping_request"],
-                "raw": raw,
+                "mapping_request": proposal,
+                "raw": "",
             })
 
         if "validation_request" in result and result["validation_request"]:
