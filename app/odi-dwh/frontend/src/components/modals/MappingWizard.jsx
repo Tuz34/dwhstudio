@@ -3,6 +3,16 @@ import { Modal } from '../ui/Modal';
 import { generateMapping, preflightMappingTarget } from '../../services/api';
 import { useDispatch } from '../../store/AppContext';
 import clsx from 'clsx';
+import {
+  LOAD_TYPES,
+  buildMappingRequest,
+  buildScd2Handoff,
+  getLoadOptionError,
+  getMappingOutcome,
+  mappingName,
+  prefillLoadOptions,
+  validateLoadOptions,
+} from './mappingWizardRequests';
 
 const STEPS = ['Source', 'Target', 'Options', 'Confirm'];
 const TERMINAL_FAILURES = new Set(['failed', 'error', 'dq_failed', 'run_failed']);
@@ -120,6 +130,9 @@ const emptyForm = {
   skey_natural_key: '',
   description: '',
   mapping_name: '',
+  drop_target_if_exists: false,
+  load_type: '',
+  key_columns: '',
 };
 
 export function MappingWizard({ open, onClose, initialData = {} }) {
@@ -141,6 +154,7 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
     skey_natural_key: initialData.skey_natural_key || emptyForm.skey_natural_key,
     description: initialData.description || emptyForm.description,
     mapping_name: initialData.mapping_name || emptyForm.mapping_name,
+    ...prefillLoadOptions(initialData),
   });
 
   const set = (key, val) => setForm(prev => ({ ...prev, [key]: val }));
@@ -148,26 +162,32 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
   const isStepValid = () => {
     if (step === 0) return form.src_table.trim().length > 0;
     if (step === 1) return form.tgt_table.trim().length > 0;
+    if (step === 2) return getLoadOptionError(form) === null;
     return true;
+  };
+
+  const handleNext = () => {
+    if (step === 2 && form.load_type === 'type2') {
+      const handoff = buildScd2Handoff(form);
+      handleClose();
+      dispatch(handoff);
+      return;
+    }
+    setStep(previous => previous + 1);
   };
 
   const handleGenerate = async () => {
     setLoading(true);
     setError(null);
     try {
-      const payload = {
-        ...form,
-        drop_target_if_exists: Boolean(form.drop_target_if_exists),
-        operation: 'CREATE',
-        mapping_name: form.mapping_name ||
-          `MAP_${form.src_table.replace(/\W/g, '_').toUpperCase()}_TO_ODS`,
-      };
+      const request = buildMappingRequest(form);
+      const payload = request.params;
 
       const preflight = await preflightMappingTarget({ params: payload });
       if (payload.drop_target_if_exists && preflight.exists && preflight.has_rows) {
         const userConfirmedRebuild = window.confirm(
           `${preflight.target} contains data.\n\n` +
-          'This will delete and recreate the target table before the mapping is created.\n\n' +
+          'This will delete and recreate the target table and replace an existing mapping.\n\n' +
           'Choose OK only if this rebuild is intentional.'
         );
         if (!userConfirmedRebuild) {
@@ -176,7 +196,7 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
         }
       }
 
-      const data = await generateMapping({ params: payload, approved: true });
+      const data = await generateMapping({ ...request, approved: true });
       const hasGraphResult = Array.isArray(data.log) || data.overall_status || data.current_step;
       if (data.error && !hasGraphResult) throw new Error(data.error);
 
@@ -210,6 +230,8 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
   const resultSteps = Array.isArray(result?.log) ? result.log : [];
   const primaryError = result?.error || resultSteps.find(entry => ['FAILED', 'ERROR'].includes(String(entry.status || '').toUpperCase()))?.detail;
   const friendlyError = primaryError ? getFriendlyFailure(primaryError) : '';
+  const outcome = getMappingOutcome(result);
+  const selectedLoadType = LOAD_TYPES.find(({ value }) => value === form.load_type);
 
   return (
     <Modal open={open} onClose={handleClose} title="Mapping Wizard" size="lg">
@@ -297,6 +319,36 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
       {step === 2 && (
         <div className="space-y-5">
           <p className="text-sm text-slate-500">Advanced options and metadata.</p>
+          <div>
+            <label htmlFor="mapping-load-type" className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Load type *</label>
+            <select
+              id="mapping-load-type"
+              value={form.load_type}
+              onChange={event => set('load_type', event.target.value)}
+              className={inputCls}
+            >
+              <option value="">Choose a load type</option>
+              {LOAD_TYPES.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+            </select>
+            {form.load_type !== 'truncate_load' && form.load_type && (
+              <div className="mt-4">
+                <label htmlFor="mapping-key-columns" className="text-xs font-semibold text-slate-500 uppercase mb-1 block">
+                  Key columns {form.load_type === 'type2' ? '(optional)' : '*'}
+                </label>
+                <input
+                  id="mapping-key-columns"
+                  value={form.key_columns}
+                  onChange={event => set('key_columns', event.target.value)}
+                  placeholder="ENTITY_ID, SOURCE_ID"
+                  className={inputCls}
+                />
+                <p className="text-xs text-slate-400 mt-1">Separate column names with commas.</p>
+              </div>
+            )}
+            {getLoadOptionError(form) && (
+              <p className="text-xs text-rose-600 mt-2">{getLoadOptionError(form)}</p>
+            )}
+          </div>
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
             <label className="flex items-center gap-3 cursor-pointer select-none">
               <div
@@ -341,7 +393,7 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
                 <span className="font-medium text-rose-700 text-sm">Drop target table if it exists (delete and recreate)</span>
                 <span className="text-[10px] text-slate-500 mt-0.5">
                   Default behavior reuses the table. If metadata already matches, this step is marked ready;
-                  if columns are missing, the wizard adds them with ALTER. Turn this on only for an intentional rebuild.
+                  if columns are missing, the wizard adds them with ALTER. Turning this on also replaces an existing mapping.
                 </span>
               </div>
             </label>
@@ -361,9 +413,11 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
               Mapping Summary
             </h4>
             {[
-              ['Mapping Name', form.mapping_name || `MAP_${form.src_table.toUpperCase()}_TO_ODS`],
+              ['Mapping Name', mappingName(form)],
               ['Source', `${form.src_model}.${form.src_schema ? form.src_schema + '.' : ''}${form.src_table}`],
               ['Target', `${form.tgt_owner}.${form.tgt_table}`],
+              ['Load type', selectedLoadType?.label || '-'],
+              ['Key columns', validateLoadOptions(form).keyColumns.join(', ') || '-'],
               ['SKEY', form.needs_skey ? `Natural Key: ${form.skey_natural_key}` : '-'],
             ].map(([label, val]) => (
               <div key={label} className="flex gap-3 text-sm">
@@ -406,6 +460,13 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
               </p>
             )}
             {result?.message && <p className="text-sm text-slate-600">{result.message}</p>}
+            {(outcome.integrationType || outcome.ikm || outcome.key) && (
+              <div className="text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-left space-y-1">
+                {outcome.integrationType && <p>Integration type: {outcome.integrationType}</p>}
+                {outcome.ikm && <p>IKM: {outcome.ikm}</p>}
+                {outcome.key && <p>Key outcome: {outcome.key}</p>}
+              </div>
+            )}
             {friendlyError && (
               <div className="text-sm text-rose-700 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2 text-left">
                 <p>{friendlyError}</p>
@@ -470,7 +531,7 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
         </button>
         {step < 3 && (
           <button
-            onClick={() => setStep(p => p + 1)}
+            onClick={handleNext}
             disabled={!isStepValid()}
             className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
           >
