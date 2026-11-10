@@ -683,7 +683,7 @@ GRAMMAR_WORDS = [
     "AS", "USING", "WITH", "OLARAK", "ILE", "SEKLINDE", "TARGET",
     "TABLE", "HEDEF", "INTO", "TO", "LAYER", "KATMAN",
     "NOT", "NO", "NEVER", "SHOULD", "AVOID", "IF", "DEGIL", "YAPMASIN",
-    "GEREKSIZ", "SKIP", "DISABLE", "ATLA",
+    "GEREKSIZ",
 ]
 
 
@@ -697,7 +697,7 @@ def test_grammar_word_property_fixture_is_nonempty_and_covers_each_category():
         {"KEY", "KEYS", "ANAHTAR", "PK", "PRIMARY", "NATURAL"},
         {"AS", "USING", "WITH", "OLARAK", "ILE", "SEKLINDE", "TARGET", "HEDEF", "INTO", "LAYER"},
         {"NOT", "NO", "NEVER", "SHOULD", "AVOID", "IF", "DEGIL", "YAPMASIN",
-         "GEREKSIZ", "SKIP", "DISABLE", "ATLA"},
+         "GEREKSIZ"},
     ):
         assert category <= words
 
@@ -904,10 +904,10 @@ def test_general_refusal_vocabulary_clears_assigned_load(hedge):
     "truncate kapalı", "truncate iptal", "truncate'i atla", "tarihçe devre dışı",
     "truncate devre dışı olsun", "iptal truncate",
 ])
-def test_load_governing_refusal_vocabulary_clears_assigned_load(hedge):
+def test_deleted_refusal_vocabulary_does_not_clear_assigned_load(hedge):
     result = normalize_mapping_request(
         f"Model HR.ORDERS into ODS as truncate insert, {hedge}", {})
-    assert "load_type" not in result
+    assert result["load_type"] == "truncate_load"
 
 
 @pytest.mark.parametrize("plain_word", [
@@ -949,6 +949,40 @@ def test_non_governing_refusal_words_keep_load_and_prior_keys(message, load_type
 def test_invalid_single_key_token_still_drops_keys(wording):
     result = normalize_mapping_request(f"Model HR.ORDERS into ODS as merge, {wording}", {})
     assert "key_columns" not in result
+
+
+@pytest.mark.parametrize(("tail", "load_type"), [
+    ("skip the type column", "truncate_load"),
+    ("ignore the update flag", "truncate_load"),
+    ("exclude the load date", "truncate_load"),
+    ("skip the insert date", "truncate_load"),
+    ("disable the reload window", "truncate_load"),
+    ("ignore the SCD code", "truncate_load"),
+    ("atla tip kolonu", "insert_update"),
+    ("iptal tip kolonu", "insert_update"),
+])
+def test_deleted_refusal_words_before_column_descriptions_keep_load(tail, load_type):
+    if load_type == "truncate_load":
+        message = f"Model HR.ORDERS into ODS as truncate insert, {tail}"
+    else:
+        message = f"DWH.X tablosunu ODS katmanına insert update olarak modelle, {tail}"
+    assert normalize_mapping_request(message, {})["load_type"] == load_type
+
+
+@pytest.mark.parametrize(("wording", "keys"), [
+    ("anahtar ID, STATUS and others", ["ID", "STATUS"]),
+    ("key A, B plus C", ["A"]),
+    ("anahtar ID, KOD alanı ile", ["ID"]),
+    ("keys: A, B and C", ["A", "B", "C"]),
+    ("anahtar ID ve KOD", ["ID", "KOD"]),
+    ("key id, kod", ["ID", "KOD"]),
+    ("key customer_id, kod", ["CUSTOMER_ID"]),
+    ("key id2, kod", ["ID2"]),
+    ("key ID, Others", ["ID"]),
+])
+def test_key_list_keeps_first_identifier_typing_style(wording, keys):
+    result = normalize_mapping_request(f"Model HR.ORDERS into ODS as merge, {wording}", {})
+    assert result["key_columns"] == keys
 
 
 @pytest.mark.parametrize("affirmative", [

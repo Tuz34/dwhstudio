@@ -80,16 +80,6 @@ _HEDGE_EXACT = frozenset({
     "OLMASIN", "OLMADAN", "HARIC", "YERINE", "EGER", "ASLA", "HAYIR",
     "GEREKSIZ", "GEREKMEZ", "GEREKMIYOR",
 })
-_EN_LOAD_HEDGES = frozenset({
-    "SKIP", "SKIPPING", "DISABLE", "DISABLED", "OMIT", "EXCLUDE", "EXCLUDING", "IGNORE",
-})
-_TR_LOAD_HEDGES = frozenset({"ATLA", "ATLAYIN", "KAPALI", "IPTAL"})
-_HEDGE_LOAD_WORDS = frozenset({
-    "INSERT", "UPDATE", "UPSERT", "MERGE", "EKLE", "GUNCELLE", "EKLEME", "GUNCELLEME",
-    "TRUNCATE", "RELOAD", "LOAD", "YUKLEME", "YENILE", "YENILEME",
-    "TYPE", "TIP", "SCD", "SCD1", "SCD_1", "SCD2", "SCD_2", "TARIHCELI",
-    "TARIHCE", "HISTORY", "HISTORICAL",
-})
 _NEGATIVE_ENDING = (
     r"(?:(?:MA|ME)(?:SIN(?:IZ)?|YIN(?:IZ)?|DAN|DEN|Z|DI[A-Z]*|"
     r"YACAK[A-Z]*|YECEK[A-Z]*|MALI[A-Z]*|MELI[A-Z]*)|MIYOR[A-Z]*)"
@@ -113,6 +103,7 @@ class _Token:
     kind: str
     value: str
     case_suffix: str = ""
+    identifier_shaped: bool = False
 
 
 def _plain(message: str, *, uppercase: bool = True) -> str:
@@ -129,6 +120,10 @@ def _case_suffix_allowed(base: str, suffix: str, original_base: str) -> bool:
         "." in base or "_" in base or any(char.isdigit() for char in base) or
         original_base.isupper() or base in _CASE_LAYER_WORDS
     )
+
+
+def _identifier_shape_as_typed(value: str) -> bool:
+    return bool(value) and (value.isupper() or "_" in value or any(char.isdigit() for char in value))
 
 
 def _lex(message: str) -> list[_Token]:
@@ -169,9 +164,13 @@ def _lex(message: str) -> list[_Token]:
                     case_text[index:index + len(word_suffix.group(1))]
                     if len(case_text) == len(text) else "",
                 ):
-                    tokens.append(_Token("word", word_suffix.group(1), word_suffix.group(2)))
+                    original_base = case_text[index:index + len(word_suffix.group(1))]
+                    tokens.append(_Token("word", word_suffix.group(1), word_suffix.group(2),
+                                         _identifier_shape_as_typed(original_base)))
                 else:
-                    tokens.append(_Token("word", value))
+                    original_word = case_text[index:end] if len(case_text) == len(text) else ""
+                    tokens.append(_Token("word", value,
+                                         identifier_shaped=_identifier_shape_as_typed(original_word)))
             index = end
             continue
         if char in _QUOTED:
@@ -326,44 +325,6 @@ def _hedge_word(word: str) -> bool:
     )
 
 
-def _hedge_load_word_at(tokens: list[_Token], index: int, taken: set[int]) -> bool:
-    if index < 0 or index >= len(tokens) or index in taken or tokens[index].kind != "word":
-        return False
-    word = tokens[index].value
-    suffix = _WORD_CASE_SUFFIX.fullmatch(word)
-    if suffix and suffix.group(2) != "S":
-        word = suffix.group(1)
-    return word in _HEDGE_LOAD_WORDS
-
-
-def _hedge_load_starts_at(tokens: list[_Token], index: int, taken: set[int]) -> bool:
-    return bool(_load_phrase_at(tokens, index, taken)) or _hedge_load_word_at(tokens, index, taken)
-
-
-def _hedge_load_ends_at(tokens: list[_Token], end: int, taken: set[int]) -> bool:
-    if _hedge_load_word_at(tokens, end - 1, taken):
-        return True
-    return any(
-        phrase and phrase[1] == end
-        for start in range(max(0, end - 4), end)
-        if (phrase := _load_phrase_at(tokens, start, taken))
-    )
-
-
-def _scoped_load_hedge(tokens: list[_Token], index: int, taken: set[int]) -> bool:
-    word = tokens[index].value
-    if word in _EN_LOAD_HEDGES:
-        start = index + 1
-        if any(_at(tokens, start, article, taken) for article in ("A", "AN", "THE")):
-            start += 1
-        return _hedge_load_starts_at(tokens, start, taken)
-    span = 2 if _sequence(tokens, index, ("DEVRE", "DISI"), taken) else 1
-    if word in _TR_LOAD_HEDGES or span == 2:
-        return (_hedge_load_ends_at(tokens, index, taken) or
-                _hedge_load_starts_at(tokens, index + span, taken))
-    return False
-
-
 def _hedged(tokens: list[_Token], taken: set[int]) -> bool:
     for index, entry in enumerate(tokens):
         if index in taken or entry.kind in {"quoted", "dotted"}:
@@ -373,7 +334,7 @@ def _hedged(tokens: list[_Token], taken: set[int]) -> bool:
         if entry.kind != "word":
             continue
         word = entry.value
-        if _hedge_word(word) or _scoped_load_hedge(tokens, index, taken):
+        if _hedge_word(word):
             return True
         if (_sequence(tokens, index, ("RATHER", "THAN"), taken) or
                 _sequence(tokens, index, ("INSTEAD", "OF"), taken) or
@@ -544,6 +505,7 @@ def _key_tail(
     keys: list[str] = []
     used: set[int] = set()
     expect_name = True
+    first_key_shaped = False
     while index < len(tokens):
         entry = tokens[index]
         if keys and _key_boundary(tokens, index, taken, layer_starts, load_starts):
@@ -576,7 +538,11 @@ def _key_tail(
             if name and not _hedge_word(entry.value):
                 used.add(index)
             return [], used
+        if keys and first_key_shaped and not entry.identifier_shaped:
+            return ([], used) if parenthesized else (keys, used)
         used.add(index)
+        if not keys:
+            first_key_shaped = entry.identifier_shaped
         if name not in keys:
             keys.append(name)
         if len(keys) > 8:
