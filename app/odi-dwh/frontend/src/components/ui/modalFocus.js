@@ -14,6 +14,11 @@ export function modalFocusableElements(container) {
   );
 }
 
+/** Omitted or false keeps Escape, the backdrop, and the close button active. */
+export function shouldDismissModal(closeDisabled = false) {
+  return closeDisabled !== true;
+}
+
 export function trapModalFocus(event, container) {
   if (event.key !== 'Tab' || !container) return false;
   const elements = modalFocusableElements(container);
