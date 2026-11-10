@@ -3,6 +3,12 @@ import { getOdiMappings, getOdiMappingDetail, runMapping, getMappingState, delet
 import { useDispatch } from '../../store/AppContext';
 import clsx from 'clsx';
 import { buildRunMappingRequest, openRunDialogState, runModeWarning, selectRunMode } from './mappingRunDialog';
+import {
+  NOT_REPORTED,
+  mappingRunOutcomeLines,
+  projectMappingRunOutcome,
+  projectRunRefresh,
+} from './mappingRunOutcome';
 
 const ODI_SCHEMA_TO_DB_SCHEMA = {
   SRC_HR: 'HR',
@@ -20,6 +26,59 @@ function displayDbTable(value) {
       return text.replace(/^([A-Z0-9_]+)\./i, (match, schema) => `${ODI_SCHEMA_TO_DB_SCHEMA[schema.toUpperCase()] || schema}.`);
     })
     .join(', ');
+}
+
+function LastRunPanel({ outcome, onClose, onRefresh }) {
+  const lines = mappingRunOutcomeLines(outcome).filter(([label]) => label !== 'Result');
+  return (
+    <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Last run</span>
+        <span className={clsx(
+          'text-[9px] px-2 py-1 rounded-full font-black uppercase',
+          outcome.successful ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700',
+        )}>
+          {outcome.successful ? 'successful' : 'not successful'}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-[10px]">
+        {lines.map(([label, value]) => (
+          <div
+            key={label}
+            className={clsx(
+              'bg-white rounded-lg border border-slate-100 p-2',
+              (label === 'Scenario' || label === 'Error' || label === 'Batch' || label === 'Session' || label === 'Counts') && 'col-span-2',
+              label === 'Error' && value !== NOT_REPORTED && !outcome.successful && 'border-rose-100 bg-rose-50',
+            )}
+          >
+            <div className="text-slate-400 font-bold uppercase mb-1">{label}</div>
+            <div className={clsx(
+              'font-mono break-all',
+              label === 'Error' && value !== NOT_REPORTED && !outcome.successful ? 'text-rose-700' : 'text-slate-700',
+            )}>
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onRefresh}
+          className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[10px] font-bold text-slate-600 hover:bg-slate-50"
+        >
+          Refresh
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[10px] font-bold text-slate-600 hover:bg-slate-50"
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function mappingContext(mapping = {}) {
@@ -42,6 +101,7 @@ export function MappingList() {
   const [mappingState, setMappingState] = useState(null);
   const [stateLoading, setStateLoading] = useState(false);
   const [runDialog, setRunDialog] = useState(null);
+  const [lastRuns, setLastRuns] = useState({});
   const autoSelectedRef = useRef(false);
 
   const showToast = useCallback((message, type = 'success') => {
@@ -116,18 +176,60 @@ export function MappingList() {
     const name = request.mapping_name;
     const truncateTargetTable = request.truncate_target_table;
     setRunDialog(null);
+    setLastRuns((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
     setRunStatus(p => ({ ...p, [name]: 'running' }));
     try {
       const res = await runMapping(request);
-      if (res.error) throw new Error(res.error);
-      const mode = truncateTargetTable ? 'with target truncate' : 'without target truncate';
-      showToast(`${name} scenario ran successfully ${mode}.`, 'success');
-      setRunStatus(p => ({ ...p, [name]: 'done' }));
+      const outcome = projectMappingRunOutcome({ httpStatus: 200, payload: res });
+      setLastRuns((prev) => ({ ...prev, [name]: outcome }));
+      if (outcome.successful) {
+        const mode = truncateTargetTable ? 'with target truncate' : 'without target truncate';
+        showToast(`${name} scenario ran successfully ${mode}.`, 'success');
+        setRunStatus(p => ({ ...p, [name]: 'done' }));
+      } else {
+        const reason = outcome.error !== NOT_REPORTED ? outcome.error : outcome.overallStatus;
+        showToast(`Scenario run failed: ${reason}`, 'error');
+        setRunStatus(p => ({ ...p, [name]: 'error' }));
+      }
     } catch (e) {
+      const outcome = projectMappingRunOutcome({
+        httpStatus: typeof e?.status === 'number' ? e.status : null,
+        payload: e?.body,
+        thrown: e,
+      });
+      setLastRuns((prev) => ({ ...prev, [name]: outcome }));
       showToast(`Scenario run failed: ${e.message}`, 'error');
       setRunStatus(p => ({ ...p, [name]: 'error' }));
     } finally {
       setTimeout(() => setRunStatus(p => { const n = {...p}; delete n[name]; return n; }), 4000);
+    }
+  };
+
+  const closeLastRun = (name) => {
+    setLastRuns((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+  };
+
+  const refreshLastRun = async (name) => {
+    const current = lastRuns[name];
+    if (!current) return;
+    try {
+      const response = await getMappingState(name);
+      const refreshed = projectRunRefresh(current, response);
+      if (!refreshed.applied) {
+        showToast('Saved state does not match this run.', 'error');
+        return;
+      }
+      setLastRuns((prev) => ({ ...prev, [name]: refreshed.outcome }));
+    } catch (err) {
+      showToast(`Could not refresh run state: ${err.message}`, 'error');
     }
   };
 
@@ -399,6 +501,13 @@ export function MappingList() {
                 </div>
 
                 <div className="flex-1 overflow-y-auto custom-scrollbar space-y-6 pr-1">
+                  {lastRuns[detail.MAPPING_NAME] && (
+                    <LastRunPanel
+                      outcome={lastRuns[detail.MAPPING_NAME]}
+                      onClose={() => closeLastRun(detail.MAPPING_NAME)}
+                      onRefresh={() => refreshLastRun(detail.MAPPING_NAME)}
+                    />
+                  )}
                   {/* Metadata Stacked */}
                   <div className="flex flex-col gap-2">
                     <div className="p-3 rounded-xl bg-indigo-50/40 border border-indigo-100">
