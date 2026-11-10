@@ -34,7 +34,7 @@ def test_explicit_load_types_in_english_and_turkish(wording, load_type):
 
 @pytest.mark.parametrize(("wording", "keys"), [
     ("key ID", ["ID"]),
-    ("on CUSTOMER_ID", ["CUSTOMER_ID"]),
+    ("upsert on CUSTOMER_ID", ["CUSTOMER_ID"]),
     ("primary key CUSTOMER_ID, REGION_ID", ["CUSTOMER_ID", "REGION_ID"]),
     ("anahtar müşteri_id ve region_id", ["MUSTERI_ID", "REGION_ID"]),
     ("CUSTOMER_ID anahtarı", ["CUSTOMER_ID"]),
@@ -133,6 +133,7 @@ def test_user_fields_survive_missing_llm_fields():
     assert "mapping_name" not in result
     assert result["load_type"] == "truncate_load"
     assert result["key_columns"] == ["ORDER_ID"]
+    assert result["warnings"] == ["Datamart targets are supported only for Type 2 history."]
 
 
 def test_datamart_keeps_explicit_target_without_inventing_generic_name():
@@ -147,11 +148,12 @@ def test_datamart_keeps_explicit_target_without_inventing_generic_name():
     assert result["load_type"] == "type2"
 
 
-def test_no_convention_for_other_layer_leaves_mapping_name_open():
+def test_no_recognized_layer_keeps_validated_llm_target_as_suggestion():
     result = normalize_mapping_request("Model HR.ORDERS into silver layer", RAW)
     assert "mapping_name" not in result
     assert "target_layer" not in result
-    assert "target_table" not in result
+    assert result["target_table"] == "ODS_HR_ORDERS"
+    assert "target_table" not in result["stated_fields"]
 
 
 def test_llm_identifier_hints_are_checked_before_use():
@@ -179,6 +181,134 @@ def test_update_keeps_validated_existing_change_fields():
                            "changes": {"tgt_table": "X;DROP"}},
     )
     assert "changes" not in bad
+
+
+@pytest.mark.parametrize("wording", [
+    "do not truncate", "don't truncate", "never truncate", "not a full reload",
+    "without history", "do not merge", "not type 2", "no SCD2",
+    "truncate yapma", "truncate etme", "tip 2 değil", "tarihçeli olmasın",
+    "truncate hariç", "type 2 tarihçesiz", "not type 2 history",
+    "type 2 history değil",
+])
+def test_negated_load_phrase_never_prefills_a_type(wording):
+    result = normalize_mapping_request(f"Model HR.ORDERS into ODS, {wording}", {})
+    assert "load_type" not in result
+
+
+@pytest.mark.parametrize(("wording", "expected"), [
+    ("do not truncate, use merge", "insert_update"),
+    ("not type 2, truncate insert", "truncate_load"),
+    ("do not truncate and do not merge", None),
+    ("type 1 and type 2", None),
+])
+def test_only_one_positive_load_type_survives_negation(wording, expected):
+    result = normalize_mapping_request(f"Model HR.ORDERS into ODS, {wording}", {})
+    assert result.get("load_type") == expected
+
+
+@pytest.mark.parametrize("table", ["TRUNCATE", "MERGE", "UPSERT", "HISTORY", "SCD2"])
+def test_qualified_table_name_is_not_a_load_instruction(table):
+    result = normalize_mapping_request(f"Model HR.{table} into ODS", {})
+    assert result["source_table"] == table
+    assert "load_type" not in result
+    assert "key_columns" not in result
+
+
+@pytest.mark.parametrize(("message", "owner", "table"), [
+    ("Model the ORDERS table into the ODS layer", None, "ORDERS"),
+    ("Load from the HR.ORDERS table into ODS", "HR", "ORDERS"),
+    ("ORDERS tablosunu ODS katmanına modelle", None, "ORDERS"),
+    ("HR.ORDERS tablosundan ODS katmanına aktar", "HR", "ORDERS"),
+])
+def test_source_extraction_handles_articles_and_turkish_suffixes(message, owner, table):
+    result = normalize_mapping_request(message, {"src_table": "SH.CUSTOMERS"})
+    assert result["source_table"] == table
+    assert result.get("source_schema") == owner
+    assert result["src_table"] == table
+
+
+def test_source_schema_table_pair_never_mix_disagreeing_origins():
+    message = "Model the ORDERS table into ODS"
+    same = normalize_mapping_request(message, {"src_table": "HR.ORDERS"})
+    other = normalize_mapping_request(message, {"src_table": "SH.CUSTOMERS"})
+    stated = normalize_mapping_request("Model HR.ORDERS into ODS", {"src_table": "SH.CUSTOMERS"})
+    assert (same["source_schema"], same["source_table"]) == ("HR", "ORDERS")
+    assert "source_schema" not in same["stated_fields"]
+    assert "source_schema" not in other
+    assert other["source_table"] == "ORDERS"
+    assert "target_table" not in other
+    assert (stated["source_schema"], stated["source_table"]) == ("HR", "ORDERS")
+
+
+@pytest.mark.parametrize("wording", [
+    "column KEY and STATUS", "upsert on Monday", "key ORDER ID",
+    "on CUSTOMER_ID", "key A, BAD;DROP", "key today", "upsert on bugün",
+])
+def test_ambiguous_or_invalid_key_tail_is_absent(wording):
+    result = normalize_mapping_request(f"Model HR.ORDERS into ODS, {wording}", {})
+    assert "key_columns" not in result
+
+
+@pytest.mark.parametrize(("wording", "expected"), [
+    ("upsert on the ORDER_ID", ["ORDER_ID"]),
+    ("key A, B", ["A", "B"]),
+    ("key A and B", ["A", "B"]),
+    ("anahtar MUSTERI_ID", ["MUSTERI_ID"]),
+])
+def test_explicit_valid_key_list_survives(wording, expected):
+    result = normalize_mapping_request(f"Model HR.ORDERS into ODS, {wording}", {})
+    assert result["key_columns"] == expected
+
+
+def test_datamart_warning_is_fixed_and_only_type2_avoids_it():
+    raw = {"warnings": ["untrusted warning"]}
+    truncate = normalize_mapping_request("Model HR.ORDERS into DM as truncate insert", raw)
+    unknown = normalize_mapping_request("Model HR.ORDERS into datamart", raw)
+    type2 = normalize_mapping_request("Model HR.ORDERS into data mart as Type 2", raw)
+    warning = "Datamart targets are supported only for Type 2 history."
+    assert truncate["warnings"] == [warning]
+    assert unknown["warnings"] == [warning]
+    assert "warnings" not in type2
+
+
+def test_no_layer_llm_hints_are_validated_and_marked_as_suggestions():
+    raw = {"src_table": "HR.EMPLOYEES", "tgt_owner": "DWH",
+           "tgt_table": "ODS_HR_EMPLOYEES", "load_type": "type2",
+           "key_columns": ["EMPLOYEE_ID"], "stated_fields": ["source_table"]}
+    result = normalize_mapping_request("hello there", raw)
+    assert (result["source_schema"], result["source_table"]) == ("HR", "EMPLOYEES")
+    assert (result["target_schema"], result["target_table"]) == ("DWH", "ODS_HR_EMPLOYEES")
+    assert result["src_table"] == "EMPLOYEES"
+    assert result["stated_fields"] == []
+    assert "load_type" not in result and "key_columns" not in result
+
+
+def test_type2_long_generated_name_is_omitted_but_explicit_name_is_preserved():
+    long_name = "MAP_HR_ORDER_LINE_ITEM_HISTORY_TO_EDW"
+    assert len(long_name) == 37
+    generated = normalize_mapping_request(
+        "Model HR.ORDER_LINE_ITEM_HISTORY into EDW as Type 2", {})
+    explicit = normalize_mapping_request(
+        f"Model HR.ORDERS into EDW as Type 2, mapping name {long_name}", {})
+    assert "mapping_name" not in generated
+    assert "warnings" not in generated
+    assert explicit["mapping_name"] == long_name
+    assert explicit["warnings"] == [
+        "Mapping name is longer than 31 characters; Type 2 requires a shorter name."]
+
+
+def test_type2_proposal_fixture_has_unqualified_wizard_source_fields():
+    result = normalize_mapping_request(
+        "Model HR.ORDERS into EDW as Type 2, key ORDER_ID", {})
+    assert {key: result[key] for key in (
+        "src_model", "src_schema", "src_table", "tgt_model", "tgt_owner",
+        "tgt_table", "mapping_name", "load_type", "key_columns",
+    )} == {
+        "src_model": "ORACLE_SOURCE", "src_schema": "HR", "src_table": "ORDERS",
+        "tgt_model": "ORACLE_DWH", "tgt_owner": "DWH", "tgt_table": "EDW_HR_ORDERS",
+        "mapping_name": "MAP_HR_ORDERS_TO_EDW", "load_type": "type2",
+        "key_columns": ["ORDER_ID"],
+    }
 
 
 def test_api_ask_returns_normalized_proposal_without_raw_llm_text(app_client, monkeypatch):

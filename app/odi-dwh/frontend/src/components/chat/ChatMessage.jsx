@@ -147,6 +147,7 @@ function LlmRuntimeStatusCard({ query }) {
 
 function MappingRequestCard({ mappingRequest, onWizardOpen }) {
   const op = mappingRequest?.operation || 'CREATE';
+  const details = mappingRequestDetails(mappingRequest);
   const colors = {
     CREATE: 'border-purple-200 bg-purple-50',
     UPDATE: 'border-amber-200 bg-amber-50',
@@ -176,24 +177,22 @@ function MappingRequestCard({ mappingRequest, onWizardOpen }) {
           ODI Mapping {op === 'CREATE' ? 'Create' : op === 'UPDATE' ? 'Update' : 'Delete'} Request
         </span>
       </div>
-      {mappingRequest?.mapping_name && (
-        <p className="text-xs text-slate-600 mb-1">
-          <strong>Mapping:</strong> {mappingRequest.mapping_name}
-        </p>
-      )}
-      {mappingRequest?.src_table && (
-        <p className="text-xs text-slate-600 mb-1">
-          <strong>Source:</strong> {mappingRequest.src_table}
-        </p>
-      )}
-      {mappingRequest?.tgt_table && (
-        <p className="text-xs text-slate-600 mb-3">
-          <strong>Target:</strong> {mappingRequest.tgt_table}
-        </p>
-      )}
-      {mappingRequestDetails(mappingRequest).map(([label, value]) => (
-        <p key={label} className="text-xs text-slate-600 mb-1">
-          <strong>{label}:</strong> {value}
+      {[
+        ['From your message', details.stated],
+        ['Suggested by assistant', details.suggested],
+      ].filter(([, rows]) => rows.length).map(([group, rows]) => (
+        <div key={group} className="mb-2">
+          <p className="text-xs font-semibold text-slate-500 mb-1">{group}</p>
+          {rows.map(([label, value]) => (
+            <p key={label} className="text-xs text-slate-600 mb-1">
+              <strong>{label}:</strong> {value}
+            </p>
+          ))}
+        </div>
+      ))}
+      {details.warnings.map(warning => (
+        <p key={warning} role="alert" className="text-xs text-amber-800 mb-2">
+          <strong>Warning:</strong> {warning}
         </p>
       ))}
       <button
