@@ -62,7 +62,7 @@ const ownerProposals = [
 ].map(([label, sourceTable, layer, targetOwner, targetTable, mappingName, loadType, keys, statedTarget]) => {
   const proposal = {
     operation: 'CREATE', source_schema: 'DWH', source_table: sourceTable,
-    src_model: 'ORACLE_SOURCE', src_schema: 'DWH', src_table: sourceTable,
+    src_model: 'ORACLE_DWH', src_schema: 'DWH', src_table: sourceTable,
     target_layer: layer, target_schema: targetOwner, target_table: targetTable,
     tgt_owner: targetOwner, tgt_table: targetTable, load_type: loadType,
     stated_fields: [
@@ -97,6 +97,7 @@ test('owner proposals and both sentence orders prefill wizard and Type 2 handoff
         needs_skey: false, skey_natural_key: '', description: '', drop_target_if_exists: false,
       };
       const context = `${label}-${order}`;
+      assert.equal(form.src_model, 'ORACLE_DWH', context);
       assert.equal(form.src_schema, 'DWH', context);
       assert.equal(form.src_table, sourceTable, context);
       assert.equal(form.tgt_owner, targetOwner, context);
@@ -107,6 +108,7 @@ test('owner proposals and both sentence orders prefill wizard and Type 2 handoff
       assert.deepEqual(mappingRequestDetails(value).warnings, [], context);
       if (loadType === 'type2') {
         const handoff = buildScd2Handoff(form).payload.props.mappingRequest;
+        assert.equal(handoff.src_model, 'ORACLE_DWH', context);
         assert.equal(handoff.src_schema, 'DWH', context);
         assert.equal(handoff.src_table, sourceTable, context);
         assert.equal(handoff.tgt_owner, targetOwner, context);

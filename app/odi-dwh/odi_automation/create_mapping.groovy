@@ -282,6 +282,7 @@ try {
         println "INTEGRATION TYPE VERIFY: ${tgtComp.getIntegrationType()}"
     }
     boolean integrationTypeSet = controlAppend
+    String integrationTypeEarlyFailure = null
     if (!controlAppend) try {
         tgtComp.setIntegrationTypeCode("IU")
         println "INTEGRATION TYPE: IU (Incremental Update) → ${tgtDSName}"
@@ -301,8 +302,8 @@ try {
                 println "INTEGRATION TYPE: IU forced via reflection → ${tgtDSName}"
                 integrationTypeSet = true
             } catch (Exception ite3) {
-                println "WARNING: Integration Type IU failed: ${ite.getClass().getSimpleName()}"
-                println "         IKM Oracle Merge may not be visible. Set it manually in ODI Studio."
+                // A later setIntegrationType may still verify. Warn only if it does not.
+                integrationTypeEarlyFailure = ite.getClass().getSimpleName()
             }
         }
     }
@@ -451,12 +452,25 @@ try {
         throw new Exception("Required update key is missing or mismatched")
     }
     if (!requiredUpdateKeyColumns.isEmpty()) {
-        tgtComp.setIntegrationType(DatastoreComponent.INTEGRATION_TYPE_UPDATE)
-        String integrationType = tgtComp.getIntegrationType()
-        if (!DatastoreComponent.INTEGRATION_TYPE_UPDATE.equals(integrationType)) {
-            throw new Exception("Target integration type verify failed")
+        try {
+            tgtComp.setIntegrationType(DatastoreComponent.INTEGRATION_TYPE_UPDATE)
+            String integrationType = tgtComp.getIntegrationType()
+            if (!DatastoreComponent.INTEGRATION_TYPE_UPDATE.equals(integrationType)) {
+                throw new Exception("Target integration type verify failed")
+            }
+            println "INTEGRATION TYPE VERIFY: ${integrationType}"
+            integrationTypeEarlyFailure = null
+        } catch (Exception verifyError) {
+            if (integrationTypeEarlyFailure == null) {
+                integrationTypeEarlyFailure = verifyError.getClass().getSimpleName()
+            }
+            println "WARNING: Integration Type IU failed: ${integrationTypeEarlyFailure}"
+            println "         IKM Oracle Merge may not be visible. Set it manually in ODI Studio."
+            throw verifyError
         }
-        println "INTEGRATION TYPE VERIFY: ${integrationType}"
+    } else if (integrationTypeEarlyFailure != null) {
+        println "WARNING: Integration Type IU failed: ${integrationTypeEarlyFailure}"
+        println "         IKM Oracle Merge may not be visible. Set it manually in ODI Studio."
     }
 
     // Attribute Mapping
@@ -515,6 +529,50 @@ try {
         println "CUSTOM EXPRESSIONS: count=${customExpressions.size()}"
     }
 
+    // Quoted session text is CHAR. A NUMBER column needs TO_NUMBER. When the
+    // attribute type cannot be read, keep the historical quoted literal.
+    String sessionBatchLiteral = "'<%=odiRef.getSession(\"SESS_NO\")%>'"
+    def typedSessionBatch = { attribute ->
+        String quoted = sessionBatchLiteral
+        String typeCode = null
+        Integer length = null
+        Integer scale = null
+        try {
+            def dataType = attribute?.getDataType()
+            if (dataType != null && dataType.getCode() != null) {
+                typeCode = dataType.getCode().toString().trim().toUpperCase(Locale.ROOT)
+            }
+        } catch (Throwable ignoredType) {
+            typeCode = null
+        }
+        if (typeCode == null || typeCode.length() == 0) {
+            return quoted
+        }
+        try {
+            def rawLength = attribute.getLength()
+            if (rawLength != null) length = Integer.valueOf(rawLength.toString())
+        } catch (Throwable ignoredLength) {}
+        try {
+            def rawScale = attribute.getScale()
+            if (rawScale != null) scale = Integer.valueOf(rawScale.toString())
+        } catch (Throwable ignoredScale) {}
+        boolean lengthOk = length != null && length > 0
+        boolean scaleOk = scale != null && scale >= 0
+        String numeric = "TO_NUMBER(" + quoted + ")"
+        if (typeCode == "NUMBER") {
+            if (lengthOk && scaleOk) return "CAST(" + numeric + " AS NUMBER(" + length + "," + scale + "))"
+            if (lengthOk && scale == null) return "CAST(" + numeric + " AS NUMBER(" + length + "))"
+            return numeric
+        }
+        if (typeCode == "FLOAT" && lengthOk && length <= 126) {
+            return "CAST(" + numeric + " AS FLOAT(" + length + "))"
+        }
+        if (typeCode == "BINARY_DOUBLE" || typeCode == "BINARY_FLOAT") {
+            return "CAST(" + numeric + " AS " + typeCode + ")"
+        }
+        return quoted
+    }
+
     tgtComp.getAttributes().each { tAttr ->
         String attrName = tAttr.getName().toUpperCase()
         boolean isUkCol = ukColNames.contains(attrName)
@@ -535,13 +593,13 @@ try {
                     // Priority 3: default values
                     if (attrName == "INSERT_DATE" || attrName == "UPDATE_DATE") tAttr.setExpressionText("CURRENT_TIMESTAMP")
                     else if (attrName == "SOURCE_SYSTEM") tAttr.setExpressionText("'" + sourceSystemName + "'")
-                    else if (attrName == "ETL_BATCH_ID") tAttr.setExpressionText("'<%=odiRef.getSession(\"SESS_NO\")%>'")
+                    else if (attrName == "ETL_BATCH_ID") tAttr.setExpressionText(typedSessionBatch(tAttr))
                 }
             } else {
                 // Priority 3: default values
                 if (attrName == "INSERT_DATE" || attrName == "UPDATE_DATE") tAttr.setExpressionText("CURRENT_TIMESTAMP")
                 else if (attrName == "SOURCE_SYSTEM") tAttr.setExpressionText("'" + sourceSystemName + "'")
-                else if (attrName == "ETL_BATCH_ID") tAttr.setExpressionText("'<%=odiRef.getSession(\"SESS_NO\")%>'")
+                else if (attrName == "ETL_BATCH_ID") tAttr.setExpressionText(typedSessionBatch(tAttr))
             }
         }
 

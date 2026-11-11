@@ -193,3 +193,142 @@ def test_wrapper_proves_explicit_owner_and_context_before_binding(monkeypatch):
     assert params["_odi_source_identity"] == SOURCE
     assert run.call_args.args[1] == {"odi.ikm_name": BASE["ikm_name"], "odi.src_owner": "AUDIT_USER",
                                      "odi.src_table": "ODS_TEST", "odi.context": "GLOBAL"}
+
+
+def _quiet_database(monkeypatch):
+    import db
+
+    class Cursor:
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchone(self):
+            return (0,)
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            return None
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(db, "get_connection", lambda use_ddl=True: Connection())
+
+
+_PREFLIGHT_COLUMNS = (
+    {"COLUMN_NAME": "ENTITY_ID", "ORACLE_TYPE": "NUMBER(10)", "IS_NULLABLE": "N"},
+    {"COLUMN_NAME": "ATTR_TEXT", "ORACLE_TYPE": "VARCHAR2(40)", "IS_NULLABLE": "Y"},
+)
+
+
+def _f1_generator():
+    import odi81_app_acceptance as driver
+
+    generator = mg.MappingGenerator()
+    generator._source_columns_for = lambda _params: [dict(column) for column in _PREFLIGHT_COLUMNS]
+    return generator, driver.classic_params("F1")
+
+
+_NOT_CHECKED = {
+    "status": "not_checked",
+    "mapping_exists": None,
+    "source_datastore_exists": None,
+    "target_datastore_exists": None,
+}
+
+
+def test_internal_preflight_does_not_call_the_repository(monkeypatch):
+    """An internal source answers not_checked and never starts the repository."""
+    _quiet_database(monkeypatch)
+    calls = []
+
+    def preflight(self, **_kwargs):
+        calls.append("preflight_mapping")
+        raise AssertionError("repository preflight must not run")
+
+    def reader(self):
+        calls.append("repo_reader")
+        raise AssertionError("repository reader must not run")
+
+    monkeypatch.setattr(oo.OdiOrchestrator, "preflight_mapping", preflight)
+    monkeypatch.setattr(oo.OdiOrchestrator, "__init__", lambda self, *args, **kwargs: calls.append("orchestrator"))
+    generator, params = _f1_generator()
+    monkeypatch.setattr(
+        generator, "_preflight_odi_repository", lambda self, _params: calls.append("generator_preflight"),
+    )
+    monkeypatch.setattr(
+        generator, "_resolve_odi_repository_bindings", lambda self, _params: calls.append("bindings"),
+    )
+    monkeypatch.setattr(generator, "_get_odi_repo_reader", reader)
+    result = generator.target_table_preflight(params)
+    assert calls == []
+    assert result["repository"] == _NOT_CHECKED
+    assert "error" not in result["repository"]
+
+
+def test_internal_preflight_route_skips_repository_even_if_it_would_explode(app_client, monkeypatch):
+    import odi81_app_acceptance as driver
+
+    _quiet_database(monkeypatch)
+    calls = []
+
+    def explode(self, _params):
+        calls.append("generator_preflight")
+        raise RuntimeError("password=secret host=10.1.2.3")
+
+    monkeypatch.setattr(
+        mg.MappingGenerator, "_source_columns_for",
+        lambda self, _params: [dict(column) for column in _PREFLIGHT_COLUMNS],
+    )
+    monkeypatch.setattr(mg.MappingGenerator, "_preflight_odi_repository", explode)
+    monkeypatch.setattr(
+        mg.MappingGenerator, "_resolve_odi_repository_bindings",
+        lambda self, _params: calls.append("bindings"),
+    )
+    response = app_client.post("/api/mapping/target-preflight", json=driver.classic_params("F1"))
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["status"] == "OK"
+    assert body["repository"] == _NOT_CHECKED
+    assert "error" not in body["repository"]
+    assert calls == []
+    text = response.get_data(as_text=True)
+    assert "secret" not in text and "10.1.2.3" not in text and "RuntimeError" not in text
+
+
+def test_external_preflight_keeps_the_reader_path(monkeypatch):
+    """External failure text is the exception's first line, as on a645d5a."""
+    _quiet_database(monkeypatch)
+    called = []
+    monkeypatch.setattr(
+        mg.MappingGenerator, "_preflight_odi_repository", lambda self, params: called.append(params),
+    )
+    generator, params = _f1_generator()
+    params = dict(params, src_model="ORACLE_SOURCE")
+    reader = Mock()
+    found = {"model_code": "ORACLE_SOURCE", "datastore_name": "ODI81N_SRC_F1", "datastore_exists": True}
+    reader.resolve_datastore.return_value = found
+    reader.resolve_model.return_value = found
+    reader.mapping_exists.return_value = None
+    monkeypatch.setattr(generator, "_get_odi_repo_reader", lambda: reader)
+    result = generator.target_table_preflight(params)
+    assert called == []
+    assert result["repository"]["status"] == "passed"
+    assert result["repository"]["mapping_exists"] is False
+    assert result["repository"]["source_datastore_exists"] is True
+    assert "error" not in result["repository"]
+    reader.resolve_datastore.side_effect = RuntimeError("password=secret\nhost=10.1.2.3")
+    failed = generator.target_table_preflight(params)
+    assert failed["repository"]["status"] == "unavailable"
+    assert failed["repository"]["error"] == "password=secret"
+    assert failed["repository"]["mapping_exists"] is None
+    assert failed["repository"]["source_datastore_exists"] is None
+    assert failed["repository"]["target_datastore_exists"] is None
+    assert failed["repository"]["repository_connection_attempted"] is True
+    assert "10.1.2.3" not in json.dumps(failed)

@@ -1,6 +1,25 @@
 const IDENTIFIER = /^[A-Z][A-Z0-9_]{0,127}$/;
 const MAX_KEY_COLUMNS = 8;
 
+// Authority: mapping_generator.CLASSIC_DWH_SOURCE_OWNER. The drift test fails
+// when that constant changes. Only this owner is proposed as ORACLE_DWH.
+export const DEFAULT_SOURCE_MODEL = 'ORACLE_SOURCE';
+export const INTERNAL_SOURCE_MODEL = 'ORACLE_DWH';
+export const INTERNAL_SOURCE_OWNERS = Object.freeze(['DWH']);
+
+export function resolveWizardSourceModel(form = {}) {
+  if (form.src_model_from_prefill === true || form.src_model_touched === true) {
+    return form.src_model;
+  }
+  const schema = String(form.src_schema || '').trim().toUpperCase();
+  const model = form.src_model;
+  const emptyDefault = model == null || model === '' || model === DEFAULT_SOURCE_MODEL;
+  if (form.src_schema_typed === true && emptyDefault && INTERNAL_SOURCE_OWNERS.includes(schema)) {
+    return INTERNAL_SOURCE_MODEL;
+  }
+  return model;
+}
+
 export const LOAD_TYPES = Object.freeze([
   { value: 'insert_update', label: 'Insert / update (needs key columns)' },
   { value: 'truncate_load', label: 'Truncate and reload' },
@@ -66,7 +85,7 @@ export function buildMappingRequest(form) {
     approved: true,
     engine: 'classic',
     params: {
-      src_model: form.src_model,
+      src_model: resolveWizardSourceModel(form),
       src_table: form.src_table,
       src_schema: form.src_schema,
       tgt_model: form.tgt_model,
@@ -112,6 +131,51 @@ export function buildScd2Handoff(form) {
       },
     },
   };
+}
+
+const stripHelpLinks = (text = '') => String(text).replace(/\s*Help:\s*https?:\/\/\S+/gi, '').trim();
+
+export function getFriendlyFailure(text = '') {
+  const cleaned = stripHelpLinks(text);
+  const lower = cleaned.toLowerCase();
+
+  if (cleaned.includes('ORA-01031')) {
+    return 'The target table already exists, but this connection is not allowed to drop it. Retry with "Drop target table if it exists" turned off, or ask a DBA to drop the table or grant the required permission.';
+  }
+
+  if (cleaned.includes('ORA-00955')) {
+    return 'The target table or another database object with this name already exists. Retry without dropping the table, or choose a different target table name.';
+  }
+
+  if (cleaned.includes('ODI-10178')) {
+    return 'ODI could not open the repository connection. Check the local ODI connection setup, then retry.';
+  }
+
+  if (lower.includes('datastore')) {
+    return 'The target table step finished, but ODI table registration did not complete. Check the ODI repository connection and retry.';
+  }
+
+  if (lower.includes('mapping')) {
+    return 'The target table step finished, but ODI mapping creation did not complete. Check the ODI error details and retry.';
+  }
+
+  if (cleaned) {
+    return 'The run stopped before completion. Review the technical details or retry after fixing the highlighted step.';
+  }
+
+  return 'The run stopped before completion.';
+}
+
+export const AUDIT_PRESERVATION_REJECTED_CODE = 'audit_preservation_rejected';
+export const AUDIT_PRESERVATION_REJECTED_MESSAGE =
+  "The target table's audit column types are not supported for audit preservation. Nothing was created.";
+
+export function selectWizardFailureMessage(result, text) {
+  if (result?.error_code === AUDIT_PRESERVATION_REJECTED_CODE) {
+    return AUDIT_PRESERVATION_REJECTED_MESSAGE;
+  }
+  if (!text) return '';
+  return getFriendlyFailure(text);
 }
 
 export function getMappingOutcome(result) {

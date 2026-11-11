@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
+  AUDIT_PRESERVATION_REJECTED_MESSAGE,
   LOAD_TYPES,
   buildMappingRequest,
   buildScd2Handoff,
   getLoadOptionError,
   getMappingOutcome,
   prefillLoadOptions,
+  selectWizardFailureMessage,
 } from './mappingWizardRequests.js';
 
 const form = {
@@ -154,6 +157,216 @@ test('Type 2 creates only the exact SCD2 modal handoff with current form values'
   });
   assert.throws(() => buildMappingRequest({ ...form, load_type: 'type2' }), /SCD2 wizard/);
   assert.throws(() => buildScd2Handoff(form), /Choose Type 2/);
+});
+
+test('only a typed empty-form DWH schema selects the internal source model', () => {
+  const typed = buildMappingRequest({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'DWH', src_schema_typed: true,
+  });
+  assert.equal(typed.params.src_model, 'ORACLE_DWH');
+  const lower = buildMappingRequest({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: ' dwh ', src_schema_typed: true,
+  });
+  assert.equal(lower.params.src_model, 'ORACLE_DWH');
+  for (const schema of ['ODS', 'AUDIT_USER', 'DWH_FLAT', 'HR']) {
+    const request = buildMappingRequest({
+      ...form, src_model: 'ORACLE_SOURCE', src_schema: schema, src_schema_typed: true,
+    });
+    assert.equal(request.params.src_model, 'ORACLE_SOURCE', schema);
+  }
+  const untouched = buildMappingRequest({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'DWH',
+  });
+  assert.equal(untouched.params.src_model, 'ORACLE_SOURCE');
+});
+
+test('a prefilled source model and the Type 2 handoff stay exactly as received', () => {
+  const prefilled = buildMappingRequest({
+    ...form,
+    src_model: 'ORACLE_SOURCE',
+    src_schema: 'DWH',
+    src_model_from_prefill: true,
+    src_schema_typed: true,
+  });
+  assert.equal(prefilled.params.src_model, 'ORACLE_SOURCE');
+  const handoff = buildScd2Handoff({
+    ...form,
+    src_model: 'ORACLE_SOURCE',
+    src_schema: 'DWH',
+    load_type: 'type2',
+    src_model_from_prefill: true,
+    src_schema_typed: true,
+  });
+  assert.equal(handoff.payload.props.mappingRequest.src_model, 'ORACLE_SOURCE');
+  const typedHandoff = buildScd2Handoff({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'DWH', load_type: 'type2', src_schema_typed: true,
+  });
+  assert.equal(typedHandoff.payload.props.mappingRequest.src_model, 'ORACLE_SOURCE');
+});
+
+test('a touched source model and an external schema stay as entered', () => {
+  const touched = buildMappingRequest({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'DWH', src_model_touched: true, src_schema_typed: true,
+  });
+  assert.equal(touched.params.src_model, 'ORACLE_SOURCE');
+  const external = buildMappingRequest({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'HR', src_schema_typed: true,
+  });
+  assert.equal(external.params.src_model, 'ORACLE_SOURCE');
+});
+
+test('only the source model field marks the model as touched', () => {
+  const source = readFileSync(new URL('./MappingWizard.jsx', import.meta.url), 'utf8');
+  assert.equal(source.split('src_model_touched').length - 1, 1);
+  assert.match(source, /src_model: e\.target\.value, src_model_touched: true/);
+  assert.match(source, /src_model_from_prefill: typeof initialData\.src_model === 'string'/);
+  assert.match(source, /src_schema: e\.target\.value, src_schema_typed: true/);
+  assert.match(source, /const requestedSourceModel = resolveWizardSourceModel\(form\)/);
+});
+
+const MAPPING_STEP_TEXT = 'The target table step finished, but ODI mapping creation did not complete. Check the ODI error details and retry.';
+
+test('audit preservation rejection uses its sentence and other failures keep the old text', () => {
+  const rejected = {
+    overall_status: 'FAILED',
+    error_code: 'audit_preservation_rejected',
+    error: 'mapping generation failed.',
+    error_type: 'OperationError',
+  };
+  assert.equal(selectWizardFailureMessage(rejected, rejected.error), AUDIT_PRESERVATION_REJECTED_MESSAGE);
+  assert.equal(
+    AUDIT_PRESERVATION_REJECTED_MESSAGE,
+    "The target table's audit column types are not supported for audit preservation. Nothing was created.",
+  );
+  const other = {
+    overall_status: 'FAILED',
+    error: 'mapping generation failed.',
+    error_type: 'OperationError',
+  };
+  assert.equal(selectWizardFailureMessage(other, other.error), MAPPING_STEP_TEXT);
+  assert.equal(selectWizardFailureMessage({ overall_status: 'SUCCESS' }, ''), '');
+});
+
+test('Type 2 handoff payloads equal the a645d5a buildScd2Handoff literals', () => {
+  const untouched = {
+    src_model: 'ORACLE_SOURCE',
+    src_table: 'ODI81N_SRC_F1',
+    src_schema: 'DWH',
+    src_schema_typed: true,
+    tgt_model: 'ORACLE_ODS',
+    tgt_owner: 'DWH',
+    tgt_table: 'ODS_ODI81N_F1',
+    needs_skey: false,
+    skey_natural_key: '',
+    description: 'Untouched model',
+    mapping_name: '',
+    drop_target_if_exists: false,
+    load_type: 'type2',
+    key_columns: 'ENTITY_ID',
+  };
+  assert.deepEqual(buildScd2Handoff(untouched), {
+    type: 'OPEN_MODAL',
+    payload: {
+      type: 'scd2',
+      props: {
+        mappingRequest: {
+          src_model: 'ORACLE_SOURCE',
+          src_table: 'ODI81N_SRC_F1',
+          src_schema: 'DWH',
+          tgt_model: 'ORACLE_ODS',
+          tgt_owner: 'DWH',
+          tgt_table: 'ODS_ODI81N_F1',
+          needs_skey: false,
+          skey_natural_key: '',
+          description: 'Untouched model',
+          mapping_name: '',
+          drop_target_if_exists: false,
+          load_type: 'type2',
+          key_columns: ['ENTITY_ID'],
+        },
+      },
+    },
+  });
+  const prefilled = {
+    src_model: 'ORACLE_SOURCE',
+    src_model_from_prefill: true,
+    src_schema_typed: true,
+    src_table: 'ORDERS',
+    src_schema: 'DWH',
+    tgt_model: 'DWH',
+    tgt_owner: 'DWH',
+    tgt_table: 'DWH_ORDERS',
+    needs_skey: true,
+    skey_natural_key: 'ORDER_ID',
+    description: 'Prefilled source model',
+    mapping_name: 'MAP_ORDERS_T2',
+    drop_target_if_exists: true,
+    load_type: 'type2',
+    key_columns: 'ORDER_ID, LINE_ID',
+  };
+  assert.deepEqual(buildScd2Handoff(prefilled), {
+    type: 'OPEN_MODAL',
+    payload: {
+      type: 'scd2',
+      props: {
+        mappingRequest: {
+          src_model: 'ORACLE_SOURCE',
+          src_table: 'ORDERS',
+          src_schema: 'DWH',
+          tgt_model: 'DWH',
+          tgt_owner: 'DWH',
+          tgt_table: 'DWH_ORDERS',
+          needs_skey: true,
+          skey_natural_key: 'ORDER_ID',
+          description: 'Prefilled source model',
+          mapping_name: 'MAP_ORDERS_T2',
+          drop_target_if_exists: true,
+          load_type: 'type2',
+          key_columns: ['ORDER_ID', 'LINE_ID'],
+        },
+      },
+    },
+  });
+  const typed = {
+    src_model: 'MDL_SRC_ORACLE_HR',
+    src_model_touched: true,
+    src_schema_typed: true,
+    src_table: 'EMPLOYEES',
+    src_schema: 'HR',
+    tgt_model: 'ORACLE_DWH',
+    tgt_owner: 'DWH',
+    tgt_table: 'DWH_EMPLOYEES',
+    needs_skey: false,
+    skey_natural_key: '',
+    description: 'Typed source model',
+    mapping_name: 'MAP_EMP_T2',
+    drop_target_if_exists: false,
+    load_type: 'type2',
+    key_columns: 'EMPLOYEE_ID',
+  };
+  assert.deepEqual(buildScd2Handoff(typed), {
+    type: 'OPEN_MODAL',
+    payload: {
+      type: 'scd2',
+      props: {
+        mappingRequest: {
+          src_model: 'MDL_SRC_ORACLE_HR',
+          src_table: 'EMPLOYEES',
+          src_schema: 'HR',
+          tgt_model: 'ORACLE_DWH',
+          tgt_owner: 'DWH',
+          tgt_table: 'DWH_EMPLOYEES',
+          needs_skey: false,
+          skey_natural_key: '',
+          description: 'Typed source model',
+          mapping_name: 'MAP_EMP_T2',
+          drop_target_if_exists: false,
+          load_type: 'type2',
+          key_columns: ['EMPLOYEE_ID'],
+        },
+      },
+    },
+  });
 });
 
 test('result summary uses only actual response fields', () => {

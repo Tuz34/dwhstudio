@@ -71,6 +71,8 @@ class TargetTableBlockedError(RuntimeError):
 class AuditPreservationRejected(ValueError):
     """Same-schema audit SQL failed static validation before any DDL."""
 
+    error_code = "audit_preservation_rejected"
+
 
 class UpdateKeyRequiredError(ValueError):
     """A merge/update KM would run without an update key (structured code update_key_required)."""
@@ -90,6 +92,18 @@ class RepositoryPreflightBlockedError(RuntimeError):
         if detail.get("code") == "ikm_not_imported":
             self.error_code = "ikm_not_imported"
 
+
+class SourceTableNotFound(LookupError):
+    """Source columns were not visible through the selected source model."""
+
+    def __init__(self, src_model: object) -> None:
+        text = str(src_model or "").strip().upper()
+        if not _IDENTIFIER_RE.fullmatch(text):
+            text = "UNKNOWN"
+        self.src_model = text
+        super().__init__(f"Source table not found through source model {text}")
+
+
 def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> str:
     """Escape single quotes in an Oracle SQL literal."""
     text = (value or fallback).strip() or fallback
@@ -98,6 +112,149 @@ def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> s
 
 _SOURCE_SYSTEM_LITERAL = _sql_string_literal(SOURCE_SYSTEM_NAME, "ORACLE_SOURCE")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
+# Only the DWH owner is proposed as ORACLE_DWH. ODS, AUDIT_USER and DWH_FLAT
+# keep the external source model. INTERNAL_SOURCE_MODELS is the read path for
+# a caller that already chose ORACLE_ODS or ORACLE_DWH; it is not this map.
+CLASSIC_DWH_SOURCE_OWNER = "DWH"
+CLASSIC_INTERNAL_SOURCE_MODEL = "ORACLE_DWH"
+_AUDIT_DEFAULT_TAIL_RE = re.compile(r"\s+DEFAULT\s+.*\Z", re.IGNORECASE | re.DOTALL)
+_AUDIT_NOT_NULL_RE = re.compile(r"\s+NOT\s+NULL\s*\Z", re.IGNORECASE)
+_AUDIT_TYPE_RE = re.compile(
+    r"(?:"
+    r"TIMESTAMP(?:\(\d+\))?(?: WITH LOCAL TIME ZONE| WITH TIME ZONE)?"
+    r"|DATE"
+    r"|NUMBER(?:\(\d+(?:,\d+)?\))?"
+    r"|FLOAT(?:\(\d+\))?"
+    r"|BINARY_DOUBLE|BINARY_FLOAT"
+    r"|VARCHAR2\(\d+(?: BYTE| CHAR)?\)"
+    r"|NVARCHAR2\(\d+\)"
+    r"|CHAR\(\d+(?: BYTE| CHAR)?\)"
+    r"|NCHAR\(\d+\)"
+    r")\Z"
+)
+
+
+def classic_internal_source_model(owner: object) -> str | None:
+    """Return ORACLE_DWH for the DWH owner, or None for every other owner."""
+    text = str(owner or "").strip().upper()
+    if text == CLASSIC_DWH_SOURCE_OWNER:
+        return CLASSIC_INTERNAL_SOURCE_MODEL
+    return None
+
+
+def _canonical_audit_type(type_sql: object) -> str:
+    """Oracle datatype of one planned target column, without DEFAULT or nullability."""
+    text = " ".join(str(type_sql or "").strip().upper().split())
+    text = _AUDIT_DEFAULT_TAIL_RE.sub("", text).strip()
+    text = _AUDIT_NOT_NULL_RE.sub("", text).strip()
+    text = re.sub(r"\s*\(\s*", "(", text)
+    text = re.sub(r"\s*,\s*", ",", text)
+    text = re.sub(r"\s*\)", ")", text)
+    text = re.sub(r"\s+", " ", text)
+    if not _AUDIT_TYPE_RE.fullmatch(text):
+        raise AuditPreservationRejected("Audit preservation column type is not supported.")
+    return text
+
+
+def _audit_type_family(oracle_type: str) -> str:
+    if oracle_type.startswith("TIMESTAMP"):
+        return "timestamp"
+    if oracle_type == "DATE":
+        return "date"
+    if oracle_type.startswith(("NUMBER", "FLOAT", "BINARY_")):
+        return "number"
+    return "character"
+
+
+# Pre-existing audit defaults and the Oracle type they already have.
+# CURRENT_TIMESTAMP is TIMESTAMP(6) WITH TIME ZONE. TRUNC and TO_DATE are DATE.
+_DATETIME_DEFAULT_TYPE = {
+    "CURRENT_TIMESTAMP": ("timestamp_tz", 6),
+    "TRUNC(CURRENT_TIMESTAMP)": ("date", None),
+    "TO_DATE('9999-12-31','YYYY-MM-DD')": ("date", None),
+}
+_DECLARED_DATETIME_RE = re.compile(
+    r"^(DATE|TIMESTAMP(?:\((\d+)\))?( WITH LOCAL TIME ZONE| WITH TIME ZONE)?)$"
+)
+# Closed table. The generator's audit names are only _AUDIT_COLUMN_ORDER.
+_DATETIME_AUDIT_COLUMNS = frozenset({
+    "INSERT_DATE", "UPDATE_DATE", "EFFECTIVE_FROM", "EFFECTIVE_TO",
+})
+_CHARACTER_AUDIT_COLUMNS = frozenset({"SOURCE_SYSTEM", "CURRENT_FLAG"})
+
+
+def _declared_datetime(oracle_type: str) -> tuple[str, int | None] | None:
+    """Family and precision of a DATE or TIMESTAMP target, or None."""
+    match = _DECLARED_DATETIME_RE.fullmatch(oracle_type)
+    if match is None:
+        return None
+    if match.group(1) == "DATE":
+        return ("date", None)
+    precision = int(match.group(2)) if match.group(2) else 6
+    zone = match.group(3) or ""
+    if zone == " WITH LOCAL TIME ZONE":
+        family = "timestamp_ltz"
+    elif zone == " WITH TIME ZONE":
+        family = "timestamp_tz"
+    else:
+        family = "timestamp"
+    return (family, precision)
+
+
+def _audit_pair_supported(column: str, family: str) -> bool:
+    """True only for the audit column and declared type family pairs we emit."""
+    if column in _DATETIME_AUDIT_COLUMNS:
+        return family in {"date", "timestamp"}
+    if column in _CHARACTER_AUDIT_COLUMNS:
+        return family == "character"
+    if column == "ETL_BATCH_ID":
+        return family in {"number", "character"}
+    return False
+
+
+def _typed_datetime_default(expression: str, oracle_type: str) -> str:
+    """CAST a datetime default unless it already has exactly the declared type.
+
+    DATE targets keep TRUNC(CURRENT_TIMESTAMP) and TO_DATE(...).
+    CURRENT_TIMESTAMP is kept only for TIMESTAMP [ (6) ] WITH TIME ZONE.
+    Every other supported datetime type is CAST(<expression> AS <declared type>).
+    """
+    current = _DATETIME_DEFAULT_TYPE.get(expression)
+    declared = _declared_datetime(oracle_type)
+    if declared is None:
+        raise AuditPreservationRejected("Audit preservation column type is not supported.")
+    if current is not None and current == declared:
+        return expression
+    return f"CAST({expression} AS {oracle_type})"
+
+
+def _typed_audit_default(column: str, expression: str, type_sql: object) -> str:
+    """Render one supported audit default so every CASE branch has the column datatype.
+
+    Anything outside the closed column/family table is rejected before DDL.
+    A quoted session number is CHAR; TO_NUMBER makes a NUMBER. A character
+    literal is CAST to the declared type. Datetime defaults are CAST to the
+    declared type, or left unchanged when they already have it.
+    TO_NUMBER('AMBIGUOUS') stays in the subquery WHERE, so the selected
+    value remains the column itself.
+    """
+    oracle_type = _canonical_audit_type(type_sql)
+    family = _audit_type_family(oracle_type)
+    if not _audit_pair_supported(column, family):
+        raise AuditPreservationRejected("Audit preservation column type is not supported.")
+    if family == "number":
+        # Only the ODI session token becomes a number. Other defaults are not numeric.
+        if expression != _SESSION_BATCH_SQL:
+            raise AuditPreservationRejected(
+                "Audit preservation numeric default is not a session number."
+            )
+        converted = f"TO_NUMBER({expression})"
+        if oracle_type == "NUMBER":
+            return converted
+        return f"CAST({converted} AS {oracle_type})"
+    if family in {"date", "timestamp"}:
+        return _typed_datetime_default(expression, oracle_type)
+    return f"CAST({expression} AS {oracle_type})"
 
 
 def _identifier_or_none(value: object) -> str | None:
@@ -161,6 +318,136 @@ def _audit_case(
     )
 
 
+def _same_schema_audit_qualified(
+    *,
+    integration_type: object,
+    src_owner: object,
+    tgt_owner: object,
+    src_model: object,
+    tgt_model: object,
+    tgt_table: object,
+    update_key_columns: list[str] | None,
+    join_table: object = None,
+) -> bool:
+    """True when this request builds same-schema audit CASE expressions."""
+    keys: list[str] = []
+    for item in update_key_columns or []:
+        name = _identifier_or_none(item)
+        if name and name not in keys:
+            keys.append(name)
+    owner = _identifier_or_none(tgt_owner)
+    source_owner = _identifier_or_none(src_owner)
+    table = _identifier_or_none(tgt_table)
+    return bool(
+        str(integration_type or "").strip().upper() == "IU"
+        and keys
+        and owner
+        and table
+        and source_owner == owner
+        and _oracle_physical_model(src_model)
+        and _oracle_physical_model(tgt_model)
+        and not str(join_table or "").strip()
+    )
+
+
+def _audit_request_qualified(params: dict) -> bool:
+    """True when this request builds same-schema audit CASE expressions."""
+    return _same_schema_audit_qualified(
+        integration_type=params.get("integration_type"),
+        src_owner=params.get("src_owner"),
+        tgt_owner=params.get("tgt_owner"),
+        src_model=params.get("src_model"),
+        tgt_model=params.get("tgt_model"),
+        tgt_table=params.get("tgt_table"),
+        update_key_columns=list(params.get("update_key_columns") or []),
+        join_table=params.get("join_table"),
+    )
+
+
+def _planned_audit_columns(params: dict, plan: dict) -> list[str]:
+    """Audit columns this request will preserve, in CASE order."""
+    keys: set[str] = set()
+    for item in params.get("update_key_columns") or []:
+        name = _identifier_or_none(item)
+        if name:
+            keys.add(name)
+    present = {name for name, _type_sql in plan.get("desired_col_defs") or []}
+    return [
+        column for column in _AUDIT_COLUMN_ORDER
+        if column in present and column not in keys
+    ]
+
+
+def _plan_using_declared_types(plan: dict, columns: list[str], declared: dict[str, str]) -> dict:
+    """Copy a plan so reused audit columns carry the snapshot's declared types."""
+    revised = dict(plan)
+    usable = set(columns)
+    revised["desired_col_defs"] = [
+        (name, declared[name] if name in usable else type_sql)
+        for name, type_sql in plan["desired_col_defs"]
+    ]
+    return revised
+
+
+def _read_reused_audit_types(params: dict, columns: list[str]) -> dict[str, str]:
+    """Declared types of a target this request will reuse. Fail closed when unreadable."""
+    import target_table_service
+
+    try:
+        frame = target_table_service.read_table_schema(
+            str(params["tgt_owner"]).upper(), str(params["tgt_table"]).upper(),
+        )
+    except MappingGenerationError as exc:
+        raise AuditPreservationRejected(
+            "Audit preservation target column types could not be read."
+        ) from exc
+    declared = target_table_service.declared_type_map(frame)
+    blank = [column for column in columns if column in declared and not declared[column]]
+    if not declared or blank:
+        raise AuditPreservationRejected(
+            "Audit preservation target column types could not be read."
+        )
+    return declared
+
+
+def _read_target_audit_snapshot(params: dict, columns: list[str]) -> tuple[object, dict[str, str] | None]:
+    """One existence check, plus declared audit types when the target will be reused.
+
+    A create, including drop-and-recreate, does not read the catalog: its
+    effective types are the planned types. The returned map is those declared
+    types only when every preserved audit column was readable.
+    """
+    import target_table_service
+
+    context = target_table_service.TargetTableContext(
+        owner=str(params["tgt_owner"]).upper(),
+        table=str(params["tgt_table"]).upper(),
+        drop_if_exists=params.get("drop_target_if_exists") is True,
+        ddl_user=(ORACLE_DDL_USER or "APP_USER").upper(),
+    )
+    exists = target_table_service._target_exists(context)
+    reuse = exists and params.get("drop_target_if_exists") is not True
+    declared = _read_reused_audit_types(params, columns) if reuse else {}
+    present = {
+        column: declared[column]
+        for column in columns
+        if column in declared and declared[column]
+    }
+    owner, table = target_table_service._normalized_target_identity(
+        params.get("tgt_owner"), params.get("tgt_table"),
+    )
+    snapshot = target_table_service.TargetAuditSnapshot(
+        exists=exists,
+        reuse=reuse,
+        audit_columns=tuple(columns),
+        declared_types=present,
+        owner=owner,
+        table=table,
+    )
+    usable = present if reuse and all(column in present for column in columns) else None
+    return snapshot, usable
+
+
 def build_same_schema_audit_expressions(
     *,
     integration_type: object,
@@ -175,6 +462,7 @@ def build_same_schema_audit_expressions(
     source_system_literal: str,
     join_table: object = None,
     source_table: object = None,
+    target_column_types: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Build null-safe audit CASE expressions for one qualified same-schema IU mapping.
 
@@ -190,15 +478,15 @@ def build_same_schema_audit_expressions(
     owner = _identifier_or_none(tgt_owner)
     source_owner = _identifier_or_none(src_owner)
     table = _identifier_or_none(tgt_table)
-    qualified = bool(
-        str(integration_type or "").strip().upper() == "IU"
-        and keys
-        and owner
-        and table
-        and source_owner == owner
-        and _oracle_physical_model(src_model)
-        and _oracle_physical_model(tgt_model)
-        and not str(join_table or "").strip()
+    qualified = _same_schema_audit_qualified(
+        integration_type=integration_type,
+        src_owner=src_owner,
+        tgt_owner=tgt_owner,
+        src_model=src_model,
+        tgt_model=tgt_model,
+        tgt_table=tgt_table,
+        update_key_columns=update_key_columns,
+        join_table=join_table,
     )
     public = {
         "qualified": qualified,
@@ -262,6 +550,10 @@ def build_same_schema_audit_expressions(
         if column not in target_names or column in keys:
             continue
         default_sql = defaults[column]
+        if target_column_types is not None:
+            if column not in target_column_types:
+                raise AuditPreservationRejected("Audit preservation column type is missing.")
+            default_sql = _typed_audit_default(column, default_sql, target_column_types[column])
         use_change = change_where if column in _AUDIT_REFRESH_ON_CHANGE else None
         expressions[column] = _audit_case(
             table_sql, alias, key_where, column, default_sql, use_change,
@@ -467,7 +759,15 @@ class MappingGenerator:
         self._batch_id = str(uuid.uuid4())[:8]
         self._log_entries = []
         self._odi_repo_reader = None
+        self._reset_request_audit_state()
+
+    def _reset_request_audit_state(self) -> None:
+        """Drop audit decisions so another generate on this object cannot reuse them."""
         self._audit_preservation_expressions: dict[str, str] = {}
+        self._planned_target_column_plan: dict | None = None
+        # Passed into the plan executor. Not stored on the request dict.
+        self._target_audit_snapshot = None
+        self._audit_types_decided = False
         self._audit_lookup_alias: str | None = None
         self._audit_preservation_public = {
             "qualified": False, "expression_count": 0, "business_column_count": 0, "key_count": 0,
@@ -925,9 +1225,11 @@ class MappingGenerator:
             raise RuntimeError("Could not retrieve source column list (None)")
 
         if not src_columns:
-            self._add_log("target_preflight", "FAILED",
-                           f"No column found in source table: {params.get('src_table')}")
-            raise RuntimeError(f"No column found in source table: {src_model}.{params.get('src_table')}")
+            self._add_log(
+                "target_preflight", "FAILED",
+                f"No column found in source table: {params.get('src_table')}",
+            )
+            raise SourceTableNotFound(src_model)
 
         col_defs: list[str] = []
         desired_col_defs: list[tuple[str, str]] = []
@@ -1006,7 +1308,9 @@ class MappingGenerator:
             for column in plan.get("src_columns") or []
             if isinstance(column, dict)
         ]
-        target_columns = [name for name, _type_sql in plan.get("desired_col_defs") or []]
+        target_pairs = list(plan.get("desired_col_defs") or [])
+        target_columns = [name for name, _type_sql in target_pairs]
+        target_column_types = {name: type_sql for name, type_sql in target_pairs}
         profile = build_same_schema_audit_expressions(
             integration_type=params.get("integration_type"),
             src_owner=params.get("src_owner"),
@@ -1020,6 +1324,7 @@ class MappingGenerator:
             source_system_literal=_SOURCE_SYSTEM_LITERAL,
             join_table=params.get("join_table"),
             source_table=params.get("src_table"),
+            target_column_types=target_column_types,
         )
         expressions = dict(profile["expressions"])
         self._audit_preservation_expressions = expressions
@@ -1037,6 +1342,46 @@ class MappingGenerator:
             "business_columns={business_column_count} keys={key_count}".format(**self._audit_preservation_public),
         )
         return profile
+
+    def _decide_effective_audit(self, params: dict) -> None:
+        """Take one target snapshot and type audit defaults before any ODI call.
+
+        Effective type is the planned type when this request will create the
+        target, and the snapshot's declared type when that target will be reused.
+        There is no separate planned-type gate for a reused target.
+        """
+        if not _audit_request_qualified(params):
+            return
+        try:
+            plan = self._build_target_column_plan(params)
+        except (RuntimeError, ValueError, SourceTableNotFound) as exc:
+            raise MappingGenerationError("Target table operation failed") from exc
+        self._planned_target_column_plan = plan
+        self._type_audit_from_snapshot(params, plan)
+
+    def _type_audit_from_snapshot(self, params: dict, plan: dict) -> None:
+        """Apply the snapshot's effective types. Does not read the catalog again."""
+        from target_table_service import _refuse_different_target
+
+        _refuse_different_target(
+            self._target_audit_snapshot, params.get("tgt_owner"), params.get("tgt_table"),
+        )
+        if self._audit_types_decided:
+            return
+        if not _audit_request_qualified(params):
+            self._prepare_audit_preservation(params, plan)
+            self._audit_types_decided = True
+            return
+        columns = _planned_audit_columns(params, plan)
+        if not columns:
+            self._prepare_audit_preservation(params, plan)
+            self._audit_types_decided = True
+            return
+        snapshot, declared = _read_target_audit_snapshot(params, columns)
+        self._target_audit_snapshot = snapshot
+        typed = plan if declared is None else _plan_using_declared_types(plan, columns, declared)
+        self._prepare_audit_preservation(params, typed)
+        self._audit_types_decided = True
 
     def target_table_preflight(self, params: dict) -> dict:
         """Read-only target table preflight for mapping creation."""
@@ -1095,23 +1440,27 @@ class MappingGenerator:
             else:
                 recommended_action = "reuse_with_extra_columns"
 
-            repository = {
-                "status": "not_checked",
-                "mapping_exists": None,
-                "source_datastore_exists": None,
-                "target_datastore_exists": None,
-            }
-            try:
-                repository = self._resolve_odi_repository_bindings(validated)
-            except Exception as exc:
+            if validated.get("src_model") in INTERNAL_SOURCE_MODELS:
+                # Identity is checked again on generate. The wizard does not
+                # start a repository process for an internal source.
                 repository = {
-                    "status": "unavailable",
+                    "status": "not_checked",
                     "mapping_exists": None,
                     "source_datastore_exists": None,
                     "target_datastore_exists": None,
-                    "repository_connection_attempted": True,
-                    "error": str(exc).split("\n")[0],
                 }
+            else:
+                try:
+                    repository = self._resolve_odi_repository_bindings(validated)
+                except Exception as exc:
+                    repository = {
+                        "status": "unavailable",
+                        "mapping_exists": None,
+                        "source_datastore_exists": None,
+                        "target_datastore_exists": None,
+                        "repository_connection_attempted": True,
+                        "error": str(exc).split("\n")[0],
+                    }
 
             return {
                 "status": "OK",
@@ -1138,17 +1487,29 @@ class MappingGenerator:
 
     def _create_target_table(self, params: dict) -> dict:
         """Build a reviewed column plan, then apply it through the persistent target service."""
-        from target_table_service import execute_target_table_plan
+        from target_table_service import TargetChangedDuringGeneration, execute_target_table_plan
 
         logger.info("Creating target table from validated mapping parameters")
         try:
-            plan = self._build_target_column_plan(params)
-            self._prepare_audit_preservation(params, plan)
-            outcome = execute_target_table_plan(self, params, plan, ORACLE_DDL_USER or "APP_USER")
+            plan = self._planned_target_column_plan
+            if plan is None:
+                plan = self._build_target_column_plan(params)
+                self._planned_target_column_plan = plan
+            if not self._audit_types_decided:
+                self._type_audit_from_snapshot(params, plan)
+            outcome = execute_target_table_plan(
+                self, params, plan, ORACLE_DDL_USER or "APP_USER",
+                snapshot=self._target_audit_snapshot,
+            )
             if outcome.get("status") == "BLOCKED":
                 raise TargetTableBlockedError(str(outcome["code"]), outcome)
             return outcome
-        except (MappingGenerationError, TargetTableBlockedError, AuditPreservationRejected):
+        except (
+            MappingGenerationError,
+            TargetTableBlockedError,
+            AuditPreservationRejected,
+            TargetChangedDuringGeneration,
+        ):
             raise
         except Exception as exc:
             self._add_log("create_target_table", "FAILED", type(exc).__name__)
@@ -1839,6 +2200,7 @@ class MappingGenerator:
             Dictionary: batch_id, params, steps (result of each step),
             overall_status and log.
         """
+        self._reset_request_audit_state()
         # Step 1: Parse prompt
         params = self.parse_prompt(user_prompt)
         return self.generate_from_params(params)
@@ -1854,6 +2216,7 @@ class MappingGenerator:
             Dictionary: batch_id, params, steps (result of each step),
             overall_status and log.
         """
+        self._reset_request_audit_state()
         result = {
             "batch_id": self._batch_id,
             "params": None,
@@ -1867,6 +2230,7 @@ class MappingGenerator:
             # Step 2: Validation
             validated = self.validate_params(params)
             result["params"] = validated
+            self._decide_effective_audit(validated)
 
             result["steps"]["repository_preflight"] = self._preflight_odi_repository(validated)
             repo_result = self._resolve_odi_repository_bindings(validated)
@@ -1927,8 +2291,11 @@ class MappingGenerator:
                 failure_class = e.error_type
             self._add_log("pipeline", "FAILED", failure_class)
 
-            # Failed MAPPING_LOG record
-            if persistent_steps_started and result.get("params"):
+            # Failed MAPPING_LOG record. An audit rejection is logged even when it
+            # stops the pipeline before the first persistent step.
+            if result.get("params") and (
+                persistent_steps_started or isinstance(e, AuditPreservationRejected)
+            ):
                 self._log_to_mapping_log(result["params"], "FAILED", str(e))
 
         except Exception as e:

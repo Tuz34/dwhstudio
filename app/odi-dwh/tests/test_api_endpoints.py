@@ -767,6 +767,52 @@ class TestMappingUtilityWriteEndpoints:
         assert resp.get_json() == {"status": "ready", "target": "ODS_HR_EMPLOYEES"}
         assert calls == [{"src_table": "EMPLOYEES", "tgt_table": "ODS_HR_EMPLOYEES"}]
 
+    def test_mapping_target_preflight_missing_source_is_a_model_only_404(self, app_client, monkeypatch):
+        import app as app_module
+        from mapping_generator import SourceTableNotFound
+
+        class FakeMappingGenerator:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return False
+
+            def target_table_preflight(self, _params):
+                raise SourceTableNotFound("ORACLE_SOURCE")
+
+        monkeypatch.setattr(app_module, "MappingGenerator", FakeMappingGenerator)
+        resp = app_client.post(
+            "/api/mapping/target-preflight",
+            json={"src_model": "ORACLE_SOURCE", "src_table": "DWH.ODI81N_SRC_F1", "tgt_table": "ODS_X"},
+        )
+        assert resp.status_code == 404
+        assert resp.get_json() == {"error": "Source table not found through source model ORACLE_SOURCE"}
+        assert "ODI81N_SRC_F1" not in resp.get_data(as_text=True)
+
+    def test_mapping_target_preflight_other_failures_stay_redacted(self, app_client, monkeypatch):
+        import app as app_module
+
+        class FakeMappingGenerator:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return False
+
+            def target_table_preflight(self, _params):
+                raise RuntimeError("password=secret host=10.1.2.3")
+
+        monkeypatch.setattr(app_module, "MappingGenerator", FakeMappingGenerator)
+        resp = app_client.post("/api/mapping/target-preflight", json={"src_table": "T", "tgt_table": "U"})
+        assert resp.status_code == 500
+        assert resp.get_json() == {
+            "error": "mapping target preflight failed.",
+            "error_type": "RuntimeError",
+        }
+        body = resp.get_data(as_text=True)
+        assert "secret" not in body and "10.1.2.3" not in body
+
     def test_mapping_generate_uses_graph_path_after_approval(self, app_client, monkeypatch):
         import app as app_module
 

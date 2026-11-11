@@ -179,6 +179,84 @@ def read_table_schema(owner: str, table: str) -> pd.DataFrame:
     ]]
 
 
+@dataclass(frozen=True)
+class TargetAuditSnapshot:
+    """Existence, reused audit types, and the target identity they were read for."""
+
+    exists: bool
+    reuse: bool
+    audit_columns: tuple[str, ...]
+    declared_types: dict[str, str]
+    owner: str
+    table: str
+
+
+class TargetChangedDuringGeneration(ValueError):
+    """The target no longer matches the snapshot this generation typed from."""
+
+    error_code = "target_changed_during_generation"
+
+
+_TARGET_CHANGED = "Target changed during generation."
+
+
+def _normalized_target_identity(owner: object, table: object) -> tuple[str, str]:
+    """Strip and uppercase, the same transform as MappingGenerator._validate_identifier."""
+    return (str(owner or "").strip().upper(), str(table or "").strip().upper())
+
+
+def _refuse_different_target(
+    snapshot: TargetAuditSnapshot | None, owner: object, table: object,
+) -> None:
+    """Refuse a snapshot taken for another target before DDL or mapping create."""
+    if snapshot is None:
+        return
+    recorded = _normalized_target_identity(snapshot.owner, snapshot.table)
+    if recorded != _normalized_target_identity(owner, table):
+        raise TargetChangedDuringGeneration(_TARGET_CHANGED)
+
+
+def _assert_target_snapshot(
+    context: TargetTableContext, exists: bool, snapshot: TargetAuditSnapshot | None,
+) -> None:
+    """Stop before DDL when the snapshot names another target, or existence or a reused type moved."""
+    if snapshot is None:
+        return
+    _refuse_different_target(snapshot, context.owner, context.table)
+    if exists != snapshot.exists:
+        raise TargetChangedDuringGeneration(_TARGET_CHANGED)
+    if not snapshot.reuse:
+        return
+    try:
+        frame = read_table_schema(context.owner, context.table)
+    except MappingGenerationError as exc:
+        raise TargetChangedDuringGeneration(_TARGET_CHANGED) from exc
+    declared = declared_type_map(frame)
+    changed = any(
+        declared.get(column, "") != snapshot.declared_types.get(column, "")
+        for column in snapshot.audit_columns
+    )
+    if changed:
+        raise TargetChangedDuringGeneration(_TARGET_CHANGED)
+
+
+def declared_type_map(frame: pd.DataFrame) -> dict[str, str]:
+    """Column name to FULL_DATA_TYPE from read_table_schema. A null type is blank."""
+    if frame is None or frame.empty:
+        return {}
+    declared: dict[str, str] = {}
+    for _, row in frame.iterrows():
+        name = str(row["COLUMN_NAME"] or "").strip().upper()
+        if not name:
+            continue
+        full = row["FULL_DATA_TYPE"]
+        if full is None or pd.isna(full):
+            declared[name] = ""
+            continue
+        declared[name] = str(full).strip().upper()
+    return declared
+
+
 _CONSTRAINT_TYPE_FOR_KIND = {"primary": "P", "unique": "U"}
 
 
@@ -334,6 +412,7 @@ def execute_target_table_plan(
     params: dict[str, Any],
     plan: dict[str, Any],
     ddl_user: str,
+    snapshot: TargetAuditSnapshot | None = None,
 ) -> dict[str, Any]:
     context = TargetTableContext(
         owner=params["tgt_owner"].upper(),
@@ -342,6 +421,9 @@ def execute_target_table_plan(
         ddl_user=(ddl_user or "APP_USER").upper(),
     )
     exists = _target_exists(context)
+    # The lock-free window between this check and DDL is the same one the
+    # pre-existing name/existence check has.
+    _assert_target_snapshot(context, exists, snapshot)
     if exists and context.drop_if_exists:
         _drop_target(context)
         generator._add_log("create_target_table", "INFO", f"Target table dropped: {context.owner}.{context.table}")
