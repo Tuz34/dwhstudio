@@ -179,6 +179,23 @@ def read_table_schema(owner: str, table: str) -> pd.DataFrame:
     ]]
 
 
+def declared_type_map(frame: pd.DataFrame) -> dict[str, str]:
+    """Column name to FULL_DATA_TYPE from read_table_schema. A null type is blank."""
+    if frame is None or frame.empty:
+        return {}
+    declared: dict[str, str] = {}
+    for _, row in frame.iterrows():
+        name = str(row["COLUMN_NAME"] or "").strip().upper()
+        if not name:
+            continue
+        full = row["FULL_DATA_TYPE"]
+        if full is None or pd.isna(full):
+            declared[name] = ""
+            continue
+        declared[name] = str(full).strip().upper()
+    return declared
+
+
 _CONSTRAINT_TYPE_FOR_KIND = {"primary": "P", "unique": "U"}
 
 

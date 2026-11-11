@@ -762,10 +762,15 @@ def _comparable_type(text: str) -> str:
 
 
 def _assert_branches_match(expression: str, column: str, oracle_type: str, default_sql: str | None = None) -> None:
+    """Every CASE result has the declared type. The ambiguous guard is a WHERE predicate."""
     results = _case_results(expression)
     ambiguous, *middle, matched = results
-    assert ambiguous.startswith("(SELECT ") and "AND TO_NUMBER('AMBIGUOUS') IS NOT NULL)" in ambiguous
+    where_at = ambiguous.upper().find(" WHERE ")
+    guard_at = ambiguous.find("AND TO_NUMBER('AMBIGUOUS') IS NOT NULL)")
+    assert ambiguous.startswith("(SELECT ") and where_at != -1 and guard_at > where_at
+    assert "TO_NUMBER('AMBIGUOUS')" not in ambiguous.split(" FROM ", 1)[0]
     assert "TO_NUMBER('AMBIGUOUS')" not in matched
+    assert all(not result.strip().startswith("TO_NUMBER('AMBIGUOUS')") for result in results)
     assert middle and len(set(middle)) == 1
     if default_sql is not None:
         assert middle[0] == default_sql
@@ -981,8 +986,11 @@ def _supported_audit_pairs() -> list[tuple[str, str, str]]:
 
 @pytest.mark.parametrize(("column", "type_sql", "expected"), _supported_audit_pairs())
 def test_supported_audit_pair_emits_the_closed_table_text(column, type_sql, expected):
-    """d2891fb still emitted CURRENT_FLAG DATE and SOURCE_SYSTEM TIMESTAMP."""
-    assert _default_sql(column, type_sql) == expected
+    """Every branch matches the declared type. An NCHAR matched branch of numeric 0 fails this."""
+    expression = _typed_expression(column, type_sql)
+    _ambiguous, *middle, _matched = _case_results(expression)
+    assert middle and len(set(middle)) == 1 and middle[0] == expected
+    _assert_branches_match(expression, column, _canonical_audit_type(type_sql), expected)
 
 
 def test_etl_batch_id_varchar2_20_casts_the_session_token():
@@ -1030,6 +1038,271 @@ def test_unsupported_audit_pair_is_rejected_before_any_ddl(column, type_sql, mon
         generator._create_target_table(validated)
     assert ddl == []
     assert constructed == []
+
+
+_F1_DECLARED = {
+    "INSERT_DATE": "TIMESTAMP",
+    "UPDATE_DATE": "TIMESTAMP",
+    "SOURCE_SYSTEM": "VARCHAR2(50)",
+    "ETL_BATCH_ID": "NUMBER",
+}
+
+
+def _declared_frame(types: dict[str, str]):
+    import pandas as pd
+
+    return pd.DataFrame([
+        {
+            "COLUMN_NAME": name,
+            "DATA_TYPE": value.split("(", 1)[0],
+            "DATA_LENGTH": None,
+            "DATA_PRECISION": None,
+            "DATA_SCALE": None,
+            "NULLABLE": "Y",
+            "FULL_DATA_TYPE": value,
+            "COMMENTS": None,
+        }
+        for name, value in types.items()
+    ])
+
+
+def _create_with_catalog(monkeypatch, source, *, exists, declared=None, drop=False, read_error=False):
+    """Build one classic target with a stubbed catalog. The DDL function only records a call."""
+    import target_table_service
+    from exceptions import MappingGenerationError
+
+    generator = MappingGenerator()
+    generator._source_columns_for = lambda _params: source
+    params = generator.validate_params(driver.classic_params("F1"))
+    if drop:
+        params["drop_target_if_exists"] = True
+    reads: list[tuple[str, str]] = []
+    ddl: list[bool] = []
+
+    def read_schema(owner, table):
+        reads.append((owner, table))
+        if read_error:
+            raise MappingGenerationError("Target table column type read failed")
+        return _declared_frame(declared or {})
+
+    monkeypatch.setattr(target_table_service, "_target_exists", lambda _context: exists)
+    monkeypatch.setattr(target_table_service, "read_table_schema", read_schema)
+    monkeypatch.setattr(
+        target_table_service, "execute_target_table_plan",
+        lambda *_args, **_kwargs: ddl.append(True) or {
+            "status": "CREATED" if drop or not exists else "ALREADY_IN_SYNC",
+            "ddl": "",
+        },
+    )
+    return generator, params, reads, ddl
+
+
+def test_unsupported_pair_is_rejected_before_repository_preflight(app_client, monkeypatch):
+    """a8d9b76 ran repository preflight first, so its failure hid this rejection."""
+    import odi_orchestrator
+    import target_table_service
+    from mapping_generator import RepositoryPreflightBlockedError
+
+    calls: list[str] = []
+    ddl: list[bool] = []
+    constructed: list[bool] = []
+
+    def explode(self, _params):
+        calls.append("preflight")
+        raise RepositoryPreflightBlockedError({"code": "repository_lookup_failed"})
+
+    real_init = odi_orchestrator.OdiOrchestrator.__init__
+
+    def spy_init(self, *args, **kwargs):
+        constructed.append(True)
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(MappingGenerator, "_preflight_odi_repository", explode)
+    monkeypatch.setattr(
+        MappingGenerator, "_source_columns_for",
+        lambda self, _params: _columns_with("CURRENT_FLAG", "NUMBER(1)"),
+    )
+    monkeypatch.setattr(MappingGenerator, "_log_to_mapping_log", lambda self, *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        target_table_service, "execute_target_table_plan", lambda *_args, **_kwargs: ddl.append(True),
+    )
+    monkeypatch.setattr(odi_orchestrator.OdiOrchestrator, "__init__", spy_init)
+    response = app_client.post("/api/mapping/generate", json=driver.classic_generate_body("F1"))
+    body = response.get_json()
+    assert response.status_code == 200
+    assert body["overall_status"] == "FAILED"
+    assert body["error_code"] == "audit_preservation_rejected"
+    assert body["error"] == _AUDIT_PRESERVATION_SENTENCE
+    assert calls == []
+    assert ddl == []
+    assert constructed == []
+    assert "create_target_table" not in body["steps"]
+    assert "create_mapping" not in body["steps"]
+
+
+def test_reused_number_target_types_every_branch_as_number(monkeypatch):
+    """a8d9b76 cast the session token to the planned VARCHAR2 against a NUMBER column."""
+    generator, params, reads, ddl = _create_with_catalog(
+        monkeypatch,
+        _columns_with("ETL_BATCH_ID", "VARCHAR2(20)"),
+        exists=True,
+        declared={**_F1_DECLARED, "ETL_BATCH_ID": "NUMBER"},
+    )
+    outcome = generator._create_target_table(params)
+    expected = f"TO_NUMBER({_SESSION_BATCH_SQL})"
+    _assert_branches_match(
+        generator._audit_preservation_expressions["ETL_BATCH_ID"], "ETL_BATCH_ID", "NUMBER", expected,
+    )
+    assert outcome["status"] == "ALREADY_IN_SYNC"
+    assert reads == [("DWH", "ODS_ODI81N_F1")]
+    assert ddl == [True]
+
+
+def test_reused_varchar2_target_casts_the_session_token(monkeypatch):
+    """a8d9b76 used TO_NUMBER for a plan of NUMBER against an existing VARCHAR2(20)."""
+    generator, params, reads, ddl = _create_with_catalog(
+        monkeypatch,
+        [dict(column) for column in _SOURCE_COLUMNS],
+        exists=True,
+        declared={**_F1_DECLARED, "ETL_BATCH_ID": "VARCHAR2(20)"},
+    )
+    generator._create_target_table(params)
+    expected = f"CAST({_SESSION_BATCH_SQL} AS VARCHAR2(20))"
+    _assert_branches_match(
+        generator._audit_preservation_expressions["ETL_BATCH_ID"],
+        "ETL_BATCH_ID", "VARCHAR2(20)", expected,
+    )
+    assert reads == [("DWH", "ODS_ODI81N_F1")]
+    assert ddl == [True]
+
+
+def test_created_or_recreated_target_keeps_the_planned_audit_text(monkeypatch):
+    """A table this request creates uses the planned type, including after a drop."""
+    expected = f"CAST({_SESSION_BATCH_SQL} AS VARCHAR2(20))"
+    for exists, drop in ((False, False), (True, True)):
+        generator, params, reads, _ddl = _create_with_catalog(
+            monkeypatch,
+            _columns_with("ETL_BATCH_ID", "VARCHAR2(20)"),
+            exists=exists,
+            declared={**_F1_DECLARED, "ETL_BATCH_ID": "NUMBER"},
+            drop=drop,
+        )
+        generator._create_target_table(params)
+        assert reads == []
+        _assert_branches_match(
+            generator._audit_preservation_expressions["ETL_BATCH_ID"],
+            "ETL_BATCH_ID", "VARCHAR2(20)", expected,
+        )
+    number_plan, params, reads, _ddl = _create_with_catalog(
+        monkeypatch, [dict(column) for column in _SOURCE_COLUMNS], exists=False,
+    )
+    number_plan._create_target_table(params)
+    assert reads == []
+    _assert_branches_match(
+        number_plan._audit_preservation_expressions["ETL_BATCH_ID"],
+        "ETL_BATCH_ID", "NUMBER", f"TO_NUMBER({_SESSION_BATCH_SQL})",
+    )
+
+
+def test_reused_unsupported_actual_type_stops_before_ddl_and_create(monkeypatch):
+    """a8d9b76 accepted a reused DATE audit column because the plan said NUMBER."""
+    import odi_orchestrator
+    import target_table_service
+
+    preflight: list[bool] = []
+    ddl: list[bool] = []
+    created: list[str] = []
+    constructed: list[bool] = []
+    real_init = odi_orchestrator.OdiOrchestrator.__init__
+
+    def spy_init(self, *args, **kwargs):
+        constructed.append(True)
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        MappingGenerator, "_preflight_odi_repository",
+        lambda self, _params: preflight.append(True) or {"status": "passed", "ikm_id": "7"},
+    )
+    monkeypatch.setattr(
+        MappingGenerator, "_resolve_odi_repository_bindings",
+        lambda self, _params: {"status": "passed"},
+    )
+    monkeypatch.setattr(
+        MappingGenerator, "_source_columns_for",
+        lambda self, _params: [dict(column) for column in _SOURCE_COLUMNS],
+    )
+    monkeypatch.setattr(
+        MappingGenerator, "_register_odi_datastores", lambda self, _params: created.append("register"),
+    )
+    monkeypatch.setattr(
+        MappingGenerator, "_create_odi_mapping", lambda self, _params: created.append("create"),
+    )
+    monkeypatch.setattr(MappingGenerator, "_log_to_mapping_log", lambda self, *_args, **_kwargs: None)
+    monkeypatch.setattr(target_table_service, "_target_exists", lambda _context: True)
+    monkeypatch.setattr(
+        target_table_service, "read_table_schema",
+        lambda _owner, _table: _declared_frame({**_F1_DECLARED, "ETL_BATCH_ID": "DATE"}),
+    )
+    monkeypatch.setattr(
+        target_table_service, "execute_target_table_plan",
+        lambda *_args, **_kwargs: ddl.append(True) or {"status": "ALREADY_IN_SYNC", "ddl": ""},
+    )
+    monkeypatch.setattr(odi_orchestrator.OdiOrchestrator, "__init__", spy_init)
+    result = MappingGenerator().generate_from_params(driver.classic_params("F1"))
+    assert result["overall_status"] == "FAILED"
+    assert result.get("error_code") == "audit_preservation_rejected"
+    assert preflight == [True]
+    assert ddl == []
+    assert created == []
+    assert constructed == []
+    assert "create_target_table" not in result["steps"]
+    assert "create_mapping" not in result["steps"]
+
+
+def test_reused_target_type_read_failure_is_rejected(monkeypatch):
+    """a8d9b76 kept the planned type when the existing target's types could not be read."""
+    import target_table_service
+    from exceptions import MappingGenerationError
+
+    ddl: list[bool] = []
+    created: list[str] = []
+    monkeypatch.setattr(
+        MappingGenerator, "_preflight_odi_repository",
+        lambda self, _params: {"status": "passed", "ikm_id": "7"},
+    )
+    monkeypatch.setattr(
+        MappingGenerator, "_resolve_odi_repository_bindings",
+        lambda self, _params: {"status": "passed"},
+    )
+    monkeypatch.setattr(
+        MappingGenerator, "_source_columns_for",
+        lambda self, _params: [dict(column) for column in _SOURCE_COLUMNS],
+    )
+    monkeypatch.setattr(
+        MappingGenerator, "_register_odi_datastores", lambda self, _params: created.append("register"),
+    )
+    monkeypatch.setattr(
+        MappingGenerator, "_create_odi_mapping", lambda self, _params: created.append("create"),
+    )
+    monkeypatch.setattr(MappingGenerator, "_log_to_mapping_log", lambda self, *_args, **_kwargs: None)
+    monkeypatch.setattr(target_table_service, "_target_exists", lambda _context: True)
+
+    def fail(_owner, _table):
+        raise MappingGenerationError("Target table column type read failed")
+
+    monkeypatch.setattr(target_table_service, "read_table_schema", fail)
+    monkeypatch.setattr(
+        target_table_service, "execute_target_table_plan",
+        lambda *_args, **_kwargs: ddl.append(True) or {"status": "ALREADY_IN_SYNC", "ddl": ""},
+    )
+    result = MappingGenerator().generate_from_params(driver.classic_params("F1"))
+    assert result["overall_status"] == "FAILED"
+    assert result.get("error_code") == "audit_preservation_rejected"
+    assert result["error"] == "Audit preservation target column types could not be read."
+    assert "Target table column type read failed" not in result["error"]
+    assert ddl == []
+    assert created == []
+    assert "create_mapping" not in result["steps"]
 
 
 def test_audit_preservation_rejection_reaches_the_wizard_as_a_fixed_200(app_client, monkeypatch):

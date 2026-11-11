@@ -318,6 +318,38 @@ def _audit_case(
     )
 
 
+def _same_schema_audit_qualified(
+    *,
+    integration_type: object,
+    src_owner: object,
+    tgt_owner: object,
+    src_model: object,
+    tgt_model: object,
+    tgt_table: object,
+    update_key_columns: list[str] | None,
+    join_table: object = None,
+) -> bool:
+    """True when this request builds same-schema audit CASE expressions."""
+    keys: list[str] = []
+    for item in update_key_columns or []:
+        name = _identifier_or_none(item)
+        if name and name not in keys:
+            keys.append(name)
+    owner = _identifier_or_none(tgt_owner)
+    source_owner = _identifier_or_none(src_owner)
+    table = _identifier_or_none(tgt_table)
+    return bool(
+        str(integration_type or "").strip().upper() == "IU"
+        and keys
+        and owner
+        and table
+        and source_owner == owner
+        and _oracle_physical_model(src_model)
+        and _oracle_physical_model(tgt_model)
+        and not str(join_table or "").strip()
+    )
+
+
 def build_same_schema_audit_expressions(
     *,
     integration_type: object,
@@ -348,15 +380,15 @@ def build_same_schema_audit_expressions(
     owner = _identifier_or_none(tgt_owner)
     source_owner = _identifier_or_none(src_owner)
     table = _identifier_or_none(tgt_table)
-    qualified = bool(
-        str(integration_type or "").strip().upper() == "IU"
-        and keys
-        and owner
-        and table
-        and source_owner == owner
-        and _oracle_physical_model(src_model)
-        and _oracle_physical_model(tgt_model)
-        and not str(join_table or "").strip()
+    qualified = _same_schema_audit_qualified(
+        integration_type=integration_type,
+        src_owner=src_owner,
+        tgt_owner=tgt_owner,
+        src_model=src_model,
+        tgt_model=tgt_model,
+        tgt_table=tgt_table,
+        update_key_columns=update_key_columns,
+        join_table=join_table,
     )
     public = {
         "qualified": qualified,
@@ -630,6 +662,7 @@ class MappingGenerator:
         self._log_entries = []
         self._odi_repo_reader = None
         self._audit_preservation_expressions: dict[str, str] = {}
+        self._planned_target_column_plan: dict | None = None
         self._audit_lookup_alias: str | None = None
         self._audit_preservation_public = {
             "qualified": False, "expression_count": 0, "business_column_count": 0, "key_count": 0,
@@ -1205,6 +1238,70 @@ class MappingGenerator:
         )
         return profile
 
+    def _reject_unsupported_planned_audit(self, params: dict) -> None:
+        """Reject an unsupported planned audit type before any ODI call.
+
+        The planned type is known only after the source schema is read. That
+        read is the database, not ODI, and it is the only step before the check.
+        """
+        if not _same_schema_audit_qualified(
+            integration_type=params.get("integration_type"),
+            src_owner=params.get("src_owner"),
+            tgt_owner=params.get("tgt_owner"),
+            src_model=params.get("src_model"),
+            tgt_model=params.get("tgt_model"),
+            tgt_table=params.get("tgt_table"),
+            update_key_columns=list(params.get("update_key_columns") or []),
+            join_table=params.get("join_table"),
+        ):
+            return
+        try:
+            plan = self._build_target_column_plan(params)
+        except (RuntimeError, ValueError, SourceTableNotFound) as exc:
+            raise MappingGenerationError("Target table operation failed") from exc
+        self._planned_target_column_plan = plan
+        self._prepare_audit_preservation(params, plan)
+
+    def _retype_reused_target_audit(self, params: dict, plan: dict) -> None:
+        """Type a reused target from its declared columns, not the planned DDL.
+
+        A table this request will create or drop-and-recreate keeps the planned
+        type. A read failure does not fall back to that plan.
+        """
+        columns = list(self._audit_preservation_expressions)
+        if not columns or params.get("drop_target_if_exists") is True:
+            return
+        import target_table_service
+
+        context = target_table_service.TargetTableContext(
+            owner=str(params["tgt_owner"]).upper(),
+            table=str(params["tgt_table"]).upper(),
+            drop_if_exists=False,
+            ddl_user=(ORACLE_DDL_USER or "APP_USER").upper(),
+        )
+        if not target_table_service._target_exists(context):
+            return
+        try:
+            frame = target_table_service.read_table_schema(context.owner, context.table)
+        except MappingGenerationError as exc:
+            raise AuditPreservationRejected(
+                "Audit preservation target column types could not be read."
+            ) from exc
+        declared = target_table_service.declared_type_map(frame)
+        blank = [column for column in columns if column in declared and not declared[column]]
+        if not declared or blank:
+            raise AuditPreservationRejected(
+                "Audit preservation target column types could not be read."
+            )
+        if any(column not in declared for column in columns):
+            return
+        revised = dict(plan)
+        revised["desired_col_defs"] = [
+            (name, declared[name] if name in columns else type_sql)
+            for name, type_sql in plan["desired_col_defs"]
+        ]
+        self._prepare_audit_preservation(params, revised)
+
     def target_table_preflight(self, params: dict) -> dict:
         """Read-only target table preflight for mapping creation."""
         validated = self.validate_params(params)
@@ -1313,8 +1410,11 @@ class MappingGenerator:
 
         logger.info("Creating target table from validated mapping parameters")
         try:
-            plan = self._build_target_column_plan(params)
+            plan = self._planned_target_column_plan
+            if plan is None:
+                plan = self._build_target_column_plan(params)
             self._prepare_audit_preservation(params, plan)
+            self._retype_reused_target_audit(params, plan)
             outcome = execute_target_table_plan(self, params, plan, ORACLE_DDL_USER or "APP_USER")
             if outcome.get("status") == "BLOCKED":
                 raise TargetTableBlockedError(str(outcome["code"]), outcome)
@@ -2038,6 +2138,7 @@ class MappingGenerator:
             # Step 2: Validation
             validated = self.validate_params(params)
             result["params"] = validated
+            self._reject_unsupported_planned_audit(validated)
 
             result["steps"]["repository_preflight"] = self._preflight_odi_repository(validated)
             repo_result = self._resolve_odi_repository_bindings(validated)
@@ -2098,8 +2199,11 @@ class MappingGenerator:
                 failure_class = e.error_type
             self._add_log("pipeline", "FAILED", failure_class)
 
-            # Failed MAPPING_LOG record
-            if persistent_steps_started and result.get("params"):
+            # Failed MAPPING_LOG record. An audit rejection is logged even when it
+            # stops the pipeline before the first persistent step.
+            if result.get("params") and (
+                persistent_steps_started or isinstance(e, AuditPreservationRejected)
+            ):
                 self._log_to_mapping_log(result["params"], "FAILED", str(e))
 
         except Exception as e:
