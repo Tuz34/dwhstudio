@@ -270,20 +270,61 @@ class _StepRun(NamedTuple):
     sleeps: tuple[str, ...]
 
 
+# Names the step invokes. Each one must resolve inside the stub directory
+# before the step script is allowed to run.
+_STUB_COMMANDS = ("sudo", "apt-get", "ldconfig", "sleep")
+
+
 def _write_stub(directory: Path, name: str, lines: list[str]) -> None:
-    (directory / name).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    path = directory / name
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    # POSIX bash skips a PATH entry that is not executable and keeps searching.
+    # That is how the hosted runner reached real sudo and apt-get. 0o755 sets
+    # the mode bits there. On Windows this does not clear the read-only flag
+    # (owner write stays set), and Git Bash keeps running a shebang script.
+    path.chmod(0o755)
 
 
 def _install_stubs(directory: Path) -> None:
     # Backoff sleeps 10s then 20s. The delays stay in the step text; this stub
     # lets the four apt/ldconfig cases finish without waiting them out.
-    _write_stub(directory, "sudo", ["#!/usr/bin/env bash", 'exec "$@"'])
+    # sudo runs the sibling stub by path. It does not search PATH and it
+    # refuses to invoke anything named sudo, so it cannot exec the real one.
+    _write_stub(
+        directory,
+        "sudo",
+        [
+            "#!/usr/bin/env bash",
+            'here="${BASH_SOURCE[0]%/*}"',
+            'if [[ "$#" -eq 0 ]]; then',
+            "  printf 'sudo stub expected a command\\n' >&2",
+            "  exit 127",
+            "fi",
+            'case "$1" in',
+            "  sudo|*/sudo)",
+            "    printf 'sudo stub refused to invoke sudo\\n' >&2",
+            "    exit 127",
+            "    ;;",
+            "  */*)",
+            "    printf 'sudo stub refused a path command\\n' >&2",
+            "    exit 127",
+            "    ;;",
+            "esac",
+            'target="$here/$1"',
+            "shift",
+            'if [[ ! -f "$target" ]]; then',
+            "  printf 'sudo stub cannot find the requested command next to itself\\n' >&2",
+            "  exit 127",
+            "fi",
+            'exec "$target" "$@"',
+        ],
+    )
     _write_stub(
         directory,
         "apt-get",
         [
             "#!/usr/bin/env bash",
-            'here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'here="${BASH_SOURCE[0]%/*}"',
             'if [[ -f "$here/apt-fail" ]]; then',
             "  exit 100",
             "fi",
@@ -295,9 +336,11 @@ def _install_stubs(directory: Path) -> None:
         "ldconfig",
         [
             "#!/usr/bin/env bash",
-            'here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'here="${BASH_SOURCE[0]%/*}"',
             'if [[ -f "$here/ldconfig-out.txt" ]]; then',
-            '  cat "$here/ldconfig-out.txt"',
+            "  while IFS= read -r line || [[ -n \"$line\" ]]; do",
+            "    printf '%s\\n' \"$line\"",
+            "  done < \"$here/ldconfig-out.txt\"",
             "fi",
             "exit 0",
         ],
@@ -307,14 +350,127 @@ def _install_stubs(directory: Path) -> None:
         "sleep",
         [
             "#!/usr/bin/env bash",
-            'here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'here="${BASH_SOURCE[0]%/*}"',
             'printf "%s\\n" "$*" >> "$here/sleep-log.txt"',
             "exit 0",
         ],
     )
 
 
-def _run_unixodbc_script(script: str, *, apt_fails: bool, ldconfig: str) -> _StepRun:
+def _tool_directories(*names: str) -> list[str]:
+    directories: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        located = shutil.which(name)
+        if not located:
+            raise AssertionError(
+                f"{name} is required on PATH before the UnixODBC step can run under stubs"
+            )
+        directory = str(Path(located).resolve().parent)
+        key = os.path.normcase(directory)
+        if key in seen:
+            continue
+        seen.add(key)
+        directories.append(directory)
+    return directories
+
+
+def _execution_env(stub_dir: Path, extra_path: tuple[Path, ...] = ()) -> dict[str, str]:
+    # Stub directory first. After it, only the directories that hold bash
+    # (stub shebangs) and grep (the soname filter). A guard test may insert a
+    # sentinel directory before those, still after the stubs.
+    env = os.environ.copy()
+    for key in ("BASH_ENV", "ENV", "CDPATH"):
+        env.pop(key, None)
+    parts = [str(stub_dir), *[str(path) for path in extra_path]]
+    parts.extend(_tool_directories("bash", "grep"))
+    env["PATH"] = os.pathsep.join(parts)
+    return env
+
+
+def _resolution_probe() -> str:
+    names = " ".join(_STUB_COMMANDS)
+    return textwrap.dedent(
+        f"""\
+        stub_real=$(cd "$1" && pwd -P) || exit 2
+        for cmd in {names}; do
+          resolved=$(command -v "$cmd" 2>/dev/null || true)
+          if [[ -z "$resolved" ]]; then
+            printf '%s\\tMISSING\\n' "$cmd"
+            continue
+          fi
+          case "$resolved" in
+            /*|[A-Za-z]:/*) ;;
+            *)
+              printf '%s\\tNOT_A_PATH\\t%s\\n' "$cmd" "$resolved"
+              continue
+              ;;
+          esac
+          if [[ ! -x "$resolved" ]]; then
+            printf '%s\\tNOT_EXECUTABLE\\t%s\\n' "$cmd" "$resolved"
+            continue
+          fi
+          resolved_dir=${{resolved%/*}}
+          resolved_real=$(cd "$resolved_dir" && pwd -P) || resolved_real=
+          if [[ "$resolved_real" == "$stub_real" ]]; then
+            printf '%s\\tOK\\t%s\\n' "$cmd" "$resolved"
+          else
+            printf '%s\\tOUTSIDE\\t%s\\n' "$cmd" "$resolved"
+          fi
+        done
+        """
+    )
+
+
+def _require_stub_resolution(bash: str, env: dict[str, str], stub_dir: Path) -> None:
+    # Same interpreter, environment, and PATH the step script is about to use.
+    # A miss refuses. The script is not started.
+    try:
+        completed = subprocess.run(
+            [bash, "-c", _resolution_probe(), "bash", str(stub_dir)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            "UnixODBC stub resolution timed out; refusing to run the step script."
+        ) from exc
+    found: set[str] = set()
+    problems: list[str] = []
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        fields = line.split("\t")
+        if len(fields) < 2 or fields[0] not in _STUB_COMMANDS:
+            problems.append(line)
+            continue
+        if fields[1] == "OK":
+            found.add(fields[0])
+        else:
+            problems.append(line)
+    missing = [name for name in _STUB_COMMANDS if name not in found]
+    if completed.returncode != 0 or missing or problems:
+        detail = completed.stdout.strip() or "(no stdout)"
+        stderr = completed.stderr.strip()
+        message = "UnixODBC stub resolution failed; refusing to run the step script.\n" + detail
+        if stderr:
+            message += "\n" + stderr
+        raise AssertionError(message)
+
+
+def _run_unixodbc_script(
+    script: str,
+    *,
+    apt_fails: bool,
+    ldconfig: str,
+    omit_stubs: tuple[str, ...] = (),
+    unexecutable_stubs: tuple[str, ...] = (),
+    extra_path: tuple[Path, ...] = (),
+) -> _StepRun:
     bash = shutil.which("bash")
     assert bash, "bash was required before executing the UnixODBC step"
     with tempfile.TemporaryDirectory(prefix="odbc-step-") as raw_dir:
@@ -324,13 +480,17 @@ def _run_unixodbc_script(script: str, *, apt_fails: bool, ldconfig: str) -> _Ste
             (stub_dir / "apt-fail").write_text("", encoding="utf-8", newline="\n")
         if ldconfig:
             (stub_dir / "ldconfig-out.txt").write_text(ldconfig, encoding="utf-8", newline="\n")
+        for name in unexecutable_stubs:
+            (stub_dir / name).chmod(0o644)
+        for name in omit_stubs:
+            (stub_dir / name).unlink()
         body = script.replace("\r\n", "\n").replace("\r", "\n")
         if not body.endswith("\n"):
             body += "\n"
         script_path = stub_dir / "unixodbc-step.sh"
         script_path.write_text(body, encoding="utf-8", newline="\n")
-        env = os.environ.copy()
-        env["PATH"] = str(stub_dir) + os.pathsep + env.get("PATH", "")
+        env = _execution_env(stub_dir, extra_path)
+        _require_stub_resolution(bash, env, stub_dir)
         try:
             completed = subprocess.run(
                 [bash, "-e", "-o", "pipefail", str(script_path)],
@@ -477,6 +637,111 @@ def test_unixodbc_step_behaviour_under_stubbed_apt_and_ldconfig():
     _execute_unixodbc_cases(_python_gates()["steps"][2]["run"])
 
 
+def _bash_rejects_non_executable_stub(bash: str) -> bool:
+    # Git Bash reports a shebang script as executable even when the Windows
+    # file mode has no execute bit. Bash on Linux does not. Only the latter
+    # can exercise the chmod-off guard.
+    with tempfile.TemporaryDirectory(prefix="odbc-mode-") as raw_dir:
+        directory = Path(raw_dir)
+        _write_stub(directory, "sudo", ["#!/usr/bin/env bash", "exit 0"])
+        (directory / "sudo").chmod(0o644)
+        env = os.environ.copy()
+        for key in ("BASH_ENV", "ENV", "CDPATH"):
+            env.pop(key, None)
+        env["PATH"] = str(directory)
+        completed = subprocess.run(
+            [bash, "-c", 'command -v sudo >/dev/null && [[ -x "$(command -v sudo)" ]]'],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        return completed.returncode != 0
+
+
+def _assert_guard_refuses(sentinel: Path, decoy: Path, **kwargs: object) -> None:
+    if sentinel.exists():
+        sentinel.unlink()
+    with pytest.raises(AssertionError, match="refusing to run the step script"):
+        _run_unixodbc_script(
+            "sudo apt-get update\n",
+            apt_fails=False,
+            ldconfig="",
+            extra_path=(decoy,),
+            **kwargs,
+        )
+    assert not sentinel.is_file()
+
+
+def test_resolution_guard_refuses_before_running_when_a_stub_is_unreachable():
+    # The decoy is a harmless stand-in for a real sudo later on PATH. The
+    # helper must raise before the step script runs, so the decoy is not invoked.
+    _require_workflow_file()
+    bash = _require_bash_for_behaviour()
+    with tempfile.TemporaryDirectory(prefix="odbc-guard-") as raw_dir:
+        root = Path(raw_dir)
+        decoy = root / "decoy"
+        decoy.mkdir()
+        _write_stub(
+            decoy,
+            "sudo",
+            [
+                "#!/usr/bin/env bash",
+                'here="${BASH_SOURCE[0]%/*}"',
+                'printf "invoked\\n" >> "$here/invoked.txt"',
+                "exit 0",
+            ],
+        )
+        sentinel = decoy / "invoked.txt"
+        # Prove the sentinel fires when this directory's sudo is the command
+        # that resolves. Run it only after command -v points inside the decoy,
+        # so a later real sudo is never executed.
+        proof_env = os.environ.copy()
+        for key in ("BASH_ENV", "ENV", "CDPATH"):
+            proof_env.pop(key, None)
+        proof_env["PATH"] = os.pathsep.join([str(decoy), *_tool_directories("bash")])
+        proof = subprocess.run(
+            [
+                bash,
+                "-c",
+                textwrap.dedent(
+                    """\
+                    resolved=$(command -v sudo || true)
+                    decoy_real=$(cd "$1" && pwd -P) || exit 2
+                    case "$resolved" in
+                      /*|[A-Za-z]:/*) ;;
+                      *)
+                        printf 'sentinel sudo did not resolve to a path: %s\\n' "$resolved" >&2
+                        exit 2
+                        ;;
+                    esac
+                    resolved_real=$(cd "${resolved%/*}" && pwd -P) || exit 2
+                    if [[ "$resolved_real" != "$decoy_real" ]]; then
+                      printf 'sentinel sudo resolved outside the decoy: %s\\n' "$resolved" >&2
+                      exit 2
+                    fi
+                    sudo
+                    """
+                ),
+                "bash",
+                str(decoy),
+            ],
+            env=proof_env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        assert proof.returncode == 0, proof.stderr
+        assert sentinel.is_file(), proof.stdout + proof.stderr
+        sentinel.unlink()
+
+        _assert_guard_refuses(sentinel, decoy, omit_stubs=("sudo",))
+        if _bash_rejects_non_executable_stub(bash):
+            _assert_guard_refuses(sentinel, decoy, unexecutable_stubs=("sudo",))
+
+
 def test_in_memory_ci_yml_mutants_fail_the_contract():
     # Mutants stay in memory. The repository workflow file is not rewritten.
     _require_workflow_file()
@@ -516,6 +781,7 @@ _REPOSITORY_CONTRACT_TESTS = (
     test_pytest_step_runs_the_full_suite_without_deselections,
     test_later_python_gates_stay_mandatory,
     test_unixodbc_step_behaviour_under_stubbed_apt_and_ldconfig,
+    test_resolution_guard_refuses_before_running_when_a_stub_is_unreachable,
     test_in_memory_ci_yml_mutants_fail_the_contract,
 )
 
