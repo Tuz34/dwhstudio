@@ -108,6 +108,18 @@ test('missing or unknown load type is never inferred from table names', () => {
   assert.throws(() => buildMappingRequest({ ...form, load_type: 'other' }), /Choose a load type/);
 });
 
+test('a typed DM_ target cannot continue with a classic load', () => {
+  const warning = 'Datamart targets are supported only for Type 2 history.';
+  for (const loadType of ['truncate_load', 'insert_update', 'type1']) {
+    const typed = { ...form, tgt_owner: 'DWH', tgt_table: '  dm_x  ', load_type: loadType };
+    assert.equal(getLoadOptionError(typed), warning, loadType);
+    assert.throws(() => buildMappingRequest(typed), { message: warning }, loadType);
+  }
+  const type2 = { ...form, tgt_owner: 'DWH', tgt_table: 'DM_X', load_type: 'type2' };
+  assert.equal(getLoadOptionError(type2), null);
+  assert.equal(buildScd2Handoff(type2).payload.props.mappingRequest.tgt_table, 'DM_X');
+});
+
 test('prefill accepts only named load types and array key columns', () => {
   assert.deepEqual(prefillLoadOptions({ load_type: 'type1', key_columns: [' entity_id ', 'source_id'] }), {
     load_type: 'type1', key_columns: 'ENTITY_ID, SOURCE_ID',

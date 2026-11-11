@@ -131,8 +131,8 @@ def test_user_fields_survive_missing_llm_fields():
     )
     assert result["target_layer"] == "DM"
     assert result["target_schema"] == "DWH"
-    assert result["target_table"] == "DM_HR_ORDERS"
-    assert result["mapping_name"] == "MAP_HR_ORDERS_TO_DM"
+    assert "target_table" not in result and "tgt_table" not in result
+    assert "mapping_name" not in result
     assert result["load_type"] == "truncate_load"
     assert result["key_columns"] == ["ORDER_ID"]
     assert result["warnings"] == ["Datamart targets are supported only for Type 2 history."]

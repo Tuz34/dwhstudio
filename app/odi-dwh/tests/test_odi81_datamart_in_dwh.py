@@ -122,7 +122,8 @@ def test_datamart_non_type2_keeps_classic_restriction():
     result = normalize_mapping_request("Model HR.ORDERS into DM as truncate insert", {})
     assert result["target_layer"] == "DM"
     assert result["target_schema"] == "DWH"
-    assert result["target_table"] == "DM_HR_ORDERS"
+    assert "target_table" not in result and "tgt_table" not in result
+    assert "mapping_name" not in result
     assert result["warnings"] == ["Datamart targets are supported only for Type 2 history."]
     assert "tgt_model" not in result
 
@@ -177,3 +178,65 @@ def test_datamart_source_model_rule_stays_owner_based():
     )
     assert stated["src_model"] == "ORACLE_ODS"
     assert "source_model" in stated["stated_fields"]
+
+
+@pytest.mark.parametrize(("sentence", "load_type", "keys"), [
+    ("Model HR.ORDERS into DM as truncate insert", "truncate_load", None),
+    ("Model HR.ORDERS into datamart as insert update, key ORDER_ID", "insert_update", ["ORDER_ID"]),
+    ("Model HR.ORDERS into data mart as type 1, key ORDER_ID", "type1", ["ORDER_ID"]),
+    ("HR.ORDERS tablosunu datamart katmanına tam yükleme olarak modelle", "truncate_load", None),
+    ("Model HR.ORDERS into DM", None, None),
+])
+def test_classic_or_unstated_datamart_load_has_no_usable_target(sentence, load_type, keys):
+    result = normalize_mapping_request(sentence, {})
+    assert result["target_layer"] == "DM"
+    assert (result["target_schema"], result["tgt_owner"]) == ("DWH", "DWH")
+    assert result.get("load_type") == load_type
+    assert result.get("key_columns") == keys
+    assert "target_table" not in result and "tgt_table" not in result
+    assert "mapping_name" not in result
+    assert result["warnings"] == ["Datamart targets are supported only for Type 2 history."]
+
+
+def test_classic_datamart_omits_even_an_explicit_target_table():
+    result = normalize_mapping_request(
+        "Model HR.ORDERS into DM as truncate insert, target table DWH.DM_SPECIAL, "
+        "mapping name MAP_EXPLICIT", {}
+    )
+    assert result["target_schema"] == "DWH"
+    assert "target_table" not in result and "tgt_table" not in result
+    assert "mapping_name" not in result
+    assert "target_table" not in result["stated_fields"]
+    assert "mapping_name" not in result["stated_fields"]
+    assert result["warnings"] == ["Datamart targets are supported only for Type 2 history."]
+
+
+@pytest.mark.parametrize("quoted_owner", ['"DM"', "'DM'", "`DM`", "“DM”", "‘DM’"])
+def test_quoted_datamart_target_schema_is_preserved(quoted_owner):
+    result = normalize_mapping_request(
+        f"Model HR.ORDERS into datamart as Type 2, target schema {quoted_owner}", {}
+    )
+    assert (result["target_schema"], result["tgt_owner"]) == ("DM", "DM")
+    assert (result["target_table"], result["tgt_table"]) == ("DM_HR_ORDERS", "DM_HR_ORDERS")
+    assert result["mapping_name"] == "MAP_HR_ORDERS_TO_DM"
+    assert result["warnings"] == [_PLACEMENT_WARNING]
+    assert "target_schema" in result["stated_fields"]
+    assert "target_table" not in result["stated_fields"]
+
+
+@pytest.mark.parametrize("owner", ["ODS", '"ODS"'])
+def test_any_stated_non_dwh_datamart_schema_has_placement_warning(owner):
+    result = normalize_mapping_request(
+        f"Model HR.ORDERS into datamart as Type 2, target schema {owner}", {}
+    )
+    assert (result["target_schema"], result["tgt_owner"]) == ("ODS", "ODS")
+    assert result["target_table"] == "DM_HR_ORDERS"
+    assert result["warnings"] == [_PLACEMENT_WARNING]
+    assert "target_schema" in result["stated_fields"]
+
+
+def test_non_datamart_schema_marker_behavior_stays_at_base():
+    result = normalize_mapping_request("Model HR.ORDERS into EDW, target schema DWH", {})
+    assert result["target_layer"] == "EDW"
+    assert result["target_schema"] == "DWH"
+    assert result["target_table"] == "SCHEMA"

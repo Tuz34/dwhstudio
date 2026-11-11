@@ -10,12 +10,12 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from datamart_contract import DATAMART_PLACEMENT_WARNING as _DM_PLACEMENT_WARNING
+from datamart_contract import DATAMART_TYPE2_ONLY_WARNING as _DM_WARNING
 from mapping_generator import classic_internal_source_model
 
 # Same Oracle/ODI identifier contract as MappingGenerator._validate_identifier.
 _IDENTIFIER = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
-_DM_WARNING = "Datamart targets are supported only for Type 2 history."
-_DM_PLACEMENT_WARNING = "Datamart objects are created in DWH with a DM_ prefix in this installation."
 _TYPE2_NAME_WARNING = "Mapping name is longer than 31 characters; Type 2 requires a shorter name."
 _LAYERS = {"ODS": "ODS", "EDW": "EDW", "DWH": "DWH", "DM": "DM", "DATAMART": "DM", "DATA MART": "DM"}
 # Classic acceptance uses ORACLE_ODS for ODS targets and ORACLE_DWH for F3.
@@ -187,8 +187,9 @@ def _lex(message: str) -> list[_Token]:
             if close < 0:
                 index += 1  # An unclosed quote does not hide the remaining message.
                 continue
+            quoted_value = text[index + 1:close]
             index = close + 1
-            tokens.append(_Token("quoted", ""))
+            tokens.append(_Token("quoted", quoted_value))
             continue
         if char in _PUNCTUATION:
             tokens.append(_Token("punct", char))
@@ -381,22 +382,29 @@ def _explicit_dm_target_owner(tokens: list[_Token]) -> tuple[str | None, set[int
     owners = []
     markers: set[int] = set()
     taken: set[int] = set()
-    for index in range(len(tokens) - 2):
+    invalid = False
+    for index in range(len(tokens) - 1):
         if (tokens[index].kind != "word" or tokens[index].value not in {"TARGET", "HEDEF"}
                 or tokens[index + 1].kind != "word"
                 or tokens[index + 1].value not in {"SCHEMA", "OWNER", "SEMA"}):
             continue
+        markers.add(index)
+        taken.update({index, index + 1})
         value_index = index + 2
         if _at(tokens, value_index, ":", set()) or _at(tokens, value_index, "=", set()):
             value_index += 1
-        if value_index >= len(tokens) or tokens[value_index].kind != "word":
+        if value_index >= len(tokens):
+            invalid = True
             continue
-        owner = _identifier(tokens[value_index].value)
+        taken.add(value_index)
+        owner = (_identifier(tokens[value_index].value)
+                 if tokens[value_index].kind in {"word", "quoted"} else None)
         if owner:
             owners.append(owner)
-            markers.add(index)
-            taken.update({index, index + 1, value_index})
-    return (owners[0], markers, taken) if len(set(owners)) == 1 else (None, set(), set())
+        else:
+            invalid = True
+    owner = owners[0] if not invalid and len(set(owners)) == 1 else None
+    return owner, markers, taken
 
 
 def _explicit_target(
@@ -728,7 +736,7 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
         stated.add("target_table")
         if explicit_owner:
             stated.add("target_schema")
-    elif target_marker_seen:
+    elif target_marker_seen or (dm_owner_markers and not dm_owner):
         target_owner = dm_owner or ("DWH" if layer else None)
         target_table = None
     elif layer in {"ODS", "EDW", "DWH", "DM"} and source_owner and source_table:
@@ -747,6 +755,11 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
         stated.discard("target_schema")
         stated.discard("target_table")
     explicit_name = _explicit_mapping_name(tokens)
+    dm_classic = layer == "DM" and load_type != "type2"
+    if dm_classic:
+        target_owner = explicit_owner or dm_owner or "DWH"
+        target_table = None
+        stated.discard("target_table")
 
     proposal: dict = {"operation": "CREATE"}
     if source_owner:
@@ -768,10 +781,10 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
         proposal.update(target_schema=target_owner, tgt_owner=target_owner)
     if target_table:
         proposal.update(target_table=target_table, tgt_table=target_table)
-    if explicit_name:
+    if explicit_name and not dm_classic:
         proposal["mapping_name"] = explicit_name
         stated.add("mapping_name")
-    elif layer in {"ODS", "EDW", "DWH", "DM"} and source_owner and source_table:
+    elif not dm_classic and layer in {"ODS", "EDW", "DWH", "DM"} and source_owner and source_table:
         name = _identifier(f"MAP_{source_owner}_{source_table}_TO_{layer}")
         if name and (load_type != "type2" or len(name) <= 31):
             proposal["mapping_name"] = name
@@ -785,7 +798,8 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
     if layer == "DM" and load_type != "type2":
         warnings.append(_DM_WARNING)
     if layer == "DM" and (
-            dm_owner == "DM" or explicit_owner == "DM" or
+            (dm_owner and dm_owner != "DWH") or
+            (explicit_owner and explicit_owner != "DWH") or
             (explicit_table and not explicit_table.startswith("DM_"))):
         warnings.append(_DM_PLACEMENT_WARNING)
     if load_type == "type2" and explicit_name and len(explicit_name) > 31:

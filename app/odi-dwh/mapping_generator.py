@@ -33,6 +33,7 @@ from config import (
     SOURCE_ORACLE_SCHEMAS,
     SOURCE_SYSTEM_NAME,
 )
+from datamart_contract import DATAMART_REQUIRES_TYPE2_CODE, DATAMART_TYPE2_ONLY_WARNING
 from exceptions import MappingGenerationError
 from ikm_policy import is_update_ikm, normalize_repository_preflight, resolve_approved_ikm, verified_source_identity
 from mapping_state_manager import redact_sensitive_text
@@ -72,6 +73,15 @@ class AuditPreservationRejected(ValueError):
     """Same-schema audit SQL failed static validation before any DDL."""
 
     error_code = "audit_preservation_rejected"
+
+
+class DatamartRequiresType2Error(ValueError):
+    """A DM_ target belongs to the Type 2 pipeline, before any external step."""
+
+    error_code = DATAMART_REQUIRES_TYPE2_CODE
+
+    def __init__(self) -> None:
+        super().__init__(DATAMART_TYPE2_ONLY_WARNING)
 
 
 class UpdateKeyRequiredError(ValueError):
@@ -1562,6 +1572,11 @@ class MappingGenerator:
         if params is None:
             logger.error("validate_params received None!")
             raise ValueError("Parameters cannot be empty (None).")
+
+        raw_target = params.get("tgt_table")
+        if (isinstance(raw_target, str) and
+                raw_target.strip().upper().split(".")[-1].startswith("DM_")):
+            raise DatamartRequiresType2Error()
 
         validated = {}
 
