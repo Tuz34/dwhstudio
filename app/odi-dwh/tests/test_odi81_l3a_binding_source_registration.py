@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
@@ -73,6 +75,16 @@ def _own_services(orchestrator, plan, *, ddl_log=None, table_exists=True):
 
 def _plan():
     return scd2_builder.build_scd2_plan(REQUEST, SOURCE_COLUMNS)
+
+
+def test_guarded_odi81_runner_evaluates_real_config_assignments():
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, "-B", str(root / "tests" / "run_odi81_offline.py")],
+        cwd=root, capture_output=True, text=True, timeout=90, check=False,
+    )
+    assert completed.returncode == 0, completed.stdout[-500:] + completed.stderr[-500:]
+    assert "passed" in completed.stdout
 
 
 @pytest.mark.parametrize("raw", [None, "", "  \t"])

@@ -9,7 +9,6 @@ Usage:
 If the environment file is absent, the root .env is read as a fallback.
 """
 
-import json
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -17,8 +16,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-import scd2_builder
 from secret_provider import get_secret, get_secret_list
+from source_model_policy import effective_source_model_bindings
 
 # ── 1. Environment detection ──────────────────────────────────────────────────────────
 # First read the ENVIRONMENT variable from the root .env
@@ -161,13 +160,11 @@ ODI_LKM_PRIORITY    = os.getenv("ODI_LKM_PRIORITY", "sql to oracle,mssql to orac
 # Optional JSON object: {"CONTEXT": {"PHYSICAL_OWNER": "MODEL_CODE"}}.
 # An unset/blank value binds only the app's own DWH source in GLOBAL. A nonblank
 # value replaces this default; consumers still validate it before repository use.
-def effective_source_model_bindings(raw: str | None) -> str:
-    if raw is None or not raw.strip():
-        return json.dumps({"GLOBAL": {"DWH": scd2_builder.SOURCE_MODEL_BY_OWNER["DWH"]}})
-    return raw
-
-
-ODI_SOURCE_MODEL_BINDINGS = effective_source_model_bindings(os.getenv("ODI_SOURCE_MODEL_BINDINGS"))
+# Keep this assignment independent of imports/function definitions: offline tools
+# evaluate uppercase config assignments in an isolated namespace.
+ODI_SOURCE_MODEL_BINDINGS = __import__("source_model_policy").effective_source_model_bindings(
+    os.getenv("ODI_SOURCE_MODEL_BINDINGS")
+)
 
 # ── 9. Alert & Monitoring Settings ──────────────────────────────────────────
 ALERT_FRESHNESS_DAYS = int(os.getenv("ALERT_FRESHNESS_DAYS", "2"))

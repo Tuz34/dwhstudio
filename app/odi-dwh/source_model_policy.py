@@ -22,6 +22,15 @@ class SourceModelConfigError(Exception):
         super().__init__(self.code)
 
 
+def effective_source_model_bindings(raw: str | None) -> str:
+    """Use the one built-in DWH binding only when no explicit server map is set."""
+    if raw is None or not raw.strip():
+        from scd2_builder import SOURCE_MODEL_BY_OWNER
+
+        return json.dumps({"GLOBAL": {"DWH": SOURCE_MODEL_BY_OWNER["DWH"]}})
+    return raw
+
+
 def _pairs(pairs: list[tuple[object, object]]) -> dict[str, object]:
     parsed: dict[str, object] = {}
     seen: set[str] = set()
