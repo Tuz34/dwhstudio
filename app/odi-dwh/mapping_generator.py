@@ -1573,11 +1573,6 @@ class MappingGenerator:
             logger.error("validate_params received None!")
             raise ValueError("Parameters cannot be empty (None).")
 
-        raw_target = params.get("tgt_table")
-        if (isinstance(raw_target, str) and
-                raw_target.strip().upper().split(".")[-1].startswith("DM_")):
-            raise DatamartRequiresType2Error()
-
         validated = {}
 
         validated["mapping_name"] = self._validate_identifier(
@@ -1662,6 +1657,8 @@ class MappingGenerator:
             tgt_table_no_schema = tgt_table_no_schema.replace("SKEY_MAP_", "SKEY_")
             
         validated["tgt_table"] = self._validate_identifier(tgt_table_no_schema, "tgt_table")
+        if validated["tgt_table"].startswith("DM_"):
+            raise DatamartRequiresType2Error()
         validated["tgt_owner"] = params.get("tgt_owner", "DWH").strip().upper()
 
         # Check owner allowlist

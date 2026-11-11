@@ -58,7 +58,8 @@ export function parseKeyColumns(value) {
 export function validateLoadOptions(form) {
   const loadType = form.load_type;
   if (!VALID_LOAD_TYPES.has(loadType)) throw new Error('Choose a load type.');
-  if (loadType !== 'type2' && String(form.tgt_table ?? '').trim().toUpperCase().startsWith('DM_')) {
+  const targetTable = String(form.tgt_table ?? '').split('.').pop().trim().toUpperCase();
+  if (loadType !== 'type2' && targetTable.startsWith('DM_')) {
     throw new Error(DATAMART_TYPE2_ONLY_WARNING);
   }
   const keyColumns = loadType === 'truncate_load' ? [] : parseKeyColumns(form.key_columns);
