@@ -201,7 +201,7 @@ def node_parse_prompt(state: MappingState) -> dict:
 
 def node_validate(state: MappingState) -> dict:
     """Validate and normalize parameters."""
-    from mapping_generator import MappingGenerator
+    from mapping_generator import DatamartRequiresType2Error, MappingGenerator
 
     if state.get("overall_status") == "failed":
         return {"overall_status": "failed"}
@@ -226,12 +226,15 @@ def node_validate(state: MappingState) -> dict:
             "completed_steps": list(state.get("completed_steps", [])) + ["validate"],
         }
     except ValueError as e:
-        return {
+        failure = {
             "current_step": "validate",
             "overall_status": "failed",
             "error": f"Validation failed: {e}",
             "log": _add_log(state, "validate", "FAILED", str(e)),
         }
+        if isinstance(e, DatamartRequiresType2Error):
+            failure["error_code"] = e.error_code
+        return failure
 
 
 def node_preview(state: MappingState) -> dict:

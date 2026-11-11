@@ -130,8 +130,8 @@ def test_user_fields_survive_missing_llm_fields():
         {"operation": "CREATE"},
     )
     assert result["target_layer"] == "DM"
-    assert result["target_schema"] == "DM"
-    assert "target_table" not in result
+    assert result["target_schema"] == "DWH"
+    assert "target_table" not in result and "tgt_table" not in result
     assert "mapping_name" not in result
     assert result["load_type"] == "truncate_load"
     assert result["key_columns"] == ["ORDER_ID"]
@@ -140,7 +140,7 @@ def test_user_fields_survive_missing_llm_fields():
     assert "tgt_model" not in result
 
 
-def test_datamart_keeps_explicit_target_without_inventing_generic_name():
+def test_datamart_keeps_explicit_target_and_uses_layer_mapping_name():
     result = normalize_mapping_request(
         "Model HR.ORDERS into datamart, target table DM.DIM_ORDERS as Type 2",
         {"operation": "CREATE"},
@@ -148,8 +148,10 @@ def test_datamart_keeps_explicit_target_without_inventing_generic_name():
     assert result["target_layer"] == "DM"
     assert result["target_schema"] == "DM"
     assert result["target_table"] == "DIM_ORDERS"
-    assert "mapping_name" not in result
+    assert result["mapping_name"] == "MAP_HR_ORDERS_TO_DM"
     assert result["load_type"] == "type2"
+    assert result["warnings"] == [
+        "Datamart objects are created in DWH with a DM_ prefix in this installation."]
 
 
 def test_no_recognized_layer_keeps_validated_llm_target_as_suggestion():
@@ -373,7 +375,8 @@ OWNER_SENTENCES = {
         ],
         {"source_schema": "DWH", "source_table": "DWH_ODI81N_F5", "target_layer": "DM",
          "load_type": "type2", "key_columns": ["ID"], "target_schema": "DM",
-         "target_table": "DIM_ODI81N_F5", "mapping_name": None, "warnings": None},
+         "target_table": "DIM_ODI81N_F5", "mapping_name": "MAP_DWH_DWH_ODI81N_F5_TO_DM",
+         "warnings": ["Datamart objects are created in DWH with a DM_ prefix in this installation."]},
     ),
 }
 

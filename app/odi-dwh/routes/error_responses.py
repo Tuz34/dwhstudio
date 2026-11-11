@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from flask import current_app, jsonify
 
+from datamart_contract import DATAMART_REQUIRES_TYPE2_CODE, DATAMART_TYPE2_ONLY_WARNING
+
 
 _FAILURE_STATUSES = {"BLOCKED", "ERROR", "FAILED", "FAILURE", "INVALID", "SKIPPED"}
 _AUDIT_PRESERVATION_REJECTED = "audit_preservation_rejected"
@@ -32,10 +34,10 @@ def redacted_operation_result(value, action: str):
     status = str(value.get("status") or value.get("overall_status") or "").upper()
     failed = status in _FAILURE_STATUSES
     had_error = any(str(key).lower() in {"error", "error_message"} and item for key, item in value.items())
+    code = value.get("error_code")
     fixed_error = (
-        _AUDIT_PRESERVATION_SENTENCE
-        if value.get("error_code") == _AUDIT_PRESERVATION_REJECTED
-        else None
+        _AUDIT_PRESERVATION_SENTENCE if code == _AUDIT_PRESERVATION_REJECTED else
+        DATAMART_TYPE2_ONLY_WARNING if code == DATAMART_REQUIRES_TYPE2_CODE else None
     )
     cleaned = {}
     for key, item in value.items():

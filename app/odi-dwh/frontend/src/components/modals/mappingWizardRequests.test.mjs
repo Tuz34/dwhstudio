@@ -108,6 +108,40 @@ test('missing or unknown load type is never inferred from table names', () => {
   assert.throws(() => buildMappingRequest({ ...form, load_type: 'other' }), /Choose a load type/);
 });
 
+test('a typed DM_ target cannot continue with a classic load', () => {
+  const warning = 'Datamart targets are supported only for Type 2 history.';
+  for (const loadType of ['truncate_load', 'insert_update', 'type1']) {
+    const typed = { ...form, tgt_owner: 'DWH', tgt_table: '  dm_x  ', load_type: loadType };
+    assert.equal(getLoadOptionError(typed), warning, loadType);
+    assert.throws(() => buildMappingRequest(typed), { message: warning }, loadType);
+  }
+  const type2 = { ...form, tgt_owner: 'DWH', tgt_table: 'DM_X', load_type: 'type2' };
+  assert.equal(getLoadOptionError(type2), null);
+  assert.equal(buildScd2Handoff(type2).payload.props.mappingRequest.tgt_table, 'DM_X');
+});
+
+test('classic load guards use the final Unicode-trimmed target segment', () => {
+  const warning = 'Datamart targets are supported only for Type 2 history.';
+  const spellings = [
+    ['DWH. DM_X', true], ['DWH.  DM_X', true], ['DWH.\tDM_X', true],
+    ['DWH.\u00a0DM_X', true], ['dwh. dM_x', true], [' \tDWH. DM_X', true],
+    ['DWH.\u2003DM_X', true], ['ODS_DM_X', false], ['XDM_Y', false],
+    ['DWH.ODS_X', false],
+  ];
+  for (const [target, isDatamart] of spellings) {
+    for (const loadType of ['truncate_load', 'insert_update', 'type1']) {
+      const typed = { ...form, tgt_table: target, load_type: loadType };
+      if (isDatamart) {
+        assert.equal(getLoadOptionError(typed), warning, `${target}/${loadType}`);
+        assert.throws(() => buildMappingRequest(typed), { message: warning }, `${target}/${loadType}`);
+      } else {
+        assert.equal(getLoadOptionError(typed), null, `${target}/${loadType}`);
+        assert.equal(buildMappingRequest(typed).params.tgt_table, target, `${target}/${loadType}`);
+      }
+    }
+  }
+});
+
 test('prefill accepts only named load types and array key columns', () => {
   assert.deepEqual(prefillLoadOptions({ load_type: 'type1', key_columns: [' entity_id ', 'source_id'] }), {
     load_type: 'type1', key_columns: 'ENTITY_ID, SOURCE_ID',

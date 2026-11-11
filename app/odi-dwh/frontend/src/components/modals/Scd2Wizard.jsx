@@ -448,7 +448,7 @@ export function Scd2Wizard({ open, onClose, initialData = {} }) {
       {step === 0 && (
         <div className="space-y-4">
           <p className="text-sm text-slate-500">
-            Describe the Type 2 mapping. Column names are entered here and are not inferred from the table name.
+            Describe the Type 2 mapping. Datamart targets use DWH with a DM_ table name. Column names are entered here and are not inferred from the table name.
           </p>
           <div className="grid grid-cols-2 gap-4">
             <Field label="Source owner" required note={form.prefillNotes?.source_owner} error={visibleError(validation.errors, 'source_owner', form.source_owner)}>

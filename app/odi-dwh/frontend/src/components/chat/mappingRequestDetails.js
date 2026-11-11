@@ -1,3 +1,5 @@
+import { DATAMART_PLACEMENT_WARNING, DATAMART_TYPE2_ONLY_WARNING } from '../../datamartContract.js';
+
 const LOAD_LABELS = {
   insert_update: 'Insert / update',
   truncate_load: 'Truncate and reload',
@@ -5,7 +7,8 @@ const LOAD_LABELS = {
   type2: 'Type 2 history',
 };
 const WARNINGS = new Set([
-  'Datamart targets are supported only for Type 2 history.',
+  DATAMART_TYPE2_ONLY_WARNING,
+  DATAMART_PLACEMENT_WARNING,
   'Mapping name is longer than 31 characters; Type 2 requires a shorter name.',
 ]);
 const STATED_FIELDS = new Set([

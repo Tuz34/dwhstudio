@@ -46,6 +46,29 @@ test('no-layer LLM values are suggestions and only fixed warnings render', () =>
   assert.deepEqual(details.warnings, ['Datamart targets are supported only for Type 2 history.']);
 });
 
+test('Type 2 card shows the fixed placement warning for a stated DM schema', () => {
+  const warning = 'Datamart objects are created in DWH with a DM_ prefix in this installation.';
+  const details = mappingRequestDetails({
+    target_layer: 'DM', target_schema: 'DM', load_type: 'type2',
+    stated_fields: ['target_layer', 'target_schema', 'load_type'],
+    warnings: [warning],
+  });
+  assert.deepEqual(details.warnings, [warning]);
+});
+
+test('frontend Datamart warning literals mirror the Python constants', async () => {
+  const js = await import('../../datamartContract.js');
+  const python = readFileSync(new URL('../../../../datamart_contract.py', import.meta.url), 'utf8');
+  for (const [name, value] of [
+    ['DATAMART_TYPE2_ONLY_WARNING', js.DATAMART_TYPE2_ONLY_WARNING],
+    ['DATAMART_PLACEMENT_WARNING', js.DATAMART_PLACEMENT_WARNING],
+  ]) {
+    const match = python.match(new RegExp(`^${name} = "([^"]+)"$`, 'm'));
+    assert.ok(match, `${name} must be a fixed Python literal`);
+    assert.equal(value, match[1], name);
+  }
+});
+
 // The five expected proposal shapes match OWNER_SENTENCES in the backend test.
 // There are twelve sentence orders, including target-first Type 2 variants.
 const ownerProposals = [

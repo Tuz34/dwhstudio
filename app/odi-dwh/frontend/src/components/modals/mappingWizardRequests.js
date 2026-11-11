@@ -1,3 +1,5 @@
+import { DATAMART_TYPE2_ONLY_WARNING } from '../../datamartContract.js';
+
 const IDENTIFIER = /^[A-Z][A-Z0-9_]{0,127}$/;
 const MAX_KEY_COLUMNS = 8;
 
@@ -56,6 +58,10 @@ export function parseKeyColumns(value) {
 export function validateLoadOptions(form) {
   const loadType = form.load_type;
   if (!VALID_LOAD_TYPES.has(loadType)) throw new Error('Choose a load type.');
+  const targetTable = String(form.tgt_table ?? '').split('.').pop().trim().toUpperCase();
+  if (loadType !== 'type2' && targetTable.startsWith('DM_')) {
+    throw new Error(DATAMART_TYPE2_ONLY_WARNING);
+  }
   const keyColumns = loadType === 'truncate_load' ? [] : parseKeyColumns(form.key_columns);
   if (['insert_update', 'type1'].includes(loadType) && keyColumns.length === 0) {
     throw new Error('Enter at least one key column for this load type.');

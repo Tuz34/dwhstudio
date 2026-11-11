@@ -219,7 +219,7 @@ export function validateScd2Form(form) {
   if (sourceTableError) errors.source_table = sourceTableError;
 
   if (!targetOwner) errors.target_owner = 'Target owner is required.';
-  else if (!TARGET_OWNERS.includes(targetOwner)) errors.target_owner = 'Target owner must be DWH or DM.';
+  else if (!TARGET_OWNERS.includes(targetOwner)) errors.target_owner = 'Target owner must be DWH for Datamart defaults; DM is available for an explicit target.';
 
   const targetTableError = identifierError(targetTable, 'Target table');
   if (targetTableError) errors.target_table = targetTableError;
