@@ -15,6 +15,7 @@ from mapping_generator import classic_internal_source_model
 # Same Oracle/ODI identifier contract as MappingGenerator._validate_identifier.
 _IDENTIFIER = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 _DM_WARNING = "Datamart targets are supported only for Type 2 history."
+_DM_PLACEMENT_WARNING = "Datamart objects are created in DWH with a DM_ prefix in this installation."
 _TYPE2_NAME_WARNING = "Mapping name is longer than 31 characters; Type 2 requires a shorter name."
 _LAYERS = {"ODS": "ODS", "EDW": "EDW", "DWH": "DWH", "DM": "DM", "DATAMART": "DM", "DATA MART": "DM"}
 # Classic acceptance uses ORACLE_ODS for ODS targets and ORACLE_DWH for F3.
@@ -375,12 +376,39 @@ def _target_value_index(tokens: list[_Token], index: int, taken: set[int]) -> in
     return next_index
 
 
-def _explicit_target(tokens: list[_Token]) -> tuple[str | None, str | None, set[int], bool]:
+def _explicit_dm_target_owner(tokens: list[_Token]) -> tuple[str | None, set[int], set[int]]:
+    """Read a separately stated Datamart target owner without treating SCHEMA as a table."""
+    owners = []
+    markers: set[int] = set()
+    taken: set[int] = set()
+    for index in range(len(tokens) - 2):
+        if (tokens[index].kind != "word" or tokens[index].value not in {"TARGET", "HEDEF"}
+                or tokens[index + 1].kind != "word"
+                or tokens[index + 1].value not in {"SCHEMA", "OWNER", "SEMA"}):
+            continue
+        value_index = index + 2
+        if _at(tokens, value_index, ":", set()) or _at(tokens, value_index, "=", set()):
+            value_index += 1
+        if value_index >= len(tokens) or tokens[value_index].kind != "word":
+            continue
+        owner = _identifier(tokens[value_index].value)
+        if owner:
+            owners.append(owner)
+            markers.add(index)
+            taken.update({index, index + 1, value_index})
+    return (owners[0], markers, taken) if len(set(owners)) == 1 else (None, set(), set())
+
+
+def _explicit_target(
+    tokens: list[_Token], ignored_markers: set[int] | None = None,
+) -> tuple[str | None, str | None, set[int], bool]:
     references = []
     taken: set[int] = set()
     marker_seen = False
     invalid_marker = False
     for index in range(len(tokens)):
+        if ignored_markers and index in ignored_markers:
+            continue
         value_index = _target_value_index(tokens, index, taken)
         if value_index is None:
             continue
@@ -656,9 +684,17 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
     tokens = _lex(message)
     stated: set[str] = set()
     explicit_model, model_taken = _explicit_source_model(tokens)
-    explicit_owner, explicit_table, target_taken, target_marker_seen = _explicit_target(tokens)
-    user_source_owner, user_source_table, source_taken = _explicit_source(tokens, target_taken | model_taken)
-    identifier_taken = target_taken | source_taken | model_taken
+    dm_owner, dm_owner_markers, dm_owner_taken = (
+        _explicit_dm_target_owner(tokens) if _layer(tokens, model_taken) == "DM"
+        else (None, set(), set())
+    )
+    explicit_owner, explicit_table, target_taken, target_marker_seen = _explicit_target(
+        tokens, dm_owner_markers
+    )
+    user_source_owner, user_source_table, source_taken = _explicit_source(
+        tokens, target_taken | dm_owner_taken | model_taken
+    )
+    identifier_taken = target_taken | dm_owner_taken | source_taken | model_taken
     keys, key_taken = _keys(tokens, identifier_taken)
     intent_taken = identifier_taken | key_taken
     layer = _layer(tokens, intent_taken)
@@ -680,25 +716,27 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
 
     if layer:
         stated.add("target_layer")
+    if dm_owner:
+        stated.add("target_schema")
     hint_target_owner, hint_target_table = _hint_target(raw)
     if explicit_table:
         target_table = explicit_table
-        target_owner = explicit_owner or (
-            ("DM" if layer == "DM" else "DWH") if layer
+        target_owner = explicit_owner or dm_owner or (
+            "DWH" if layer
             else hint_target_owner if hint_target_table == explicit_table else None
         )
         stated.add("target_table")
         if explicit_owner:
             stated.add("target_schema")
     elif target_marker_seen:
-        target_owner = "DM" if layer == "DM" else "DWH" if layer else None
+        target_owner = dm_owner or ("DWH" if layer else None)
         target_table = None
-    elif layer in {"ODS", "EDW", "DWH"} and source_owner and source_table:
-        target_owner = "DWH"
+    elif layer in {"ODS", "EDW", "DWH", "DM"} and source_owner and source_table:
+        target_owner = dm_owner or "DWH"
         prefix = f"{layer}_" if layer != "DWH" else ""
         target_table = _identifier(f"{prefix}{source_owner}_{source_table}")
     elif layer:
-        target_owner = "DM" if layer == "DM" else "DWH"
+        target_owner = dm_owner or "DWH"
         target_table = None
     else:
         target_owner, target_table = hint_target_owner, hint_target_table
@@ -733,7 +771,7 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
     if explicit_name:
         proposal["mapping_name"] = explicit_name
         stated.add("mapping_name")
-    elif layer in {"ODS", "EDW", "DWH"} and source_owner and source_table:
+    elif layer in {"ODS", "EDW", "DWH", "DM"} and source_owner and source_table:
         name = _identifier(f"MAP_{source_owner}_{source_table}_TO_{layer}")
         if name and (load_type != "type2" or len(name) <= 31):
             proposal["mapping_name"] = name
@@ -746,6 +784,10 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
     warnings = []
     if layer == "DM" and load_type != "type2":
         warnings.append(_DM_WARNING)
+    if layer == "DM" and (
+            dm_owner == "DM" or explicit_owner == "DM" or
+            (explicit_table and not explicit_table.startswith("DM_"))):
+        warnings.append(_DM_PLACEMENT_WARNING)
     if load_type == "type2" and explicit_name and len(explicit_name) > 31:
         warnings.append(_TYPE2_NAME_WARNING)
     if warnings:
