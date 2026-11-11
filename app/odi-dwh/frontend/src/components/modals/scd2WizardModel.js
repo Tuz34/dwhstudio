@@ -37,6 +37,11 @@ export const REVIEW_SENTENCE = 'This operation may have started or partly comple
 export const UNRESOLVED_CLOSE_SENTENCE = 'An operation in this dialog is unresolved and must be checked before it is tried again.';
 export const WRITE_IN_FLIGHT_NOTE = 'This request is still running. Do not reload this page. If the page is reloaded anyway, check the evidence before running again.';
 
+const VISIBILITY_EXPLANATIONS = {
+  blocked_source_not_found: 'Source table was not found or not readable by the application.',
+  blocked_target_not_found: 'Target table was not found or not readable by the application.',
+};
+
 const PROOF_FLAGS = new Set(['business_parity_proven', 'physical_noop_proven']);
 const UNKNOWN_REPOSITORY = new Set(['unverified', 'commit_outcome_unknown', 'rollback_failed']);
 
@@ -331,11 +336,11 @@ export function describeFailure(payload) {
   const errorCode = typeof payload.error_code === 'string' ? payload.error_code : '';
   const error = typeof payload.error === 'string' ? payload.error : '';
   const errorType = typeof payload.error_type === 'string' ? payload.error_type : '';
-  const parts = [status, errorCode, error, errorType].filter(Boolean);
+  const parts = [status, errorCode, error, errorType, VISIBILITY_EXPLANATIONS[status]].filter(Boolean);
   const message = parts.join(' — ') || 'Request failed.';
   const blockers = [];
   if (status && !['planned', 'generated', 'run_completed', 'ok'].includes(status)) {
-    blockers.push(errorCode ? `${status}: ${errorCode}` : status);
+    blockers.push(errorCode ? `${status}: ${errorCode}` : (VISIBILITY_EXPLANATIONS[status] || status));
   }
   if (Array.isArray(payload.blockers)) {
     for (const item of payload.blockers) {
@@ -523,6 +528,7 @@ export const DEFINITE_FAILURE_ROWS = Object.freeze([
   Object.freeze({ route: 'run', http: 400, status: 'invalid_request' }), // scd2_service.py:363-366
   Object.freeze({ route: 'run', http: 400, status: 'blocked_until_approval' }), // scd2_service.py:361-362
   Object.freeze({ route: 'run', http: 400, status: '' }), // app.py:196-198 via routes/scd2_write.py:56-58
+  Object.freeze({ route: 'run', http: 409, status: 'blocked_target_not_found' }), // scd2_service.py: empty target columns
   Object.freeze({ route: 'run', http: 409, status: 'blocked_target_not_scd2' }), // scd2_service.py:377-378
   Object.freeze({ route: 'run', http: 409, status: 'blocked_scenario_name_collision' }), // scd2_service.py:385-386
   Object.freeze({ route: 'run', http: 409, status: 'blocked_scenario_missing' }), // scd2_service.py:387-388
@@ -860,6 +866,7 @@ export function projectRejected(error, { write = false, route = null } = {}) {
   const parts = [];
   if (httpStatus != null) parts.push(`HTTP ${httpStatus}`);
   if (serverStatus) parts.push(serverStatus);
+  if (VISIBILITY_EXPLANATIONS[serverStatus]) parts.push(VISIBILITY_EXPLANATIONS[serverStatus]);
   if (errorCode) parts.push(errorCode);
   if (serverError) parts.push(serverError);
   const writeRoute = route === 'generate' || route === 'run' ? route : null;

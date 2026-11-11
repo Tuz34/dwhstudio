@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +60,29 @@ def _invalid(exc: scd2_builder.Scd2PlanError) -> tuple[dict[str, Any], int]:
     return {"status": "invalid_request", "error_code": exc.code}, 400
 
 
+def _read_connection_factory(
+    owner: str, services: Scd2Services, *, counts: bool = False,
+) -> Callable[[], Any]:
+    """Use the owner session for the DDL schema; count collectors open their own read-only transaction."""
+    if owner != services.ddl_user:
+        return services.catalog_connection
+    if counts:
+        return services.ddl_connection
+
+    def ddl_read_only() -> Any:
+        with ExitStack() as stack:
+            connection = services.ddl_connection()
+            stack.callback(connection.close)
+            if connection.autocommit is not False:
+                raise ValueError("Autocommit must be disabled")
+            with closing(connection.cursor()) as cursor:
+                cursor.execute("SET TRANSACTION READ ONLY")
+            stack.pop_all()
+        return connection
+
+    return ddl_read_only
+
+
 def _source_columns(
     body: Mapping[str, Any], services: Scd2Services, *, allow_request_columns: bool
 ) -> tuple[list[dict[str, Any]] | None, str]:
@@ -71,7 +95,7 @@ def _source_columns(
         if owner not in scd2_builder.SOURCE_MODEL_BY_OWNER or not scd2_builder.IDENTIFIER_RE.fullmatch(table):
             return None, "invalid"
         return (
-            scd2_target_executor.fetch_source_columns(owner, table, services.catalog_connection),
+            scd2_target_executor.fetch_source_columns(owner, table, _read_connection_factory(owner, services)),
             "live_catalog",
         )
     except oracledb.Error as exc:
@@ -348,14 +372,17 @@ def validate_run_request(body: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _target_is_scd2(spec: Mapping[str, Any], services: Scd2Services) -> bool | None:
+def _target_is_scd2(spec: Mapping[str, Any], services: Scd2Services) -> bool | str | None:
     try:
         columns = scd2_target_executor.fetch_source_columns(
-            spec["target_owner"], spec["target_table"], services.catalog_connection
+            spec["target_owner"], spec["target_table"],
+            _read_connection_factory(spec["target_owner"], services),
         )
     except oracledb.Error as exc:
         logger.warning("SCD2 target metadata read failed: %s", type(exc).__name__)
         return None
+    if not columns:
+        return "not_found"
     return SCD2_REQUIRED_COLUMNS <= {column["name"] for column in columns}
 
 
@@ -393,6 +420,8 @@ def run(
     is_scd2 = _target_is_scd2(spec, services)
     if is_scd2 is None:
         return {"status": "target_metadata_unavailable", "steps": steps}, 503
+    if is_scd2 == "not_found":
+        return {"status": "blocked_target_not_found", "steps": steps}, 409
     if not is_scd2:
         return {"status": "blocked_target_not_scd2", "steps": steps}, 409
 
@@ -439,8 +468,13 @@ def run(
             return {"status": "blocked_execution_identity", "steps": steps}, 409
 
     source = (spec["source_owner"], spec["source_table"])
+    target_factory = _read_connection_factory(spec["target_owner"], services, counts=True)
+    source_factory = _read_connection_factory(source[0], services, counts=True)
+    if source_factory is target_factory:
+        source_factory = None
     before = scd2_postflight.collect_stock_postflight(
-        spec["target_owner"], spec["target_table"], spec["natural_key"], services.catalog_connection, source=source
+        spec["target_owner"], spec["target_table"], spec["natural_key"], target_factory,
+        source=source, source_connection_factory=source_factory,
     )
     if before.get("status") != "ok" or before.get("stock_contract_valid") is not True:
         return {"status": "blocked_count_preflight", "steps": steps, "preflight": before}, 503
@@ -450,7 +484,8 @@ def run(
     )
     steps.append(run_step)
     after = scd2_postflight.collect_stock_postflight(
-        spec["target_owner"], spec["target_table"], spec["natural_key"], services.catalog_connection, source=source
+        spec["target_owner"], spec["target_table"], spec["natural_key"], target_factory,
+        source=source, source_connection_factory=source_factory,
     )
     run_ok = run_step["status"] == "passed"
     outcome_unknown = run_step.get("outcome_unknown") is True
@@ -497,8 +532,13 @@ def postflight(args: Mapping[str, str], services: Scd2Services) -> tuple[dict[st
         return {"status": "invalid_request", "error_code": "invalid_source"}, 400
     if source_owner and source_table:
         source = (source_owner, source_table)
+    target_factory = _read_connection_factory(owner, services, counts=True)
+    source_factory = _read_connection_factory(source_owner, services, counts=True) if source is not None else None
+    if source_factory is target_factory:
+        source_factory = None
     result = scd2_postflight.collect_stock_postflight(
-        owner, table, natural_key, services.catalog_connection, source=source
+        owner, table, natural_key, target_factory,
+        source=source, source_connection_factory=source_factory,
     )
     if result["status"] == "invalid_request":
         return result, 400

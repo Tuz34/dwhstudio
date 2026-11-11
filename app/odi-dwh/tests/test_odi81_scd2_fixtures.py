@@ -98,7 +98,7 @@ def test_frozen_manifest_and_surrogate_names():
     assert fixture.FLOWS["F5"]["target_owner"] == "DM"
     assert fixture.FLOWS["F5"]["target_table"] == "DIM_ODI81N_F5"
     assert len(fixture.target_catalog("F4")) == 11
-    assert fixture.SOURCE_CATALOG[0] == (1, "ENTITY_ID", "NUMBER", 22, 10, 0, None, None, "N")
+    assert fixture.SOURCE_CATALOG[0] == (1, "ENTITY_ID", "NUMBER", 22, 10, 0, None, 0, "N")
     assert fixture.SOURCE_CATALOG[1][1:8] == ("ATTR_TEXT", "VARCHAR2", 40, None, None, "B", 40)
     assert fixture.target_catalog("F4")[0][1] == "ODI81N_F4_SK"
     update_date = next(row for row in fixture.target_catalog("F4") if row[1] == "UPDATE_DATE")
@@ -113,6 +113,26 @@ def test_frozen_manifest_and_surrogate_names():
     for flow, (source, target) in isolated._FLOWS.items():
         assert source.startswith("ODI81N_SRC_")
         assert flow in {"F1", "F2", "F3"}
+
+
+def test_oracle_noncharacter_char_length_zero_and_null_are_accepted(db):
+    """Live NUMBER(10) and NUMBER(10,2) report DATA_LENGTH 22, CHAR_USED NULL, CHAR_LENGTH 0."""
+    assert fixture.SOURCE_CATALOG[0] == (1, "ENTITY_ID", "NUMBER", 22, 10, 0, None, 0, "N")
+    assert fixture.SOURCE_CATALOG[2] == (3, "VALUE_AMT", "NUMBER", 22, 10, 2, None, 0, "N")
+    assert next(row for row in fixture.target_catalog("F4") if row[1] == "EFFECTIVE_FROM")[7] == 0
+    spec = fixture.FLOWS["F4"]
+    db.install_source("F4", "empty")
+    connection = db.factory("writer", "DWH")()
+    try:
+        cursor = connection.cursor()
+        fixture._metadata(cursor, spec["source_owner"], spec["source_table"], "source", "F4")
+        db.db.execute(
+            "UPDATE ALL_TAB_COLUMNS SET CHAR_LENGTH=NULL WHERE TABLE_NAME=? AND COLUMN_NAME=?",
+            (spec["source_table"], "ENTITY_ID"),
+        )
+        fixture._metadata(cursor, spec["source_owner"], spec["source_table"], "source", "F4")
+    finally:
+        connection.close()
 
 
 def test_new_modules_do_not_add_a_broad_exception_handler():

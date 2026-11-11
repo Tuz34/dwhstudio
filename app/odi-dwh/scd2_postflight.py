@@ -225,6 +225,7 @@ def _cleanup_stock_resources(resources: list[Any]) -> bool:
 def collect_stock_postflight(
     owner: str, table: str, natural_key: Sequence[str], connection_factory: Callable[[], Any], *,
     source: tuple[str, str] | None = None,
+    source_connection_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     """A read-only, strict stock witness. Existing legacy collection is unchanged.
 
@@ -244,12 +245,25 @@ def collect_stock_postflight(
     except scd2_builder.Scd2PlanError as exc:
         return {**result, "status": "invalid_request", "error_code": exc.code}
     result["target"] = {"owner": owner, "table": table}
+    source_statement = (
+        statements.pop("source_count") if source is not None and source_connection_factory is not None else None
+    )
     resources: list[Any] = []
+    source_resources: list[Any] = []
     result["connection_attempted"] = True
     try:
         counts = call_sanitized(_read_stock_counts, connection_factory, statements, resources)
+        if counts is not None and source_statement is not None:
+            source_counts = call_sanitized(
+                _read_stock_counts, source_connection_factory, {"source_count": source_statement}, source_resources
+            )
+            counts = {**counts, **source_counts} if source_counts is not None else None
     finally:
-        clean = _cleanup_stock_resources(resources)
+        try:
+            clean = _cleanup_stock_resources(resources)
+        finally:
+            source_clean = _cleanup_stock_resources(source_resources)
+    clean = clean and source_clean
     if counts is None or not clean:
         return {**result, "error_type": "StockPostflightReadError"}
     valid = (

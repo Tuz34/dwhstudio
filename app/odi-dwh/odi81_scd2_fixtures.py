@@ -114,7 +114,7 @@ def _varchar(name: str, length: int, nullable: str, ddl: str) -> tuple[Any, ...]
 
 
 def _number(name: str, precision: int | None, scale: int | None, nullable: str, ddl: str) -> tuple[Any, ...]:
-    return (name, "NUMBER", 22, precision, scale, None, None, nullable, ddl)
+    return (name, "NUMBER", 22, precision, scale, None, 0, nullable, ddl)
 
 
 def _audit_defs() -> tuple[tuple[Any, ...], ...]:
@@ -122,9 +122,9 @@ def _audit_defs() -> tuple[tuple[Any, ...], ...]:
     for name, data_type, nullable in scd2_builder.SCD2_COLUMNS:
         flag = "Y" if nullable else "N"
         if data_type == "DATE":
-            built.append((name, "DATE", 7, None, None, None, None, flag, "DATE"))
+            built.append((name, "DATE", 7, None, None, None, 0, flag, "DATE"))
         elif data_type == "TIMESTAMP":
-            built.append((name, "TIMESTAMP(6)", 11, None, 6, None, None, flag, "TIMESTAMP"))
+            built.append((name, "TIMESTAMP(6)", 11, None, 6, None, 0, flag, "TIMESTAMP"))
         elif data_type == "NUMBER":
             built.append(_number(name, None, None, flag, "NUMBER"))
         elif data_type.startswith("VARCHAR2(") and data_type.endswith(")"):
@@ -428,7 +428,8 @@ def _metadata(cursor: Any, owner: str, name: str, family: str, flow: str) -> Non
         "AND ((DATA_PRECISION IS NULL AND :data_precision IS NULL) OR DATA_PRECISION=:data_precision) "
         "AND ((DATA_SCALE IS NULL AND :data_scale IS NULL) OR DATA_SCALE=:data_scale) "
         "AND ((CHAR_USED IS NULL AND :char_used IS NULL) OR CHAR_USED=:char_used) "
-        "AND ((CHAR_LENGTH IS NULL AND :char_length IS NULL) OR CHAR_LENGTH=:char_length) "
+        "AND ((:char_length=0 AND (CHAR_LENGTH=0 OR CHAR_LENGTH IS NULL)) "
+        "OR (CHAR_LENGTH IS NULL AND :char_length IS NULL) OR CHAR_LENGTH=:char_length) "
         "AND NULLABLE=:nullable"
     )
     for row in expected:

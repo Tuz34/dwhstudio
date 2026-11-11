@@ -291,6 +291,20 @@ test('a plan blocker disables generate and a warning does not', () => {
   assert.deepEqual(warned.warnings, ['Check the DDL preview.', 'grants_skipped_by_config']);
 });
 
+test('unreadable source and missing target explain the visibility limit without starting a run', () => {
+  const plan = projectPlan({ status: 'blocked_source_not_found' });
+  assert.match(plan.message, /not found or not readable by the application/i);
+  const planError = projectRejected({ status: 404, scd2: { status: 'blocked_source_not_found' } });
+  assert.match(planError.message, /not found or not readable by the application/i);
+  const payload = { status: 'blocked_target_not_found', steps: [{ step: 'remote_agent_health', status: 'passed' }] };
+  assert.equal(classifyWriteOutcome({ route: 'run', httpStatus: 409, payload }), 'failed');
+  const runError = projectRejected({ status: 409, scd2: payload }, { write: true, route: 'run' });
+  assert.equal(runError.needsReview, false);
+  assert.equal(runError.outcome, 'failed');
+  assert.match(runError.message, /not found or not readable by the application/i);
+  assert.equal(DEFINITE_FAILURE_ROWS.some(row => row.route === 'run' && row.http === 409 && row.status === 'blocked_target_not_found'), true);
+});
+
 
 test('generate and run success follow the server status and scenario object', () => {
   const generated = projectGenerate(GENERATED);
@@ -963,6 +977,7 @@ test('every reviewed generate and run outcome uses the closed failure table', ()
     'blocked_target_exists_mismatch',
   ];
   const runBlocked = [
+    'blocked_target_not_found',
     'blocked_target_not_scd2',
     'blocked_scenario_name_collision',
     'blocked_scenario_missing',
