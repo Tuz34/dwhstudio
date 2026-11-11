@@ -182,6 +182,11 @@ _STRICT_STRUCTURED_ERROR_CONTRACTS = {
         "mode": "generic_absent_only_scd2_datastore_registration",
         "keys": write_contract.FAILURE_KEYS,
     },
+    "register_datastore.groovy": {
+        "tool": "odi.register_datastore",
+        "mode": "absent_only",
+        "keys": write_contract.FAILURE_KEYS,
+    },
     "scd2_mapping_create.groovy": {
         "tool": "odi.scd2_mapping_create",
         "mode": "generic_absent_only_scd2_mapping_creation",
@@ -417,12 +422,14 @@ def _strict_structured_error_output(script_name: str, text: str) -> bool:
     if contract is None:
         return False
     try:
-        payload = write_contract.parse_json(text)
+        candidate = text.strip().splitlines()[-1] if script_name == "register_datastore.groovy" else text
+        payload = write_contract.parse_json(candidate)
     except (TypeError, ValueError):
         return False
     if script_name == "generate_scenario_metadata.groovy":
         return write_contract.failure(payload, contract["tool"], contract["mode"], generator=True) is not None
     if script_name in {"scd2_datastore_register.groovy", "scd2_mapping_create.groovy",
+                        "register_datastore.groovy",
                        "dim_product_scd2_mapping_create.groovy", "dim_product_scd2_datastore_register.groovy"}:
         return write_contract.failure(payload, contract["tool"], contract["mode"]) is not None
     if (
@@ -1105,7 +1112,8 @@ class OdiOrchestrator:
                             key_columns: list[str] | None = None,
                             key_name: str | None = None,
                             key_type: str | None = None,
-                            key_only: bool = False) -> str:
+                            key_only: bool = False,
+                            absent_only: bool = False) -> str:
         """Registers a new datastore and its columns in the ODI model.
 
         Args:
@@ -1117,14 +1125,20 @@ class OdiOrchestrator:
             key_name: ODI key name (the database constraint name).
             key_type: ALTERNATE_KEY (update key) or PRIMARY_KEY.
             key_only: Only add the key to an existing datastore; never recreate it.
+            absent_only: Refuse an existing datastore; never replace or alter it.
         """
         # Build the column string: NAME:TYPE:LENGTH:SCALE,...
         col_parts = []
         for c in columns:
             part = c["name"] + ":" + c.get("type", "VARCHAR2")
-            if c.get("length"):
+            if absent_only:
+                part += ":" + str(c.get("length", 0))
+                part += ":" + str(c.get("scale", 0))
+                part += ":" + str(c.get("semantics", ""))
+                part += ":" + ("Y" if c.get("nullable", True) else "N")
+            elif c.get("length"):
                 part += ":" + str(c["length"])
-            if c.get("scale") is not None and c.get("scale", 0) > 0:
+            if not absent_only and c.get("scale") is not None and c.get("scale", 0) > 0:
                 part += ":" + str(c["scale"])
             col_parts.append(part)
 
@@ -1140,6 +1154,8 @@ class OdiOrchestrator:
             params["odi.key_type"] = key_type or "ALTERNATE_KEY"
             if key_only:
                 params["odi.key_only"] = "true"
+        if absent_only:
+            params["odi.absent_only"] = "true"
         return self.run_groovy("register_datastore.groovy", params)
 
     def delete_datastore(self, model_code: str, table_name: str) -> str:

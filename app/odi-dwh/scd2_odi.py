@@ -21,6 +21,7 @@ IKM_NAME = "IKM Oracle Slowly Changing Dimension"
 LKM_NAME = "LKM SQL to Oracle (Built-In)"
 SCRIPT_PROBE = "scd2_probe.groovy"
 SCRIPT_REGISTER = "scd2_datastore_register.groovy"
+SCRIPT_SOURCE_REGISTER = "register_datastore.groovy"
 SCRIPT_MAPPING = "scd2_mapping_create.groovy"
 SCRIPT_IKM_IMPORT = "dim_product_scd2_ikm_import.groovy"
 
@@ -30,6 +31,7 @@ _TOOLS = {
         "odi.scd2_datastore_register",
         "generic_absent_only_scd2_datastore_registration",
     ),
+    SCRIPT_SOURCE_REGISTER: ("odi.register_datastore", "absent_only"),
     SCRIPT_MAPPING: (
         "odi.scd2_mapping_create",
         "generic_absent_only_scd2_mapping_creation",
@@ -439,6 +441,62 @@ def existing_mismatches(plan: Mapping[str, Any], step: Mapping[str, Any]) -> lis
 
 def _counts_ok(result: Mapping[str, Any], keys: tuple[str, ...]) -> bool:
     return all(type(result.get(key)) is int and result[key] >= 0 for key in keys)
+
+
+def register_source_datastore(
+    orchestrator: Any, plan: Mapping[str, Any], source_columns: object, approved: object,
+    *, phase: Any = None,
+) -> dict[str, Any]:
+    """Reuse the classic registrar in its absent-only mode for an existing source table."""
+    step = "odi_source_datastore_register"
+    try:
+        columns = scd2_builder.normalize_source_columns(source_columns)
+    except (scd2_builder.Scd2PlanError, TypeError):
+        return _failed(step, "InvalidSourceColumns")
+    definitions = []
+    for column in columns:
+        data_type = column["data_type"]
+        match = _TYPE_PARTS_RE.fullmatch(data_type)
+        if match is None or not scd2_builder._supported_type(data_type):
+            return _failed(step, "UnsupportedSourceColumnType")
+        base, length, scale, semantics = match.groups()
+        definition = {"name": column["name"], "type": base, "nullable": column["nullable"]}
+        if length is not None:
+            definition["length"] = int(length)
+        elif base == "TIMESTAMP":
+            definition["length"] = 6
+        if scale is not None:
+            definition["scale"] = int(scale)
+        if semantics is not None:
+            definition["semantics"] = semantics
+        definitions.append(definition)
+    write_contract.mark_write_attempted(phase)
+    try:
+        with groovy_approval_context(approved is True):
+            output = orchestrator.register_datastore(
+                model_code=plan["models"]["source"],
+                table_name=plan["source"]["table"],
+                columns=definitions,
+                resource_name=plan["source"]["table"],
+                absent_only=True,
+            )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return _step(step, "failed", **write_contract.unverified(type(exc).__name__))
+    # The classic script still prints operational progress before its final JSON envelope.
+    final_line = str(output or "").strip().splitlines()[-1] if output else ""
+    payload, failure = _parse_envelope(SCRIPT_SOURCE_REGISTER, step, final_line)
+    if failure is not None:
+        return failure
+    result = payload["result"]
+    if (
+        payload.get("side_effects") is not True
+        or set(result) != {"column_count", "commit_completed"}
+        or type(result["column_count"]) is not int
+        or result["column_count"] != len(definitions)
+        or result["commit_completed"] is not True
+    ):
+        return _failed(step, "InvalidGroovyEnvelope", side_effects=True)
+    return _step(step, "passed", side_effects=True, source_column_count=len(definitions))
 
 
 def register_datastore(
