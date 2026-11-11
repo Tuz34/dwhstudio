@@ -3,12 +3,14 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
+  AUDIT_PRESERVATION_REJECTED_MESSAGE,
   LOAD_TYPES,
   buildMappingRequest,
   buildScd2Handoff,
   getLoadOptionError,
   getMappingOutcome,
   prefillLoadOptions,
+  selectWizardFailureMessage,
 } from './mappingWizardRequests.js';
 
 const form = {
@@ -220,6 +222,151 @@ test('only the source model field marks the model as touched', () => {
   assert.match(source, /src_model_from_prefill: typeof initialData\.src_model === 'string'/);
   assert.match(source, /src_schema: e\.target\.value, src_schema_typed: true/);
   assert.match(source, /const requestedSourceModel = resolveWizardSourceModel\(form\)/);
+});
+
+const MAPPING_STEP_TEXT = 'The target table step finished, but ODI mapping creation did not complete. Check the ODI error details and retry.';
+
+test('audit preservation rejection uses its sentence and other failures keep the old text', () => {
+  const rejected = {
+    overall_status: 'FAILED',
+    error_code: 'audit_preservation_rejected',
+    error: 'mapping generation failed.',
+    error_type: 'OperationError',
+  };
+  assert.equal(selectWizardFailureMessage(rejected, rejected.error), AUDIT_PRESERVATION_REJECTED_MESSAGE);
+  assert.equal(
+    AUDIT_PRESERVATION_REJECTED_MESSAGE,
+    "The target table's audit column types are not supported for audit preservation. Nothing was created.",
+  );
+  const other = {
+    overall_status: 'FAILED',
+    error: 'mapping generation failed.',
+    error_type: 'OperationError',
+  };
+  assert.equal(selectWizardFailureMessage(other, other.error), MAPPING_STEP_TEXT);
+  assert.equal(selectWizardFailureMessage({ overall_status: 'SUCCESS' }, ''), '');
+});
+
+test('Type 2 handoff payloads equal the a645d5a buildScd2Handoff literals', () => {
+  const untouched = {
+    src_model: 'ORACLE_SOURCE',
+    src_table: 'ODI81N_SRC_F1',
+    src_schema: 'DWH',
+    src_schema_typed: true,
+    tgt_model: 'ORACLE_ODS',
+    tgt_owner: 'DWH',
+    tgt_table: 'ODS_ODI81N_F1',
+    needs_skey: false,
+    skey_natural_key: '',
+    description: 'Untouched model',
+    mapping_name: '',
+    drop_target_if_exists: false,
+    load_type: 'type2',
+    key_columns: 'ENTITY_ID',
+  };
+  assert.deepEqual(buildScd2Handoff(untouched), {
+    type: 'OPEN_MODAL',
+    payload: {
+      type: 'scd2',
+      props: {
+        mappingRequest: {
+          src_model: 'ORACLE_SOURCE',
+          src_table: 'ODI81N_SRC_F1',
+          src_schema: 'DWH',
+          tgt_model: 'ORACLE_ODS',
+          tgt_owner: 'DWH',
+          tgt_table: 'ODS_ODI81N_F1',
+          needs_skey: false,
+          skey_natural_key: '',
+          description: 'Untouched model',
+          mapping_name: '',
+          drop_target_if_exists: false,
+          load_type: 'type2',
+          key_columns: ['ENTITY_ID'],
+        },
+      },
+    },
+  });
+  const prefilled = {
+    src_model: 'ORACLE_SOURCE',
+    src_model_from_prefill: true,
+    src_schema_typed: true,
+    src_table: 'ORDERS',
+    src_schema: 'DWH',
+    tgt_model: 'DWH',
+    tgt_owner: 'DWH',
+    tgt_table: 'DWH_ORDERS',
+    needs_skey: true,
+    skey_natural_key: 'ORDER_ID',
+    description: 'Prefilled source model',
+    mapping_name: 'MAP_ORDERS_T2',
+    drop_target_if_exists: true,
+    load_type: 'type2',
+    key_columns: 'ORDER_ID, LINE_ID',
+  };
+  assert.deepEqual(buildScd2Handoff(prefilled), {
+    type: 'OPEN_MODAL',
+    payload: {
+      type: 'scd2',
+      props: {
+        mappingRequest: {
+          src_model: 'ORACLE_SOURCE',
+          src_table: 'ORDERS',
+          src_schema: 'DWH',
+          tgt_model: 'DWH',
+          tgt_owner: 'DWH',
+          tgt_table: 'DWH_ORDERS',
+          needs_skey: true,
+          skey_natural_key: 'ORDER_ID',
+          description: 'Prefilled source model',
+          mapping_name: 'MAP_ORDERS_T2',
+          drop_target_if_exists: true,
+          load_type: 'type2',
+          key_columns: ['ORDER_ID', 'LINE_ID'],
+        },
+      },
+    },
+  });
+  const typed = {
+    src_model: 'MDL_SRC_ORACLE_HR',
+    src_model_touched: true,
+    src_schema_typed: true,
+    src_table: 'EMPLOYEES',
+    src_schema: 'HR',
+    tgt_model: 'ORACLE_DWH',
+    tgt_owner: 'DWH',
+    tgt_table: 'DWH_EMPLOYEES',
+    needs_skey: false,
+    skey_natural_key: '',
+    description: 'Typed source model',
+    mapping_name: 'MAP_EMP_T2',
+    drop_target_if_exists: false,
+    load_type: 'type2',
+    key_columns: 'EMPLOYEE_ID',
+  };
+  assert.deepEqual(buildScd2Handoff(typed), {
+    type: 'OPEN_MODAL',
+    payload: {
+      type: 'scd2',
+      props: {
+        mappingRequest: {
+          src_model: 'MDL_SRC_ORACLE_HR',
+          src_table: 'EMPLOYEES',
+          src_schema: 'HR',
+          tgt_model: 'ORACLE_DWH',
+          tgt_owner: 'DWH',
+          tgt_table: 'DWH_EMPLOYEES',
+          needs_skey: false,
+          skey_natural_key: '',
+          description: 'Typed source model',
+          mapping_name: 'MAP_EMP_T2',
+          drop_target_if_exists: false,
+          load_type: 'type2',
+          key_columns: ['EMPLOYEE_ID'],
+        },
+      },
+    },
+  });
 });
 
 test('result summary uses only actual response fields', () => {

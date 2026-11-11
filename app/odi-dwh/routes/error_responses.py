@@ -4,6 +4,11 @@ from flask import current_app, jsonify
 
 
 _FAILURE_STATUSES = {"BLOCKED", "ERROR", "FAILED", "FAILURE", "INVALID", "SKIPPED"}
+_AUDIT_PRESERVATION_REJECTED = "audit_preservation_rejected"
+_AUDIT_PRESERVATION_SENTENCE = (
+    "The target table's audit column types are not supported for audit preservation. "
+    "Nothing was created."
+)
 
 
 def redacted_error(action: str, exc: BaseException, *, status: int = 500):
@@ -27,11 +32,16 @@ def redacted_operation_result(value, action: str):
     status = str(value.get("status") or value.get("overall_status") or "").upper()
     failed = status in _FAILURE_STATUSES
     had_error = any(str(key).lower() in {"error", "error_message"} and item for key, item in value.items())
+    fixed_error = (
+        _AUDIT_PRESERVATION_SENTENCE
+        if value.get("error_code") == _AUDIT_PRESERVATION_REJECTED
+        else None
+    )
     cleaned = {}
     for key, item in value.items():
         normalized_key = str(key).lower()
         if normalized_key in {"error", "error_message"} and item:
-            cleaned[key] = f"{action} failed."
+            cleaned[key] = fixed_error if fixed_error is not None else f"{action} failed."
         elif normalized_key == "reason" and failed and item:
             cleaned[key] = f"{action} failed."
         elif normalized_key == "detail" and failed and item:

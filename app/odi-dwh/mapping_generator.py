@@ -71,6 +71,8 @@ class TargetTableBlockedError(RuntimeError):
 class AuditPreservationRejected(ValueError):
     """Same-schema audit SQL failed static validation before any DDL."""
 
+    error_code = "audit_preservation_rejected"
+
 
 class UpdateKeyRequiredError(ValueError):
     """A merge/update KM would run without an update key (structured code update_key_required)."""
@@ -115,7 +117,6 @@ _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
 # a caller that already chose ORACLE_ODS or ORACLE_DWH; it is not this map.
 CLASSIC_DWH_SOURCE_OWNER = "DWH"
 CLASSIC_INTERNAL_SOURCE_MODEL = "ORACLE_DWH"
-_REPOSITORY_UNAVAILABLE = "repository_preflight_failed"
 _AUDIT_DEFAULT_TAIL_RE = re.compile(r"\s+DEFAULT\s+.*\Z", re.IGNORECASE | re.DOTALL)
 _AUDIT_NOT_NULL_RE = re.compile(r"\s+NOT\s+NULL\s*\Z", re.IGNORECASE)
 _AUDIT_TYPE_RE = re.compile(
@@ -131,7 +132,6 @@ _AUDIT_TYPE_RE = re.compile(
     r"|NCHAR\(\d+\)"
     r")\Z"
 )
-_SQL_STRING_LITERAL_RE = re.compile(r"'(?:''|[^'])*'\Z")
 
 
 def classic_internal_source_model(owner: object) -> str | None:
@@ -176,8 +176,11 @@ _DATETIME_DEFAULT_TYPE = {
 _DECLARED_DATETIME_RE = re.compile(
     r"^(DATE|TIMESTAMP(?:\((\d+)\))?( WITH LOCAL TIME ZONE| WITH TIME ZONE)?)$"
 )
-_CHAR_LENGTH_RE = re.compile(r"^(?:VARCHAR2|CHAR)\((\d+)(?: (BYTE|CHAR))?\)$")
-_NATIONAL_CHAR_RE = re.compile(r"^(?:NVARCHAR2|NCHAR)\(\d+\)$")
+# Closed table. The generator's audit names are only _AUDIT_COLUMN_ORDER.
+_DATETIME_AUDIT_COLUMNS = frozenset({
+    "INSERT_DATE", "UPDATE_DATE", "EFFECTIVE_FROM", "EFFECTIVE_TO",
+})
+_CHARACTER_AUDIT_COLUMNS = frozenset({"SOURCE_SYSTEM", "CURRENT_FLAG"})
 
 
 def _declared_datetime(oracle_type: str) -> tuple[str, int | None] | None:
@@ -198,10 +201,15 @@ def _declared_datetime(oracle_type: str) -> tuple[str, int | None] | None:
     return (family, precision)
 
 
-def _sql_literal_text(expression: str) -> str | None:
-    if not _SQL_STRING_LITERAL_RE.fullmatch(expression):
-        return None
-    return expression[1:-1].replace("''", "'")
+def _audit_pair_supported(column: str, family: str) -> bool:
+    """True only for the audit column and declared type family pairs we emit."""
+    if column in _DATETIME_AUDIT_COLUMNS:
+        return family in {"date", "timestamp"}
+    if column in _CHARACTER_AUDIT_COLUMNS:
+        return family == "character"
+    if column == "ETL_BATCH_ID":
+        return family in {"number", "character"}
+    return False
 
 
 def _typed_datetime_default(expression: str, oracle_type: str) -> str:
@@ -220,38 +228,20 @@ def _typed_datetime_default(expression: str, oracle_type: str) -> str:
     return f"CAST({expression} AS {oracle_type})"
 
 
-def _typed_character_default(expression: str, oracle_type: str) -> str:
-    """CAST a character default. CHAR and VARCHAR2 literals must fit the length."""
-    sized = _CHAR_LENGTH_RE.fullmatch(oracle_type)
-    if sized:
-        literal = _sql_literal_text(expression)
-        if literal is None:
-            raise AuditPreservationRejected(
-                "Audit preservation character default is not a literal."
-            )
-        limit = int(sized.group(1))
-        semantics = sized.group(2) or "BYTE"
-        size = len(literal) if semantics == "CHAR" else len(literal.encode("utf-8"))
-        if size > limit:
-            raise AuditPreservationRejected(
-                "Audit preservation character default does not fit the declared length."
-            )
-    elif not _NATIONAL_CHAR_RE.fullmatch(oracle_type):
-        raise AuditPreservationRejected("Audit preservation column type is not supported.")
-    return f"CAST({expression} AS {oracle_type})"
+def _typed_audit_default(column: str, expression: str, type_sql: object) -> str:
+    """Render one supported audit default so every CASE branch has the column datatype.
 
-
-def _typed_audit_default(expression: str, type_sql: object) -> str:
-    """Render one audit default so every CASE branch has the column datatype.
-
+    Anything outside the closed column/family table is rejected before DDL.
     A quoted session number is CHAR; TO_NUMBER makes a NUMBER. A character
-    literal is CAST to the declared type when it fits. Datetime defaults are
-    CAST to the declared type, or left unchanged when they already have it.
+    literal is CAST to the declared type. Datetime defaults are CAST to the
+    declared type, or left unchanged when they already have it.
     TO_NUMBER('AMBIGUOUS') stays in the subquery WHERE, so the selected
     value remains the column itself.
     """
     oracle_type = _canonical_audit_type(type_sql)
     family = _audit_type_family(oracle_type)
+    if not _audit_pair_supported(column, family):
+        raise AuditPreservationRejected("Audit preservation column type is not supported.")
     if family == "number":
         # Only the ODI session token becomes a number. Other defaults are not numeric.
         if expression != _SESSION_BATCH_SQL:
@@ -264,7 +254,7 @@ def _typed_audit_default(expression: str, type_sql: object) -> str:
         return f"CAST({converted} AS {oracle_type})"
     if family in {"date", "timestamp"}:
         return _typed_datetime_default(expression, oracle_type)
-    return _typed_character_default(expression, oracle_type)
+    return f"CAST({expression} AS {oracle_type})"
 
 
 def _identifier_or_none(value: object) -> str | None:
@@ -433,7 +423,7 @@ def build_same_schema_audit_expressions(
         if target_column_types is not None:
             if column not in target_column_types:
                 raise AuditPreservationRejected("Audit preservation column type is missing.")
-            default_sql = _typed_audit_default(default_sql, target_column_types[column])
+            default_sql = _typed_audit_default(column, default_sql, target_column_types[column])
         use_change = change_where if column in _AUDIT_REFRESH_ON_CHANGE else None
         expressions[column] = _audit_case(
             table_sql, alias, key_where, column, default_sql, use_change,
@@ -1272,28 +1262,27 @@ class MappingGenerator:
             else:
                 recommended_action = "reuse_with_extra_columns"
 
-            repository = {
-                "status": "not_checked",
-                "mapping_exists": None,
-                "source_datastore_exists": None,
-                "target_datastore_exists": None,
-            }
-            try:
-                # Internal sources need the same read-only identity the generate
-                # path stores on _odi_source_identity. Without it, binding
-                # resolution rejects the source before any repository read.
-                if validated.get("src_model") in INTERNAL_SOURCE_MODELS:
-                    self._preflight_odi_repository(validated)
-                repository = self._resolve_odi_repository_bindings(validated)
-            except Exception:
+            if validated.get("src_model") in INTERNAL_SOURCE_MODELS:
+                # Identity is checked again on generate. The wizard does not
+                # start a repository process for an internal source.
                 repository = {
-                    "status": "unavailable",
+                    "status": "not_checked",
                     "mapping_exists": None,
                     "source_datastore_exists": None,
                     "target_datastore_exists": None,
-                    "repository_connection_attempted": True,
-                    "error": _REPOSITORY_UNAVAILABLE,
                 }
+            else:
+                try:
+                    repository = self._resolve_odi_repository_bindings(validated)
+                except Exception as exc:
+                    repository = {
+                        "status": "unavailable",
+                        "mapping_exists": None,
+                        "source_datastore_exists": None,
+                        "target_datastore_exists": None,
+                        "repository_connection_attempted": True,
+                        "error": str(exc).split("\n")[0],
+                    }
 
             return {
                 "status": "OK",

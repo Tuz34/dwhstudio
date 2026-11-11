@@ -7,11 +7,13 @@ import {
   LOAD_TYPES,
   buildMappingRequest,
   buildScd2Handoff,
+  getFriendlyFailure,
   getLoadOptionError,
   getMappingOutcome,
   mappingName,
   prefillLoadOptions,
   resolveWizardSourceModel,
+  selectWizardFailureMessage,
   validateLoadOptions,
 } from './mappingWizardRequests';
 
@@ -50,37 +52,6 @@ const STATUS_LABELS = {
 
 const stripHelpLinks = (text = '') => String(text).replace(/\s*Help:\s*https?:\/\/\S+/gi, '').trim();
 
-const getFriendlyFailure = (text = '') => {
-  const cleaned = stripHelpLinks(text);
-  const lower = cleaned.toLowerCase();
-
-  if (cleaned.includes('ORA-01031')) {
-    return 'The target table already exists, but this connection is not allowed to drop it. Retry with "Drop target table if it exists" turned off, or ask a DBA to drop the table or grant the required permission.';
-  }
-
-  if (cleaned.includes('ORA-00955')) {
-    return 'The target table or another database object with this name already exists. Retry without dropping the table, or choose a different target table name.';
-  }
-
-  if (cleaned.includes('ODI-10178')) {
-    return 'ODI could not open the repository connection. Check the local ODI connection setup, then retry.';
-  }
-
-  if (lower.includes('datastore')) {
-    return 'The target table step finished, but ODI table registration did not complete. Check the ODI repository connection and retry.';
-  }
-
-  if (lower.includes('mapping')) {
-    return 'The target table step finished, but ODI mapping creation did not complete. Check the ODI error details and retry.';
-  }
-
-  if (cleaned) {
-    return 'The run stopped before completion. Review the technical details or retry after fixing the highlighted step.';
-  }
-
-  return 'The run stopped before completion.';
-};
-
 const getStepLabel = (step) => STEP_LABELS[step] || String(step || 'Step').replace(/_/g, ' ');
 
 const getStatusLabel = (status) => STATUS_LABELS[String(status || '').toUpperCase()] || String(status || 'State');
@@ -91,6 +62,8 @@ const getFriendlyStepDetail = (entry = {}, result = {}) => {
   const detail = stripHelpLinks(entry.detail || '');
 
   if (status === 'FAILED' || status === 'ERROR') {
+    const selected = selectWizardFailureMessage(result, detail || result.error);
+    if (result?.error_code === 'audit_preservation_rejected') return selected;
     return getFriendlyFailure(detail || result.error);
   }
 
@@ -231,7 +204,7 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
   const resultFailed = TERMINAL_FAILURES.has(String(result?.overall_status || '').toLowerCase()) || Boolean(result?.error);
   const resultSteps = Array.isArray(result?.log) ? result.log : [];
   const primaryError = result?.error || resultSteps.find(entry => ['FAILED', 'ERROR'].includes(String(entry.status || '').toUpperCase()))?.detail;
-  const friendlyError = primaryError ? getFriendlyFailure(primaryError) : '';
+  const friendlyError = selectWizardFailureMessage(result, primaryError);
   const outcome = getMappingOutcome(result);
   const selectedLoadType = LOAD_TYPES.find(({ value }) => value === form.load_type);
   const requestedSourceModel = resolveWizardSourceModel(form);

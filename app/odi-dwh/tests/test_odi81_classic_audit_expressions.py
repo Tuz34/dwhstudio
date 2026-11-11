@@ -18,7 +18,6 @@ from mapping_generator import (
     MappingGenerator,
     SourceTableNotFound,
     _SESSION_BATCH_SQL,
-    _audit_type_family,
     _canonical_audit_type,
     build_same_schema_audit_expressions,
 )
@@ -663,35 +662,6 @@ def test_unqualified_mappings_without_a_profile_keep_the_timestamp_default(tmp_p
 
 
 _CASE_WORDS = {"CASE", "WHEN", "THEN", "ELSE", "END"}
-_AUDIT_COLUMNS = (
-    "INSERT_DATE", "UPDATE_DATE", "CURRENT_FLAG", "EFFECTIVE_FROM", "EFFECTIVE_TO",
-    "SOURCE_SYSTEM", "ETL_BATCH_ID",
-)
-_SUPPORTED_AUDIT_TYPES = (
-    "TIMESTAMP",
-    "TIMESTAMP(6)",
-    "timestamp with time zone",
-    "TIMESTAMP(6) WITH TIME ZONE",
-    "TIMESTAMP WITH LOCAL TIME ZONE",
-    "TIMESTAMP(6) WITH LOCAL TIME ZONE",
-    "DATE",
-    "NUMBER",
-    "NUMBER(19)",
-    "NUMBER(19, 0)",
-    "FLOAT(126)",
-    "BINARY_DOUBLE",
-    "BINARY_FLOAT",
-    "VARCHAR2(50)",
-    "VARCHAR2(1)",
-    "VARCHAR2(50 BYTE)",
-    "VARCHAR2(50 CHAR)",
-    "NVARCHAR2(20)",
-    "CHAR(1)",
-    "NCHAR(1)",
-    "TIMESTAMP DEFAULT SYSTIMESTAMP",
-    "VARCHAR2(50) DEFAULT 'ORACLE_SAMPLE_SCHEMAS'",
-    "NUMBER NOT NULL",
-)
 _TIMESTAMP_DEFAULT = "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"
 _LIVE_DEFAULTS = {
     "F1": {
@@ -843,50 +813,6 @@ def test_live_audit_case_branches_match_the_target_datatype(flow):
     del _generator_unused
 
 
-_CHAR_LITERALS = {
-    "CURRENT_FLAG": "Y",
-    "SOURCE_SYSTEM": mapping_generator._SOURCE_SYSTEM_LITERAL,
-    "ETL_BATCH_ID": '<%=odiRef.getSession("SESS_NO")%>',
-}
-_NON_LITERAL_CHAR_COLUMNS = {"INSERT_DATE", "UPDATE_DATE", "EFFECTIVE_FROM", "EFFECTIVE_TO"}
-_SIZED_CHAR_RE = re.compile(r"^(?:VARCHAR2|CHAR)\((\d+)(?: (BYTE|CHAR))?\)$")
-
-
-def _character_rejection(column: str, oracle_type: str) -> str | None:
-    """Expected rejection for a CHAR/VARCHAR2 default, independent of the builder."""
-    sized = _SIZED_CHAR_RE.fullmatch(oracle_type)
-    if sized is None:
-        return None
-    if column in _NON_LITERAL_CHAR_COLUMNS:
-        return "character default is not a literal"
-    literal = _CHAR_LITERALS[column]
-    limit = int(sized.group(1))
-    semantics = sized.group(2) or "BYTE"
-    size = len(literal) if semantics == "CHAR" else len(literal.encode("utf-8"))
-    if size > limit:
-        return "does not fit the declared length"
-    return None
-
-
-@pytest.mark.parametrize("column", _AUDIT_COLUMNS)
-@pytest.mark.parametrize("type_sql", _SUPPORTED_AUDIT_TYPES)
-def test_each_audit_column_and_supported_type_is_branch_consistent(column, type_sql):
-    oracle_type = _canonical_audit_type(type_sql)
-    if _audit_type_family(oracle_type) == "number" and column != "ETL_BATCH_ID":
-        with pytest.raises(AuditPreservationRejected, match="numeric default is not a session number"):
-            _typed_expression(column, type_sql)
-        return
-    rejection = _character_rejection(column, oracle_type)
-    if rejection is not None:
-        with pytest.raises(AuditPreservationRejected, match=re.escape(rejection)):
-            _typed_expression(column, type_sql)
-        return
-    expression = _typed_expression(column, type_sql)
-    _assert_branches_match(expression, column, oracle_type)
-    assert "TO_NUMBER('AMBIGUOUS')" in expression
-    assert ";" not in expression
-
-
 @pytest.mark.parametrize("type_sql", ["CLOB", "RAW(16)", "INTEGER", "TIMESTAMP WITH TIMEZONE", ""])
 def test_unsupported_audit_column_type_is_rejected_without_echoing_it(type_sql):
     with pytest.raises(
@@ -957,40 +883,129 @@ def test_datetime_defaults_use_plain_oracle_for_the_declared_type(column, type_s
     assert _default_sql(column, type_sql) == expected
 
 
-def test_character_literals_cast_to_the_declared_type_when_they_fit():
-    literal = mapping_generator._SOURCE_SYSTEM_LITERAL
-    assert _default_sql("CURRENT_FLAG", "CHAR(1)") == "CAST('Y' AS CHAR(1))"
-    assert _default_sql("CURRENT_FLAG", "VARCHAR2(1 CHAR)") == "CAST('Y' AS VARCHAR2(1 CHAR))"
-    assert _default_sql("SOURCE_SYSTEM", "VARCHAR2(50 CHAR)") == f"CAST('{literal}' AS VARCHAR2(50 CHAR))"
-    assert _default_sql("SOURCE_SYSTEM", "NVARCHAR2(1)") == f"CAST('{literal}' AS NVARCHAR2(1))"
-    assert _default_sql("ETL_BATCH_ID", "NCHAR(1)") == f"CAST({_SESSION_BATCH_SQL} AS NCHAR(1))"
-    assert len(literal) > 1
-    short = len(literal) - 1
-    with pytest.raises(AuditPreservationRejected, match="does not fit the declared length"):
-        _typed_expression("SOURCE_SYSTEM", "CHAR(1)")
-    with pytest.raises(AuditPreservationRejected, match="does not fit the declared length"):
-        _typed_expression("SOURCE_SYSTEM", f"VARCHAR2({short} CHAR)")
-    with pytest.raises(AuditPreservationRejected, match="character default is not a literal"):
-        _typed_expression("EFFECTIVE_FROM", "VARCHAR2(40)")
+_SOURCE_LITERAL = f"'{mapping_generator._SOURCE_SYSTEM_LITERAL}'"
+_AUDIT_PRESERVATION_SENTENCE = (
+    "The target table's audit column types are not supported for audit preservation. "
+    "Nothing was created."
+)
+_CHARACTER_DECLARED = (
+    ("CHAR(1)", "CHAR(1)"),
+    ("CHAR(1 BYTE)", "CHAR(1 BYTE)"),
+    ("CHAR(1 CHAR)", "CHAR(1 CHAR)"),
+    ("VARCHAR2(1)", "VARCHAR2(1)"),
+    ("VARCHAR2(20)", "VARCHAR2(20)"),
+    ("VARCHAR2(50)", "VARCHAR2(50)"),
+    ("VARCHAR2(50 BYTE)", "VARCHAR2(50 BYTE)"),
+    ("VARCHAR2(50 CHAR)", "VARCHAR2(50 CHAR)"),
+    ("NVARCHAR2(1)", "NVARCHAR2(1)"),
+    ("NVARCHAR2(20)", "NVARCHAR2(20)"),
+    ("NCHAR(1)", "NCHAR(1)"),
+    ("VARCHAR2(50) DEFAULT 'ORACLE_SAMPLE_SCHEMAS'", "VARCHAR2(50)"),
+)
+_INSERT_UPDATE_TEXT = (
+    ("DATE", "CAST(CURRENT_TIMESTAMP AS DATE)"),
+    ("TIMESTAMP", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"),
+    ("TIMESTAMP(6)", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(6))"),
+    ("TIMESTAMP(3)", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(3))"),
+    ("TIMESTAMP WITH TIME ZONE", "CURRENT_TIMESTAMP"),
+    ("TIMESTAMP(6) WITH TIME ZONE", "CURRENT_TIMESTAMP"),
+    ("TIMESTAMP(3) WITH TIME ZONE", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(3) WITH TIME ZONE)"),
+    ("TIMESTAMP WITH LOCAL TIME ZONE", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP WITH LOCAL TIME ZONE)"),
+    ("TIMESTAMP(6) WITH LOCAL TIME ZONE", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(6) WITH LOCAL TIME ZONE)"),
+    ("TIMESTAMP(9) WITH LOCAL TIME ZONE", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(9) WITH LOCAL TIME ZONE)"),
+    ("TIMESTAMP DEFAULT SYSTIMESTAMP", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"),
+)
+_EFFECTIVE_FROM_TEXT = (
+    ("DATE", "TRUNC(CURRENT_TIMESTAMP)"),
+    ("DATE DEFAULT TRUNC(SYSDATE)", "TRUNC(CURRENT_TIMESTAMP)"),
+    ("TIMESTAMP", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP)"),
+    ("TIMESTAMP(6)", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP(6))"),
+    ("TIMESTAMP(3)", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP(3))"),
+    ("TIMESTAMP WITH TIME ZONE", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP WITH TIME ZONE)"),
+    ("TIMESTAMP(6) WITH TIME ZONE", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP(6) WITH TIME ZONE)"),
+    ("TIMESTAMP(3) WITH TIME ZONE", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP(3) WITH TIME ZONE)"),
+    ("TIMESTAMP WITH LOCAL TIME ZONE", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP WITH LOCAL TIME ZONE)"),
+    ("TIMESTAMP(6) WITH LOCAL TIME ZONE", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP(6) WITH LOCAL TIME ZONE)"),
+    ("TIMESTAMP(9) WITH LOCAL TIME ZONE", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP(9) WITH LOCAL TIME ZONE)"),
+)
+_EFFECTIVE_TO_EXPR = "TO_DATE('9999-12-31','YYYY-MM-DD')"
+_EFFECTIVE_TO_TEXT = (
+    ("DATE", _EFFECTIVE_TO_EXPR),
+    ("DATE DEFAULT TO_DATE('9999-12-31','YYYY-MM-DD')", _EFFECTIVE_TO_EXPR),
+    ("TIMESTAMP", f"CAST({_EFFECTIVE_TO_EXPR} AS TIMESTAMP)"),
+    ("TIMESTAMP(6)", f"CAST({_EFFECTIVE_TO_EXPR} AS TIMESTAMP(6))"),
+    ("TIMESTAMP(3)", f"CAST({_EFFECTIVE_TO_EXPR} AS TIMESTAMP(3))"),
+    ("TIMESTAMP WITH TIME ZONE", f"CAST({_EFFECTIVE_TO_EXPR} AS TIMESTAMP WITH TIME ZONE)"),
+    ("TIMESTAMP(6) WITH TIME ZONE", f"CAST({_EFFECTIVE_TO_EXPR} AS TIMESTAMP(6) WITH TIME ZONE)"),
+    ("TIMESTAMP(3) WITH TIME ZONE", f"CAST({_EFFECTIVE_TO_EXPR} AS TIMESTAMP(3) WITH TIME ZONE)"),
+    ("TIMESTAMP WITH LOCAL TIME ZONE", f"CAST({_EFFECTIVE_TO_EXPR} AS TIMESTAMP WITH LOCAL TIME ZONE)"),
+    (
+        "TIMESTAMP(6) WITH LOCAL TIME ZONE",
+        f"CAST({_EFFECTIVE_TO_EXPR} AS TIMESTAMP(6) WITH LOCAL TIME ZONE)",
+    ),
+    (
+        "TIMESTAMP(9) WITH LOCAL TIME ZONE",
+        f"CAST({_EFFECTIVE_TO_EXPR} AS TIMESTAMP(9) WITH LOCAL TIME ZONE)",
+    ),
+)
+_BATCH_NUMBER_TEXT = (
+    ("NUMBER", f"TO_NUMBER({_SESSION_BATCH_SQL})"),
+    ("NUMBER NOT NULL", f"TO_NUMBER({_SESSION_BATCH_SQL})"),
+    ("NUMBER(19)", f"CAST(TO_NUMBER({_SESSION_BATCH_SQL}) AS NUMBER(19))"),
+    ("NUMBER(19, 0)", f"CAST(TO_NUMBER({_SESSION_BATCH_SQL}) AS NUMBER(19,0))"),
+    ("FLOAT", f"CAST(TO_NUMBER({_SESSION_BATCH_SQL}) AS FLOAT)"),
+    ("FLOAT(126)", f"CAST(TO_NUMBER({_SESSION_BATCH_SQL}) AS FLOAT(126))"),
+    ("BINARY_DOUBLE", f"CAST(TO_NUMBER({_SESSION_BATCH_SQL}) AS BINARY_DOUBLE)"),
+    ("BINARY_FLOAT", f"CAST(TO_NUMBER({_SESSION_BATCH_SQL}) AS BINARY_FLOAT)"),
+)
 
 
-def test_byte_length_rejects_a_literal_that_fits_in_characters():
-    with pytest.raises(AuditPreservationRejected, match="does not fit the declared length"):
-        mapping_generator._typed_character_default("'Ä'", "VARCHAR2(1)")
-    assert mapping_generator._typed_character_default("'Ä'", "VARCHAR2(1 CHAR)") == "CAST('Ä' AS VARCHAR2(1 CHAR))"
-    assert mapping_generator._typed_character_default("'Ä'", "VARCHAR2(2)") == "CAST('Ä' AS VARCHAR2(2))"
-    assert "Ä" not in "Audit preservation character default does not fit the declared length."
+def _supported_audit_pairs() -> list[tuple[str, str, str]]:
+    """Every supported audit column and declared type, with the exact default text."""
+    rows: list[tuple[str, str, str]] = []
+    for column in ("INSERT_DATE", "UPDATE_DATE"):
+        rows.extend((column, type_sql, expected) for type_sql, expected in _INSERT_UPDATE_TEXT)
+    rows.extend(("EFFECTIVE_FROM", type_sql, expected) for type_sql, expected in _EFFECTIVE_FROM_TEXT)
+    rows.extend(("EFFECTIVE_TO", type_sql, expected) for type_sql, expected in _EFFECTIVE_TO_TEXT)
+    literals = {
+        "CURRENT_FLAG": "'Y'",
+        "SOURCE_SYSTEM": _SOURCE_LITERAL,
+        "ETL_BATCH_ID": _SESSION_BATCH_SQL,
+    }
+    for column, expression in literals.items():
+        for declared, canonical in _CHARACTER_DECLARED:
+            rows.append((column, declared, f"CAST({expression} AS {canonical})"))
+    rows.extend(("ETL_BATCH_ID", type_sql, expected) for type_sql, expected in _BATCH_NUMBER_TEXT)
+    return rows
 
 
-def _number_flag_columns() -> list[dict]:
+@pytest.mark.parametrize(("column", "type_sql", "expected"), _supported_audit_pairs())
+def test_supported_audit_pair_emits_the_closed_table_text(column, type_sql, expected):
+    """d2891fb still emitted CURRENT_FLAG DATE and SOURCE_SYSTEM TIMESTAMP."""
+    assert _default_sql(column, type_sql) == expected
+
+
+def test_etl_batch_id_varchar2_20_casts_the_session_token():
+    """d2891fb counted the unsubstituted session token and rejected VARCHAR2(20)."""
+    assert _default_sql("ETL_BATCH_ID", "VARCHAR2(20)") == f"CAST({_SESSION_BATCH_SQL} AS VARCHAR2(20))"
+
+
+def _columns_with(column: str, type_sql: str) -> list[dict]:
     return [
         {"COLUMN_NAME": "ENTITY_ID", "ORACLE_TYPE": "NUMBER(10)", "IS_NULLABLE": "N"},
         {"COLUMN_NAME": "ATTR_TEXT", "ORACLE_TYPE": "VARCHAR2(40)", "IS_NULLABLE": "Y"},
-        {"COLUMN_NAME": "CURRENT_FLAG", "ORACLE_TYPE": "NUMBER(1)", "IS_NULLABLE": "Y"},
+        {"COLUMN_NAME": column, "ORACLE_TYPE": type_sql, "IS_NULLABLE": "Y"},
     ]
 
 
-def test_numeric_non_session_default_is_rejected_before_any_ddl(monkeypatch):
+@pytest.mark.parametrize(("column", "type_sql"), [
+    ("CURRENT_FLAG", "DATE"),
+    ("SOURCE_SYSTEM", "TIMESTAMP"),
+    ("INSERT_DATE", "VARCHAR2(30)"),
+    ("CURRENT_FLAG", "NUMBER(1)"),
+    ("ETL_BATCH_ID", "DATE"),
+])
+def test_unsupported_audit_pair_is_rejected_before_any_ddl(column, type_sql, monkeypatch):
     import odi_orchestrator
     import target_table_service
 
@@ -1007,21 +1022,25 @@ def test_numeric_non_session_default_is_rejected_before_any_ddl(monkeypatch):
 
     monkeypatch.setattr(odi_orchestrator.OdiOrchestrator, "__init__", spy_init)
     generator = MappingGenerator()
-    generator._source_columns_for = lambda _params: _number_flag_columns()
+    generator._source_columns_for = lambda _params: _columns_with(column, type_sql)
     validated = generator.validate_params(driver.classic_params("F1"))
-    with pytest.raises(AuditPreservationRejected, match="numeric default is not a session number"):
+    with pytest.raises(
+        AuditPreservationRejected, match=r"^Audit preservation column type is not supported\.$",
+    ):
         generator._create_target_table(validated)
     assert ddl == []
     assert constructed == []
 
 
-def test_numeric_rejection_reaches_the_wizard_as_a_redacted_200(app_client, monkeypatch):
-    """The route has no error-code table for this rejection, so the body is generic."""
+def test_audit_preservation_rejection_reaches_the_wizard_as_a_fixed_200(app_client, monkeypatch):
+    """Classic generate names this rejection and does not create a table or a mapping."""
     import odi_orchestrator
     import target_table_service
 
     ddl: list[bool] = []
     constructed: list[bool] = []
+    logged: list[tuple] = []
+    snapshots: list[bool] = []
     monkeypatch.setattr(
         target_table_service, "execute_target_table_plan", lambda *_args, **_kwargs: ddl.append(True),
     )
@@ -1032,7 +1051,10 @@ def test_numeric_rejection_reaches_the_wizard_as_a_redacted_200(app_client, monk
         return real_init(self, *args, **kwargs)
 
     monkeypatch.setattr(odi_orchestrator.OdiOrchestrator, "__init__", spy_init)
-    monkeypatch.setattr(MappingGenerator, "_source_columns_for", lambda self, _params: _number_flag_columns())
+    monkeypatch.setattr(
+        MappingGenerator, "_source_columns_for",
+        lambda self, _params: _columns_with("CURRENT_FLAG", "NUMBER(1)"),
+    )
     monkeypatch.setattr(
         MappingGenerator, "_preflight_odi_repository",
         lambda self, _params: {"status": "passed", "side_effects": False, "ikm_id": "7"},
@@ -1041,18 +1063,30 @@ def test_numeric_rejection_reaches_the_wizard_as_a_redacted_200(app_client, monk
         MappingGenerator, "_resolve_odi_repository_bindings",
         lambda self, _params: {"status": "passed", "mapping_exists": False},
     )
-    monkeypatch.setattr(MappingGenerator, "_log_to_mapping_log", lambda self, *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        MappingGenerator, "_log_to_mapping_log",
+        lambda self, *args, **_kwargs: logged.append(args),
+    )
+    monkeypatch.setattr(
+        MappingGenerator, "_take_snapshot",
+        lambda self, *_args, **_kwargs: snapshots.append(True),
+    )
     response = app_client.post("/api/mapping/generate", json=driver.classic_generate_body("F1"))
     assert response.status_code == 200
     body = response.get_json()
     assert body["overall_status"] == "FAILED"
-    assert body["error"] == "mapping generation failed."
+    assert body["error_code"] == "audit_preservation_rejected"
+    assert body["error"] == _AUDIT_PRESERVATION_SENTENCE
     assert body["error_type"] == "OperationError"
-    assert "session number" not in response.get_data(as_text=True)
+    text = response.get_data(as_text=True)
+    assert "Audit preservation" not in text
+    assert "session number" not in text
     assert "create_target_table" not in body["steps"]
     assert "create_mapping" not in body["steps"]
     assert ddl == []
     assert constructed == []
+    assert snapshots == []
+    assert logged and logged[0][1] == "FAILED"
 
 
 _QUOTED_BATCH = "'<%=odiRef.getSession(\"SESS_NO\")%>'"
