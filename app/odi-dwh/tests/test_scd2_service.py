@@ -472,7 +472,7 @@ def test_unrelated_scenario_name_collision_stops_before_ddl(plan):
 def test_generate_probes_the_planned_scenario_version(plan, monkeypatch):
     # Use a non-default version to catch a hardcoded 001 in the transport.
     plan = {**plan, "scenario_version": "007"}
-    monkeypatch.setattr(scd2_service, "_build_plan", lambda *a, **kw: (plan, "test", None))
+    monkeypatch.setattr(scd2_service, "_build_plan", lambda *a, **kw: (plan, "test", None, SOURCE_COLUMNS))
     orchestrator = FakeOrchestrator(plan)
     payload, status = scd2_service.generate(
         REQUEST, make_services(orchestrator, ddl_handler=ddl_handler(plan)), approved=True

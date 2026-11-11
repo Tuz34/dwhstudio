@@ -339,7 +339,7 @@ def test_explicit_mismatch_and_ambiguous_probe_stop_before_ddl(monkeypatch, plan
         **plan,
         "options": {**plan["options"], "exec_user_requested": True, "exec_user": "OTHER_USER"},
     }
-    monkeypatch.setattr(scd2_service, "_build_plan", lambda *_args, **_kwargs: (requested, "test", None))
+    monkeypatch.setattr(scd2_service, "_build_plan", lambda *_args, **_kwargs: (requested, "test", None, SOURCE_COLUMNS))
     orchestrator = FakeOrchestrator(plan)
     ddl_log = []
     payload, status = scd2_service.generate(
@@ -365,7 +365,7 @@ def test_explicit_mismatch_and_ambiguous_probe_stop_before_ddl(monkeypatch, plan
         "context_count": 1,
         "mapping_count": 0,
     }
-    monkeypatch.setattr(scd2_service, "_build_plan", lambda *_args, **_kwargs: (plan, "test", None))
+    monkeypatch.setattr(scd2_service, "_build_plan", lambda *_args, **_kwargs: (plan, "test", None, SOURCE_COLUMNS))
     orchestrator = FakeOrchestrator(plan, responses={"execution_identity_probe.groovy": json.dumps(ambiguous)})
     ddl_log = []
     payload, status = scd2_service.generate(

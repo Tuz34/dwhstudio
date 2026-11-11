@@ -105,25 +105,25 @@ def _source_columns(
 
 def _build_plan(
     body: Mapping[str, Any], services: Scd2Services, *, allow_request_columns: bool
-) -> tuple[dict[str, Any] | None, str, tuple[dict[str, Any], int] | None]:
+) -> tuple[dict[str, Any] | None, str, tuple[dict[str, Any], int] | None, list[dict[str, Any]] | None]:
     try:
         scd2_builder.validate_request(body)
     except scd2_builder.Scd2PlanError as exc:
-        return None, "", _invalid(exc)
+        return None, "", _invalid(exc), None
     columns, origin = _source_columns(body, services, allow_request_columns=allow_request_columns)
     if origin == "unavailable":
-        return None, origin, ({"status": "source_metadata_unavailable"}, 503)
+        return None, origin, ({"status": "source_metadata_unavailable"}, 503), None
     if not columns:
-        return None, origin, ({"status": "blocked_source_not_found"}, 404)
+        return None, origin, ({"status": "blocked_source_not_found"}, 404), None
     try:
-        return scd2_builder.build_scd2_plan(body, columns), origin, None
+        return scd2_builder.build_scd2_plan(body, columns), origin, None, columns
     except scd2_builder.Scd2PlanError as exc:
-        return None, origin, _invalid(exc)
+        return None, origin, _invalid(exc), None
 
 
 def plan_preview(body: Mapping[str, Any], services: Scd2Services) -> tuple[dict[str, Any], int]:
     """Connectionless preview unless the caller omits ``source_columns``."""
-    plan, origin, error = _build_plan(body, services, allow_request_columns=True)
+    plan, origin, error, _columns = _build_plan(body, services, allow_request_columns=True)
     if error is not None or plan is None:
         return error or ({"status": "invalid_request"}, 400)
     return (
@@ -228,11 +228,11 @@ def _probe_block(plan: Mapping[str, Any], checks: Mapping[str, bool]) -> tuple[s
 def generate(
     body: Mapping[str, Any], services: Scd2Services, *, approved: object, phase: Any = None,
 ) -> tuple[dict[str, Any], int]:
-    """Approved flow: probe -> target DDL -> datastore -> mapping -> scenario."""
+    """Approved flow: probe -> optional source datastore -> target DDL -> ODI objects."""
     repository_write_contract.bind_request_phase(phase)
     if approved is not True:
         return {"status": "blocked_until_approval"}, 400
-    plan, _origin, error = _build_plan(body, services, allow_request_columns=False)
+    plan, _origin, error, source_columns = _build_plan(body, services, allow_request_columns=False)
     if error is not None or plan is None:
         return error or ({"status": "invalid_request"}, 400)
 
@@ -256,7 +256,9 @@ def generate(
     if probe_step["status"] != "passed":
         return _generate_response("failed_odi_probe", plan, steps, 502)
     checks = probe_step["checks"]
-    blocked = _probe_block(plan, checks)
+    source_missing = not checks["source_datastore_exists"]
+    own_source = plan["source"]["owner"] == services.ddl_user
+    blocked = _probe_block(plan, {**checks, "source_datastore_exists": True} if source_missing and own_source else checks)
     if blocked is not None:
         status, extra = blocked
         return _generate_response(status, plan, steps, 409, **extra)
@@ -267,6 +269,34 @@ def generate(
             "blocked_existing_object_mismatch", plan, steps, 409, mismatches=mismatches,
             **_km_extra(probe_step["mapping"], mismatches),
         )
+
+    if source_missing and own_source:
+        from config import ODI_SOURCE_MODEL_BINDINGS
+        from source_model_policy import SourceModelConfigError, trusted_source_model_code
+
+        try:
+            bound_model = trusted_source_model_code("GLOBAL", plan["source"]["owner"], ODI_SOURCE_MODEL_BINDINGS)
+        except SourceModelConfigError:
+            return _generate_response("source_model_config_invalid", plan, steps, 409)
+        if bound_model is None:
+            return _generate_response("blocked_source_model_unbound", plan, steps, 409)
+        if bound_model != plan["models"]["source"]:
+            return _generate_response("blocked_source_model_binding_mismatch", plan, steps, 409)
+        try:
+            table_exists = scd2_target_executor.source_table_exists(
+                plan["source"]["owner"], plan["source"]["table"],
+                _read_connection_factory(plan["source"]["owner"], services),
+            )
+        except (oracledb.Error, ValueError):
+            return _generate_response("source_metadata_unavailable", plan, steps, 503)
+        if not table_exists:
+            return _generate_response("blocked_source_not_found", plan, steps, 404)
+        source_step = scd2_odi.register_source_datastore(
+            orchestrator, plan, source_columns, True, phase=phase,
+        )
+        steps.append(source_step)
+        if source_step["status"] != "passed":
+            return _generate_response("partial_failure_source_datastore_register", plan, steps, 502)
 
     identity_proof = None
     if scd2_builder.grants_enabled():

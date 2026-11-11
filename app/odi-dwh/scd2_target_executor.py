@@ -93,6 +93,21 @@ def fetch_source_columns(
         connection.close()
 
 
+def source_table_exists(
+    owner: str, table: str, connection_factory: Callable[[], Any]
+) -> bool:
+    """Require a physical table, not just columns exposed by a view."""
+    connection = connection_factory()
+    try:
+        cursor = connection.cursor()
+        try:
+            return _table_exists(cursor, owner, table)
+        finally:
+            cursor.close()
+    finally:
+        connection.close()
+
+
 def _base(status: str, plan: Mapping[str, Any], *, approved: object) -> dict[str, Any]:
     return {
         "mode": "scd2_target_ddl",

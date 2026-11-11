@@ -9,6 +9,7 @@ Usage:
 If the environment file is absent, the root .env is read as a fallback.
 """
 
+import json
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+import scd2_builder
 from secret_provider import get_secret, get_secret_list
 
 # ── 1. Environment detection ──────────────────────────────────────────────────────────
@@ -157,8 +159,15 @@ ODI_APPROVED_IKMS   = os.getenv(
 )
 ODI_LKM_PRIORITY    = os.getenv("ODI_LKM_PRIORITY", "sql to oracle,mssql to oracle,sql to sql")
 # Optional JSON object: {"CONTEXT": {"PHYSICAL_OWNER": "MODEL_CODE"}}.
-# Empty keeps the existing source-model ambiguity refusal. Callers do not supply this map.
-ODI_SOURCE_MODEL_BINDINGS = os.getenv("ODI_SOURCE_MODEL_BINDINGS", "")
+# An unset/blank value binds only the app's own DWH source in GLOBAL. A nonblank
+# value replaces this default; consumers still validate it before repository use.
+def effective_source_model_bindings(raw: str | None) -> str:
+    if raw is None or not raw.strip():
+        return json.dumps({"GLOBAL": {"DWH": scd2_builder.SOURCE_MODEL_BY_OWNER["DWH"]}})
+    return raw
+
+
+ODI_SOURCE_MODEL_BINDINGS = effective_source_model_bindings(os.getenv("ODI_SOURCE_MODEL_BINDINGS"))
 
 # ── 9. Alert & Monitoring Settings ──────────────────────────────────────────
 ALERT_FRESHNESS_DAYS = int(os.getenv("ALERT_FRESHNESS_DAYS", "2"))
