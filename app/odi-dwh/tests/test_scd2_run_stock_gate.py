@@ -38,16 +38,20 @@ def setup(monkeypatch, *, before=None, after=None):
     second = StockConnection(after if after is not None else [(1, "1", "2026-01-01", "2400-01-01")], source_rows=1)
     pending = [first, second]
     opened = []
+    source_opened = []
 
     def catalog():
         connection = pending.pop(0)
         opened.append(connection)
         return connection
 
-    def no_ddl():
-        pytest.fail("Run must never open a DDL/grant connection")
+    def source_ddl():
+        connection = StockConnection([], source_rows=1)
+        source_opened.append(connection)
+        return connection
 
-    services = scd2_service.Scd2Services(catalog, no_ddl, "UNUSED", lambda: orchestrator)
+    source_ddl.opened = source_opened
+    services = scd2_service.Scd2Services(catalog, source_ddl, "DWH", lambda: orchestrator)
     return orchestrator, services, opened, first, second
 
 
@@ -68,8 +72,14 @@ def test_real_stock_sql_is_used_before_and_after_run(monkeypatch):
     assert payload["postflight"]["business_parity_proven"] is False
     assert payload["scenario_execution_completed"] is True and payload["postflight_checks_passed"] is True
     assert len(opened) == 2
+    assert len(services.ddl_connection.opened) == 2
     assert before.rollbacks == after.rollbacks == before.closes == after.closes == 1
     assert before.statements[0] == after.statements[0] == "SET TRANSACTION READ ONLY"
+    for source in services.ddl_connection.opened:
+        assert source.rollbacks == source.closes == 1
+        assert source.statements == [
+            "SET TRANSACTION READ ONLY", 'SELECT COUNT(*) FROM "DWH"."SRC_TEST"',
+        ]
     assert any(call[0] == "scenario_run" for call in orchestrator.calls)
     identity_calls = [call for call in orchestrator.calls if call[:2] == ("groovy", "execution_identity_probe.groovy")]
     assert len(identity_calls) == 1 and identity_calls[0][3]["odi.execution.context"] == "GLOBAL"
