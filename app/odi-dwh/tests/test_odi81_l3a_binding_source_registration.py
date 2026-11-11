@@ -31,6 +31,12 @@ from tests.test_repository_write_outcomes import failure as write_failure
 from tests.test_scd2_service import ddl_handler
 
 
+@pytest.fixture(autouse=True)
+def _pin_grant_configuration(monkeypatch):
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", True)
+    monkeypatch.setattr(config, "ODI_EXEC_USER", "ODI_EXEC")
+
+
 def _source_success(column_count: int) -> str:
     return "INFO: synthetic progress\n" + json.dumps({
         "tool": "odi.register_datastore", "status": "passed", "mode": "absent_only",
@@ -164,7 +170,9 @@ def test_mapping_and_orchestrator_use_same_effective_default(monkeypatch):
     run.assert_not_called()
 
 
-def test_missing_own_source_registers_once_before_target_ddl(monkeypatch):
+@pytest.mark.parametrize("grants_enabled", [True, False], ids=["grants_enabled", "grants_disabled"])
+def test_missing_own_source_registers_once_before_target_ddl(monkeypatch, grants_enabled):
+    monkeypatch.setattr(config, "ODI_EXEC_GRANTS_ENABLED", grants_enabled)
     monkeypatch.setattr(config, "ODI_SOURCE_MODEL_BINDINGS", config.effective_source_model_bindings(None))
     plan = _plan()
     ddl_log = []
@@ -182,9 +190,13 @@ def test_missing_own_source_registers_once_before_target_ddl(monkeypatch):
         approved=True,
     )
     assert status == 200 and payload["status"] == "generated"
-    assert [step["step"] for step in payload["steps"]][:3] == [
-        "odi_probe", "odi_source_datastore_register", "execution_identity",
-    ]
+    step_names = [step["step"] for step in payload["steps"]]
+    expected_prefix = ["odi_probe", "odi_source_datastore_register"]
+    if grants_enabled:
+        expected_prefix.append("execution_identity")
+    expected_prefix.append("target_ddl")
+    assert step_names[:len(expected_prefix)] == expected_prefix
+    assert ("execution_identity" in step_names) is grants_enabled
     calls = [call[1] for call in orchestrator.calls if call[0] == "source_register"]
     assert len(calls) == 1
     assert calls[0]["model_code"] == "TGT_DWH" and calls[0]["absent_only"] is True

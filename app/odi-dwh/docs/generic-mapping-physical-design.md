@@ -40,7 +40,9 @@ mapping, sets the target staging location, assigns the approved IKM and then han
   `run_mapping_graph` still compiles with an in-memory checkpoint and still writes that state
   through the existing persistence hook.
 - Trusted source model: `ODI_SOURCE_MODEL_BINDINGS` is an optional server JSON object,
-  `{"CONTEXT": {"PHYSICAL_OWNER": "MODEL_CODE"}}`. The default empty value selects nothing.
+  `{"CONTEXT": {"PHYSICAL_OWNER": "MODEL_CODE"}}`. Unset or blank binds only
+  `GLOBAL`/`DWH` to the built-in DWH model code. A non-blank value replaces that default
+  and is validated before use.
   Two Oracle models for the same physical owner in the requested context still return
   `source_identity_ambiguous`. A configured pair keeps only that exact model code, and only
   when one repository model has it. That model still has to pass the physical schema, context,
