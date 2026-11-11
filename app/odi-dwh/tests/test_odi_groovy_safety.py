@@ -57,6 +57,14 @@ def test_create_mapping_requires_requested_update_key_columns():
     assert "Required update key is missing or mismatched" in text
     assert "setIntegrationType(DatastoreComponent.INTEGRATION_TYPE_UPDATE)" in text
     assert "INTEGRATION TYPE VERIFY" in text
+    warning = 'println "WARNING: Integration Type IU failed: ${integrationTypeEarlyFailure}"'
+    late_verify = text.index('println "INTEGRATION TYPE VERIFY: ${integrationType}"')
+    cleared = text.index("integrationTypeEarlyFailure = null", late_verify)
+    warned = text.index(warning)
+    early = text.index("integrationTypeEarlyFailure = ite.getClass().getSimpleName()")
+    assert early < late_verify < cleared < warned
+    assert warning not in text[early:early + 500]
+    assert text.count(warning) == 2
 
 
 def test_create_mapping_never_replaces_existing_mapping_without_exact_flag():

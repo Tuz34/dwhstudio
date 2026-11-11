@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -154,6 +155,33 @@ test('Type 2 creates only the exact SCD2 modal handoff with current form values'
   });
   assert.throws(() => buildMappingRequest({ ...form, load_type: 'type2' }), /SCD2 wizard/);
   assert.throws(() => buildScd2Handoff(form), /Choose Type 2/);
+});
+
+test('an untouched internal source schema sends the internal source model', () => {
+  for (const schema of ['DWH', 'dwh', ' ODS ', 'AUDIT_USER', 'DWH_FLAT']) {
+    const request = buildMappingRequest({ ...form, src_model: 'ORACLE_SOURCE', src_schema: schema });
+    assert.equal(request.params.src_model, 'ORACLE_DWH', schema);
+    const handoff = buildScd2Handoff({
+      ...form, src_model: 'ORACLE_SOURCE', src_schema: schema, load_type: 'type2',
+    });
+    assert.equal(handoff.payload.props.mappingRequest.src_model, 'ORACLE_DWH', schema);
+  }
+});
+
+test('a touched source model and an external schema stay as entered', () => {
+  const touched = buildMappingRequest({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'DWH', src_model_touched: true,
+  });
+  assert.equal(touched.params.src_model, 'ORACLE_SOURCE');
+  const external = buildMappingRequest({ ...form, src_model: 'ORACLE_SOURCE', src_schema: 'HR' });
+  assert.equal(external.params.src_model, 'ORACLE_SOURCE');
+});
+
+test('only the source model field marks the model as touched', () => {
+  const source = readFileSync(new URL('./MappingWizard.jsx', import.meta.url), 'utf8');
+  assert.equal(source.split('src_model_touched').length - 1, 1);
+  assert.match(source, /src_model: e\.target\.value, src_model_touched: true/);
+  assert.match(source, /const requestedSourceModel = resolveWizardSourceModel\(form\)/);
 });
 
 test('result summary uses only actual response fields', () => {

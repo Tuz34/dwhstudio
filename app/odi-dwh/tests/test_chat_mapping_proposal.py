@@ -80,6 +80,8 @@ def test_layer_selects_existing_target_schema_and_naming(layer_phrase, layer, ta
     assert result["target_table"] == table
     assert result["mapping_name"] == name
     assert result["tgt_table"] == table
+    assert result["src_model"] == "ORACLE_SOURCE"
+    assert result["tgt_model"] == {"ODS": "ORACLE_ODS", "DWH": "ORACLE_DWH", "EDW": "ORACLE_DWH"}[layer]
 
 
 def test_explicit_target_table_is_preserved_over_layer_default():
@@ -134,6 +136,8 @@ def test_user_fields_survive_missing_llm_fields():
     assert result["load_type"] == "truncate_load"
     assert result["key_columns"] == ["ORDER_ID"]
     assert result["warnings"] == ["Datamart targets are supported only for Type 2 history."]
+    assert result["src_model"] == "ORACLE_SOURCE"
+    assert "tgt_model" not in result
 
 
 def test_datamart_keeps_explicit_target_without_inventing_generic_name():
@@ -393,6 +397,38 @@ def test_owner_sentences_and_permutations_have_complete_proposals(label, sentenc
     if expected["key_columns"]:
         stated.append("key_columns")
     assert result["stated_fields"] == stated
+    assert result["src_model"] == "ORACLE_DWH"
+    if expected["target_layer"] == "ODS":
+        assert result["tgt_model"] == "ORACLE_ODS"
+    elif expected["target_layer"] == "DM":
+        assert "tgt_model" not in result
+    else:
+        assert result["tgt_model"] == "ORACLE_DWH"
+
+
+def test_dwh_owner_to_ods_matches_classic_acceptance_models():
+    result = normalize_mapping_request(
+        "DWH.ODI81N_SRC_F1 tablosunu ODS katmanına insert update olarak modelle, anahtar ID",
+        {"operation": "CREATE"},
+    )
+    assert result["src_schema"] == "DWH"
+    assert result["src_table"] == "ODI81N_SRC_F1"
+    assert result["target_layer"] == "ODS"
+    assert result["src_model"] == "ORACLE_DWH"
+    assert result["tgt_model"] == "ORACLE_ODS"
+
+
+@pytest.mark.parametrize("owner", ["ODS", "AUDIT_USER", "DWH_FLAT"])
+def test_other_internal_owners_use_the_classic_internal_source_model(owner):
+    result = normalize_mapping_request(f"Model {owner}.ORDERS into ODS as merge, key ID", {})
+    assert result["src_model"] == "ORACLE_DWH"
+    assert result["tgt_model"] == "ORACLE_ODS"
+
+
+def test_external_owner_keeps_the_external_source_model():
+    result = normalize_mapping_request("Model SH.CUSTOMERS into ODS as merge, key ID", {})
+    assert result["src_model"] == "ORACLE_SOURCE"
+    assert result["tgt_model"] == "ORACLE_ODS"
 
 
 @pytest.mark.parametrize(("wording", "expected"), [

@@ -90,6 +90,18 @@ class RepositoryPreflightBlockedError(RuntimeError):
         if detail.get("code") == "ikm_not_imported":
             self.error_code = "ikm_not_imported"
 
+
+class SourceTableNotFound(LookupError):
+    """Source columns were not visible through the selected source model."""
+
+    def __init__(self, src_model: object) -> None:
+        text = str(src_model or "").strip().upper()
+        if not _IDENTIFIER_RE.fullmatch(text):
+            text = "UNKNOWN"
+        self.src_model = text
+        super().__init__(f"Source table not found through source model {text}")
+
+
 def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> str:
     """Escape single quotes in an Oracle SQL literal."""
     text = (value or fallback).strip() or fallback
@@ -98,6 +110,104 @@ def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> s
 
 _SOURCE_SYSTEM_LITERAL = _sql_string_literal(SOURCE_SYSTEM_NAME, "ORACLE_SOURCE")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
+# Reviewed classic acceptance reads internal owners through ORACLE_DWH.
+# INTERNAL_SOURCE_MODELS has no per-owner map; both codes share that read path.
+CLASSIC_INTERNAL_SOURCE_MODEL = "ORACLE_DWH"
+_AUDIT_DEFAULT_TAIL_RE = re.compile(r"\s+DEFAULT\s+.*\Z", re.IGNORECASE | re.DOTALL)
+_AUDIT_NOT_NULL_RE = re.compile(r"\s+NOT\s+NULL\s*\Z", re.IGNORECASE)
+_AUDIT_TYPE_RE = re.compile(
+    r"(?:"
+    r"TIMESTAMP(?:\(\d+\))?(?: WITH LOCAL TIME ZONE| WITH TIME ZONE)?"
+    r"|DATE"
+    r"|NUMBER(?:\(\d+(?:,\d+)?\))?"
+    r"|FLOAT(?:\(\d+\))?"
+    r"|BINARY_DOUBLE|BINARY_FLOAT"
+    r"|VARCHAR2\(\d+(?: BYTE| CHAR)?\)"
+    r"|NVARCHAR2\(\d+\)"
+    r"|CHAR\(\d+(?: BYTE| CHAR)?\)"
+    r"|NCHAR\(\d+\)"
+    r")\Z"
+)
+_SQL_STRING_LITERAL_RE = re.compile(r"'(?:''|[^'])*'\Z")
+
+
+def classic_internal_source_model(owner: object) -> str | None:
+    """Return ORACLE_DWH for an internal owner, or None for any other owner."""
+    text = str(owner or "").strip().upper()
+    if text in ALLOWED_INTERNAL_OWNERS:
+        return CLASSIC_INTERNAL_SOURCE_MODEL
+    return None
+
+
+def _canonical_audit_type(type_sql: object) -> str:
+    """Oracle datatype of one planned target column, without DEFAULT or nullability."""
+    text = " ".join(str(type_sql or "").strip().upper().split())
+    text = _AUDIT_DEFAULT_TAIL_RE.sub("", text).strip()
+    text = _AUDIT_NOT_NULL_RE.sub("", text).strip()
+    text = re.sub(r"\s*\(\s*", "(", text)
+    text = re.sub(r"\s*,\s*", ",", text)
+    text = re.sub(r"\s*\)", ")", text)
+    text = re.sub(r"\s+", " ", text)
+    if not _AUDIT_TYPE_RE.fullmatch(text):
+        raise AuditPreservationRejected("Audit preservation column type is not supported.")
+    return text
+
+
+def _audit_type_family(oracle_type: str) -> str:
+    if oracle_type.startswith("TIMESTAMP"):
+        return "timestamp"
+    if oracle_type == "DATE":
+        return "date"
+    if oracle_type.startswith(("NUMBER", "FLOAT", "BINARY_")):
+        return "number"
+    return "character"
+
+
+def _default_expression_family(expression: str) -> str | None:
+    if expression == "CURRENT_TIMESTAMP":
+        return "timestamp_tz"
+    if expression.startswith(("TRUNC(", "TO_DATE(")):
+        return "date"
+    if _SQL_STRING_LITERAL_RE.fullmatch(expression):
+        return "char"
+    return None
+
+
+def _typed_audit_default(expression: str, type_sql: object) -> str:
+    """Render one audit default so every CASE branch has the column datatype.
+
+    CURRENT_TIMESTAMP is TIMESTAMP WITH TIME ZONE. TO_TIMESTAMP makes a
+    TIMESTAMP. A quoted session number is CHAR; TO_NUMBER makes a NUMBER.
+    A character literal is CHAR. CAST covers every other supported type.
+    DATE defaults that are already DATE stay as they are.
+    TO_NUMBER('AMBIGUOUS') stays in the subquery WHERE, so the selected
+    value remains the column itself for TIMESTAMP, VARCHAR2, and NUMBER.
+    """
+    oracle_type = _canonical_audit_type(type_sql)
+    family = _audit_type_family(oracle_type)
+    current = _default_expression_family(expression)
+    if family == "date" and current == "date":
+        return expression
+    if family == "number":
+        # Only the ODI session token becomes a number. Other defaults are not numeric.
+        if expression != _SESSION_BATCH_SQL:
+            raise AuditPreservationRejected(
+                "Audit preservation numeric default is not a session number."
+            )
+        converted = f"TO_NUMBER({expression})"
+        if oracle_type == "NUMBER":
+            return converted
+        return f"CAST({converted} AS {oracle_type})"
+    if family == "timestamp":
+        # CURRENT_TIMESTAMP is TIMESTAMP WITH TIME ZONE. TO_TIMESTAMP returns TIMESTAMP.
+        rendered = (
+            f"TO_TIMESTAMP(TO_CHAR({expression},'YYYY-MM-DD HH24:MI:SS.FF6'),"
+            f"'YYYY-MM-DD HH24:MI:SS.FF6')"
+        )
+        if oracle_type == "TIMESTAMP":
+            return rendered
+        return f"CAST({rendered} AS {oracle_type})"
+    return f"CAST({expression} AS {oracle_type})"
 
 
 def _identifier_or_none(value: object) -> str | None:
@@ -175,6 +285,7 @@ def build_same_schema_audit_expressions(
     source_system_literal: str,
     join_table: object = None,
     source_table: object = None,
+    target_column_types: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Build null-safe audit CASE expressions for one qualified same-schema IU mapping.
 
@@ -262,6 +373,10 @@ def build_same_schema_audit_expressions(
         if column not in target_names or column in keys:
             continue
         default_sql = defaults[column]
+        if target_column_types is not None:
+            if column not in target_column_types:
+                raise AuditPreservationRejected("Audit preservation column type is missing.")
+            default_sql = _typed_audit_default(default_sql, target_column_types[column])
         use_change = change_where if column in _AUDIT_REFRESH_ON_CHANGE else None
         expressions[column] = _audit_case(
             table_sql, alias, key_where, column, default_sql, use_change,
@@ -925,9 +1040,11 @@ class MappingGenerator:
             raise RuntimeError("Could not retrieve source column list (None)")
 
         if not src_columns:
-            self._add_log("target_preflight", "FAILED",
-                           f"No column found in source table: {params.get('src_table')}")
-            raise RuntimeError(f"No column found in source table: {src_model}.{params.get('src_table')}")
+            self._add_log(
+                "target_preflight", "FAILED",
+                f"No column found in source table: {params.get('src_table')}",
+            )
+            raise SourceTableNotFound(src_model)
 
         col_defs: list[str] = []
         desired_col_defs: list[tuple[str, str]] = []
@@ -1006,7 +1123,9 @@ class MappingGenerator:
             for column in plan.get("src_columns") or []
             if isinstance(column, dict)
         ]
-        target_columns = [name for name, _type_sql in plan.get("desired_col_defs") or []]
+        target_pairs = list(plan.get("desired_col_defs") or [])
+        target_columns = [name for name, _type_sql in target_pairs]
+        target_column_types = {name: type_sql for name, type_sql in target_pairs}
         profile = build_same_schema_audit_expressions(
             integration_type=params.get("integration_type"),
             src_owner=params.get("src_owner"),
@@ -1020,6 +1139,7 @@ class MappingGenerator:
             source_system_literal=_SOURCE_SYSTEM_LITERAL,
             join_table=params.get("join_table"),
             source_table=params.get("src_table"),
+            target_column_types=target_column_types,
         )
         expressions = dict(profile["expressions"])
         self._audit_preservation_expressions = expressions

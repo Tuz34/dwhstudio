@@ -11,6 +11,7 @@ import {
   getMappingOutcome,
   mappingName,
   prefillLoadOptions,
+  resolveWizardSourceModel,
   validateLoadOptions,
 } from './mappingWizardRequests';
 
@@ -232,6 +233,7 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
   const friendlyError = primaryError ? getFriendlyFailure(primaryError) : '';
   const outcome = getMappingOutcome(result);
   const selectedLoadType = LOAD_TYPES.find(({ value }) => value === form.load_type);
+  const requestedSourceModel = resolveWizardSourceModel(form);
 
   return (
     <Modal open={open} onClose={handleClose} title="Mapping Wizard" size="lg">
@@ -266,7 +268,13 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Source Model</label>
-              <input value={form.src_model} onChange={e => set('src_model', e.target.value)} className={inputCls} />
+              <input
+                value={form.src_model}
+                onChange={e => setForm(prev => ({
+                  ...prev, src_model: e.target.value, src_model_touched: true,
+                }))}
+                className={inputCls}
+              />
             </div>
             <div>
               <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Schema (optional)</label>
@@ -414,7 +422,7 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
             </h4>
             {[
               ['Mapping Name', mappingName(form)],
-              ['Source', `${form.src_model}.${form.src_schema ? form.src_schema + '.' : ''}${form.src_table}`],
+              ['Source', `${requestedSourceModel}.${form.src_schema ? form.src_schema + '.' : ''}${form.src_table}`],
               ['Target', `${form.tgt_owner}.${form.tgt_table}`],
               ['Load type', selectedLoadType?.label || '-'],
               ['Key columns', validateLoadOptions(form).keyColumns.join(', ') || '-'],

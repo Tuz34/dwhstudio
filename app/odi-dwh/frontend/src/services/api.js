@@ -175,7 +175,29 @@ export const getOdiSessionSuggestion = (body) => apiPost('/api/odi/session_sugge
 
 // Mapping CRUD
 export const analyzePrompt   = (body)    => apiPost('/api/mapping/analyze-prompt', body);
-export const preflightMappingTarget = (body) => apiPost('/api/mapping/target-preflight', body);
+const SOURCE_TABLE_NOT_FOUND = /^Source table not found through source model [A-Z][A-Z0-9_]{0,127}$/;
+
+export function visiblePreflightError(error) {
+  const text = error && error.body && error.body.error;
+  if (typeof text === 'string' && SOURCE_TABLE_NOT_FOUND.test(text)) {
+    const visible = new Error(text);
+    visible.status = error.status;
+    return visible;
+  }
+  return error;
+}
+
+export async function preflightMappingTarget(body) {
+  try {
+    return await request('/api/mapping/target-preflight', {
+      method: 'POST',
+      body,
+      captureErrorBody: true,
+    });
+  } catch (error) {
+    throw visiblePreflightError(error);
+  }
+}
 export const generateMapping = (body)    => apiPost('/api/mapping/generate', body);
 export const updateMapping   = (body)    => apiPost('/api/mapping/update', body);
 export const deleteMapping   = (body)    => apiPost('/api/mapping/delete', body);

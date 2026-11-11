@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -15,7 +16,10 @@ import odi81_app_acceptance as driver
 from mapping_generator import (
     AuditPreservationRejected,
     MappingGenerator,
+    SourceTableNotFound,
     _SESSION_BATCH_SQL,
+    _audit_type_family,
+    _canonical_audit_type,
     build_same_schema_audit_expressions,
 )
 from odi_orchestrator import OdiOrchestrator, _EXPR_VAL_RE
@@ -41,12 +45,17 @@ def _profile(flow: str) -> dict:
     return generator._prepare_audit_preservation(validated, plan)
 
 
-def _to_number(value: object) -> None:
-    raise sqlite3.DataError("ambiguous key")
+def _to_number(value: object) -> str:
+    text = "" if value is None else str(value)
+    if text.upper() == "AMBIGUOUS":
+        raise sqlite3.DataError("ambiguous key")
+    return text
 
 
 def _register(connection: sqlite3.Connection) -> None:
     connection.create_function("TO_DATE", 2, lambda value, _fmt: value)
+    connection.create_function("TO_CHAR", 2, lambda value, _fmt: None if value is None else str(value))
+    connection.create_function("TO_TIMESTAMP", 2, lambda value, _fmt: value)
     connection.create_function(
         "TRUNC", 1, lambda value: None if value is None else str(value)[:10],
     )
@@ -566,3 +575,234 @@ def test_unqualified_mappings_without_a_profile_keep_the_timestamp_default(tmp_p
     })
     assert iu["rejected"] is False, iu["error_text"]
     assert iu["assigned"]["INSERT_DATE"] == "CURRENT_TIMESTAMP"
+
+
+_CASE_WORDS = {"CASE", "WHEN", "THEN", "ELSE", "END"}
+_AUDIT_COLUMNS = (
+    "INSERT_DATE", "UPDATE_DATE", "CURRENT_FLAG", "EFFECTIVE_FROM", "EFFECTIVE_TO",
+    "SOURCE_SYSTEM", "ETL_BATCH_ID",
+)
+_SUPPORTED_AUDIT_TYPES = (
+    "TIMESTAMP",
+    "TIMESTAMP(6)",
+    "timestamp with time zone",
+    "TIMESTAMP(6) WITH TIME ZONE",
+    "TIMESTAMP WITH LOCAL TIME ZONE",
+    "TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    "DATE",
+    "NUMBER",
+    "NUMBER(19)",
+    "NUMBER(19, 0)",
+    "FLOAT(126)",
+    "BINARY_DOUBLE",
+    "BINARY_FLOAT",
+    "VARCHAR2(50)",
+    "VARCHAR2(1)",
+    "VARCHAR2(50 BYTE)",
+    "VARCHAR2(50 CHAR)",
+    "NVARCHAR2(20)",
+    "CHAR(1)",
+    "NCHAR(1)",
+    "TIMESTAMP DEFAULT SYSTIMESTAMP",
+    "VARCHAR2(50) DEFAULT 'ORACLE_SAMPLE_SCHEMAS'",
+    "NUMBER NOT NULL",
+)
+_TIMESTAMP_DEFAULT = (
+    "TO_TIMESTAMP(TO_CHAR(CURRENT_TIMESTAMP,'YYYY-MM-DD HH24:MI:SS.FF6'),"
+    "'YYYY-MM-DD HH24:MI:SS.FF6')"
+)
+_LIVE_DEFAULTS = {
+    "F1": {
+        "INSERT_DATE": _TIMESTAMP_DEFAULT,
+        "UPDATE_DATE": _TIMESTAMP_DEFAULT,
+        "SOURCE_SYSTEM": f"CAST('{mapping_generator._SOURCE_SYSTEM_LITERAL}' AS VARCHAR2(50))",
+        "ETL_BATCH_ID": f"TO_NUMBER({_SESSION_BATCH_SQL})",
+    },
+    "F3": {
+        "INSERT_DATE": _TIMESTAMP_DEFAULT,
+        "UPDATE_DATE": _TIMESTAMP_DEFAULT,
+        "CURRENT_FLAG": "CAST('Y' AS VARCHAR2(1))",
+        "EFFECTIVE_FROM": "TRUNC(CURRENT_TIMESTAMP)",
+        "EFFECTIVE_TO": "TO_DATE('9999-12-31','YYYY-MM-DD')",
+        "SOURCE_SYSTEM": f"CAST('{mapping_generator._SOURCE_SYSTEM_LITERAL}' AS VARCHAR2(50))",
+        "ETL_BATCH_ID": f"TO_NUMBER({_SESSION_BATCH_SQL})",
+    },
+}
+
+
+def _top_level_keywords(expression: str) -> list[tuple[str, int, int]]:
+    """CASE keywords that are outside parentheses and string literals."""
+    found: list[tuple[str, int, int]] = []
+    depth = 0
+    in_string = False
+    index = 0
+    length = len(expression)
+    while index < length:
+        char = expression[index]
+        if in_string:
+            if char == "'" and index + 1 < length and expression[index + 1] == "'":
+                index += 2
+                continue
+            if char == "'":
+                in_string = False
+            index += 1
+            continue
+        if char == "'":
+            in_string = True
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth == 0 and char.isalpha():
+            end = index + 1
+            while end < length and (expression[end].isalnum() or expression[end] == "_"):
+                end += 1
+            word = expression[index:end].upper()
+            if word in _CASE_WORDS:
+                found.append((word, index, end))
+            index = end
+            continue
+        index += 1
+    return found
+
+
+def _case_results(expression: str) -> list[str]:
+    """THEN and ELSE results of the outer CASE. Nested change-detection CASE stays inside."""
+    tokens = _top_level_keywords(expression)
+    kinds = [kind for kind, _start, _end in tokens]
+    assert kinds[0] == "CASE" and kinds[-1] == "END" and kinds.count("CASE") == 1
+    assert "ELSE" in kinds and "THEN" in kinds
+    results = []
+    for position, (kind, _start, end) in enumerate(tokens):
+        if kind in {"THEN", "ELSE"}:
+            results.append(expression[end:tokens[position + 1][1]].strip())
+    assert len(results) >= 3
+    return results
+
+
+def _branch_sql_type(branch: str, column: str) -> str:
+    text = branch.strip()
+    if text.startswith("(SELECT "):
+        select_list = text.split(" FROM ", 1)[0]
+        assert f'."{column}"' in select_list and "TO_NUMBER" not in select_list
+        return "COLUMN"
+    if re.fullmatch(r"TO_NUMBER\(.+\)", text):
+        return "NUMBER"
+    cast = re.fullmatch(r"CAST\(.+ AS ([A-Z0-9_(), ]+)\)", text)
+    if cast:
+        return cast.group(1)
+    if text == "CURRENT_TIMESTAMP":
+        return "TIMESTAMP WITH TIME ZONE"
+    if re.fullmatch(r"TO_TIMESTAMP\(.+\)", text):
+        return "TIMESTAMP"
+    if text.startswith(("TRUNC(", "TO_DATE(")):
+        return "DATE"
+    if re.fullmatch(r"'(?:''|[^'])*'", text):
+        return "CHAR"
+    raise AssertionError(f"unclassified branch: {text}")
+
+
+def _assert_branches_match(expression: str, column: str, oracle_type: str, default_sql: str | None = None) -> None:
+    results = _case_results(expression)
+    ambiguous, *middle, matched = results
+    assert ambiguous.startswith("(SELECT ") and "AND TO_NUMBER('AMBIGUOUS') IS NOT NULL)" in ambiguous
+    assert "TO_NUMBER('AMBIGUOUS')" not in matched
+    assert middle and len(set(middle)) == 1
+    if default_sql is not None:
+        assert middle[0] == default_sql
+    for result in results:
+        found = _branch_sql_type(result, column)
+        if found == "COLUMN":
+            found = oracle_type
+        assert found == oracle_type, (column, oracle_type, found, result)
+
+
+def _typed_expression(column: str, type_sql: str) -> str:
+    profile = build_same_schema_audit_expressions(
+        integration_type="IU",
+        src_owner="DWH",
+        tgt_owner="DWH",
+        src_model="ORACLE_DWH",
+        tgt_model="ORACLE_ODS",
+        tgt_table="ODS_ODI81N_F1",
+        update_key_columns=["ENTITY_ID"],
+        source_columns=["ENTITY_ID", "ATTR_TEXT"],
+        target_columns=["ENTITY_ID", "ATTR_TEXT", column],
+        source_system_literal=mapping_generator._SOURCE_SYSTEM_LITERAL,
+        target_column_types={column: type_sql},
+    )
+    assert profile["qualified"] is True
+    return str(profile["expressions"][column])
+
+
+@pytest.mark.parametrize("flow", ["F1", "F3"])
+def test_live_audit_case_branches_match_the_target_datatype(flow):
+    """a645d5a fails here: NUMBER/TIMESTAMP/VARCHAR2 defaults were CHAR or TIMESTAMP WITH TIME ZONE."""
+    _generator_unused, _validated, plan = _generator(flow)
+    types = {name: _canonical_audit_type(type_sql) for name, type_sql in plan["desired_col_defs"]}
+    expressions = _profile(flow)["expressions"]
+    assert set(expressions) == set(_LIVE_DEFAULTS[flow])
+    for column, default_sql in _LIVE_DEFAULTS[flow].items():
+        expression = expressions[column]
+        _assert_branches_match(expression, column, types[column], default_sql)
+        if column == "ETL_BATCH_ID":
+            assert f"THEN {_SESSION_BATCH_SQL}" not in expression
+        if column in {"INSERT_DATE", "UPDATE_DATE"}:
+            assert "THEN CURRENT_TIMESTAMP " not in expression
+        if column == "SOURCE_SYSTEM":
+            assert f"THEN '{mapping_generator._SOURCE_SYSTEM_LITERAL}'" not in expression
+    del _generator_unused
+
+
+@pytest.mark.parametrize("column", _AUDIT_COLUMNS)
+@pytest.mark.parametrize("type_sql", _SUPPORTED_AUDIT_TYPES)
+def test_each_audit_column_and_supported_type_is_branch_consistent(column, type_sql):
+    oracle_type = _canonical_audit_type(type_sql)
+    if _audit_type_family(oracle_type) == "number" and column != "ETL_BATCH_ID":
+        with pytest.raises(AuditPreservationRejected, match="numeric default is not a session number"):
+            _typed_expression(column, type_sql)
+        return
+    expression = _typed_expression(column, type_sql)
+    _assert_branches_match(expression, column, oracle_type)
+    assert "TO_NUMBER('AMBIGUOUS')" in expression
+    assert ";" not in expression
+
+
+@pytest.mark.parametrize("type_sql", ["CLOB", "RAW(16)", "INTEGER", "TIMESTAMP WITH TIMEZONE", ""])
+def test_unsupported_audit_column_type_is_rejected_without_echoing_it(type_sql):
+    with pytest.raises(
+        AuditPreservationRejected, match=r"^Audit preservation column type is not supported\.$",
+    ) as caught:
+        _typed_expression("UPDATE_DATE", type_sql)
+    if type_sql:
+        assert type_sql.upper() not in str(caught.value)
+
+
+def test_missing_audit_column_type_is_rejected():
+    with pytest.raises(AuditPreservationRejected, match=r"^Audit preservation column type is missing\.$"):
+        build_same_schema_audit_expressions(
+            integration_type="IU", src_owner="DWH", tgt_owner="DWH", src_model="ORACLE_DWH",
+            tgt_model="ORACLE_ODS", tgt_table="ODS_ODI81N_F1", update_key_columns=["ENTITY_ID"],
+            source_columns=["ENTITY_ID"], target_columns=["ENTITY_ID", "ETL_BATCH_ID"],
+            source_system_literal="ORACLE_SAMPLE_SCHEMAS", target_column_types={},
+        )
+
+
+def test_empty_source_columns_name_only_the_source_model():
+    generator = MappingGenerator()
+    generator._source_columns_for = lambda _params: []
+    params = driver.classic_params("F1")
+    params["src_model"] = "ORACLE_SOURCE"
+    params["src_table"] = "DWH.ODI81N_SRC_F1"
+    with pytest.raises(
+        SourceTableNotFound,
+        match=r"^Source table not found through source model ORACLE_SOURCE$",
+    ) as caught:
+        generator.target_table_preflight(params)
+    assert "ODI81N_SRC_F1" not in str(caught.value)
+    assert caught.value.src_model == "ORACLE_SOURCE"
+    unknown = SourceTableNotFound("not a model")
+    assert str(unknown) == "Source table not found through source model UNKNOWN"
+    assert "not a model" not in str(unknown)

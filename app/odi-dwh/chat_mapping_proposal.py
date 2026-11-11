@@ -10,11 +10,15 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from mapping_generator import classic_internal_source_model
+
 # Same Oracle/ODI identifier contract as MappingGenerator._validate_identifier.
 _IDENTIFIER = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 _DM_WARNING = "Datamart targets are supported only for Type 2 history."
 _TYPE2_NAME_WARNING = "Mapping name is longer than 31 characters; Type 2 requires a shorter name."
 _LAYERS = {"ODS": "ODS", "EDW": "EDW", "DWH": "DWH", "DM": "DM", "DATAMART": "DM", "DATA MART": "DM"}
+# Classic acceptance uses ORACLE_ODS for ODS targets and ORACLE_DWH for F3.
+_TARGET_MODEL_BY_LAYER = {"ODS": "ORACLE_ODS", "DWH": "ORACLE_DWH", "EDW": "ORACLE_DWH"}
 _PART = r'''(?:[A-Z][A-Z0-9_]*|"[A-Z][A-Z0-9_]*"|'[A-Z][A-Z0-9_]*'|`[A-Z][A-Z0-9_]*`|“[A-Z][A-Z0-9_]*”|‘[A-Z][A-Z0-9_]*’)'''
 _DOTTED = re.compile(rf"{_PART}(?:\.{_PART})+")
 _WORD = re.compile(r"[A-Z][A-Z0-9_]*(?:['’][A-Z0-9_]+)*|[0-9]+")
@@ -676,11 +680,12 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
     if source_table:
         proposal["source_table"] = source_table
         proposal["src_table"] = source_table
-        proposal["src_model"] = "ORACLE_SOURCE"
+        proposal["src_model"] = classic_internal_source_model(source_owner) or "ORACLE_SOURCE"
     if layer:
         proposal["target_layer"] = layer
-        if layer != "DM":
-            proposal["tgt_model"] = "ORACLE_ODS" if layer == "ODS" else "ORACLE_DWH"
+        target_model = _TARGET_MODEL_BY_LAYER.get(layer)
+        if target_model:
+            proposal["tgt_model"] = target_model
     if target_owner:
         proposal.update(target_schema=target_owner, tgt_owner=target_owner)
     if target_table:

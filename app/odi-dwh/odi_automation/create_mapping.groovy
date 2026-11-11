@@ -282,6 +282,7 @@ try {
         println "INTEGRATION TYPE VERIFY: ${tgtComp.getIntegrationType()}"
     }
     boolean integrationTypeSet = controlAppend
+    String integrationTypeEarlyFailure = null
     if (!controlAppend) try {
         tgtComp.setIntegrationTypeCode("IU")
         println "INTEGRATION TYPE: IU (Incremental Update) → ${tgtDSName}"
@@ -301,8 +302,8 @@ try {
                 println "INTEGRATION TYPE: IU forced via reflection → ${tgtDSName}"
                 integrationTypeSet = true
             } catch (Exception ite3) {
-                println "WARNING: Integration Type IU failed: ${ite.getClass().getSimpleName()}"
-                println "         IKM Oracle Merge may not be visible. Set it manually in ODI Studio."
+                // A later setIntegrationType may still verify. Warn only if it does not.
+                integrationTypeEarlyFailure = ite.getClass().getSimpleName()
             }
         }
     }
@@ -451,12 +452,24 @@ try {
         throw new Exception("Required update key is missing or mismatched")
     }
     if (!requiredUpdateKeyColumns.isEmpty()) {
-        tgtComp.setIntegrationType(DatastoreComponent.INTEGRATION_TYPE_UPDATE)
-        String integrationType = tgtComp.getIntegrationType()
-        if (!DatastoreComponent.INTEGRATION_TYPE_UPDATE.equals(integrationType)) {
-            throw new Exception("Target integration type verify failed")
+        try {
+            tgtComp.setIntegrationType(DatastoreComponent.INTEGRATION_TYPE_UPDATE)
+            String integrationType = tgtComp.getIntegrationType()
+            if (!DatastoreComponent.INTEGRATION_TYPE_UPDATE.equals(integrationType)) {
+                throw new Exception("Target integration type verify failed")
+            }
+            println "INTEGRATION TYPE VERIFY: ${integrationType}"
+            integrationTypeEarlyFailure = null
+        } catch (Exception verifyError) {
+            if (integrationTypeEarlyFailure != null) {
+                println "WARNING: Integration Type IU failed: ${integrationTypeEarlyFailure}"
+                println "         IKM Oracle Merge may not be visible. Set it manually in ODI Studio."
+            }
+            throw verifyError
         }
-        println "INTEGRATION TYPE VERIFY: ${integrationType}"
+    } else if (integrationTypeEarlyFailure != null) {
+        println "WARNING: Integration Type IU failed: ${integrationTypeEarlyFailure}"
+        println "         IKM Oracle Merge may not be visible. Set it manually in ODI Studio."
     }
 
     // Attribute Mapping

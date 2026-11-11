@@ -4,6 +4,7 @@ import json
 
 from flask import Blueprint, jsonify, request
 
+from mapping_generator import SourceTableNotFound
 from mapping_run_service import (
     RemoteRunPhase,
     execute_mapping_run,
@@ -74,6 +75,8 @@ def api_mapping_target_preflight():
     try:
         with app_module.MappingGenerator() as mg:
             return jsonify(mg.target_table_preflight(params))
+    except SourceTableNotFound as exc:
+        return jsonify({"error": str(exc)}), 404
     except Exception as exc:
         app_module.logger.error(
             "api_mapping_target_preflight failed: %s", type(exc).__name__

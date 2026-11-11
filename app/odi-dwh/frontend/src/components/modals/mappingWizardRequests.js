@@ -1,6 +1,21 @@
 const IDENTIFIER = /^[A-Z][A-Z0-9_]{0,127}$/;
 const MAX_KEY_COLUMNS = 8;
 
+// Authority: mapping_generator.ALLOWED_INTERNAL_OWNERS. The drift test fails
+// when that set changes. There is no per-owner model map; classic acceptance
+// uses ORACLE_DWH for every internal owner it generates.
+export const DEFAULT_SOURCE_MODEL = 'ORACLE_SOURCE';
+export const INTERNAL_SOURCE_MODEL = 'ORACLE_DWH';
+export const INTERNAL_SOURCE_OWNERS = Object.freeze(['AUDIT_USER', 'DWH', 'DWH_FLAT', 'ODS']);
+
+export function resolveWizardSourceModel(form = {}) {
+  const schema = String(form.src_schema || '').trim().toUpperCase();
+  if (form.src_model_touched !== true && INTERNAL_SOURCE_OWNERS.includes(schema)) {
+    return INTERNAL_SOURCE_MODEL;
+  }
+  return form.src_model;
+}
+
 export const LOAD_TYPES = Object.freeze([
   { value: 'insert_update', label: 'Insert / update (needs key columns)' },
   { value: 'truncate_load', label: 'Truncate and reload' },
@@ -66,7 +81,7 @@ export function buildMappingRequest(form) {
     approved: true,
     engine: 'classic',
     params: {
-      src_model: form.src_model,
+      src_model: resolveWizardSourceModel(form),
       src_table: form.src_table,
       src_schema: form.src_schema,
       tgt_model: form.tgt_model,
@@ -95,7 +110,7 @@ export function buildScd2Handoff(form) {
       type: 'scd2',
       props: {
         mappingRequest: {
-          src_model: form.src_model,
+          src_model: resolveWizardSourceModel(form),
           src_table: form.src_table,
           src_schema: form.src_schema,
           tgt_model: form.tgt_model,
