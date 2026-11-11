@@ -350,6 +350,99 @@ def _same_schema_audit_qualified(
     )
 
 
+def _audit_request_qualified(params: dict) -> bool:
+    """True when this request builds same-schema audit CASE expressions."""
+    return _same_schema_audit_qualified(
+        integration_type=params.get("integration_type"),
+        src_owner=params.get("src_owner"),
+        tgt_owner=params.get("tgt_owner"),
+        src_model=params.get("src_model"),
+        tgt_model=params.get("tgt_model"),
+        tgt_table=params.get("tgt_table"),
+        update_key_columns=list(params.get("update_key_columns") or []),
+        join_table=params.get("join_table"),
+    )
+
+
+def _planned_audit_columns(params: dict, plan: dict) -> list[str]:
+    """Audit columns this request will preserve, in CASE order."""
+    keys: set[str] = set()
+    for item in params.get("update_key_columns") or []:
+        name = _identifier_or_none(item)
+        if name:
+            keys.add(name)
+    present = {name for name, _type_sql in plan.get("desired_col_defs") or []}
+    return [
+        column for column in _AUDIT_COLUMN_ORDER
+        if column in present and column not in keys
+    ]
+
+
+def _plan_using_declared_types(plan: dict, columns: list[str], declared: dict[str, str]) -> dict:
+    """Copy a plan so reused audit columns carry the snapshot's declared types."""
+    revised = dict(plan)
+    usable = set(columns)
+    revised["desired_col_defs"] = [
+        (name, declared[name] if name in usable else type_sql)
+        for name, type_sql in plan["desired_col_defs"]
+    ]
+    return revised
+
+
+def _read_reused_audit_types(params: dict, columns: list[str]) -> dict[str, str]:
+    """Declared types of a target this request will reuse. Fail closed when unreadable."""
+    import target_table_service
+
+    try:
+        frame = target_table_service.read_table_schema(
+            str(params["tgt_owner"]).upper(), str(params["tgt_table"]).upper(),
+        )
+    except MappingGenerationError as exc:
+        raise AuditPreservationRejected(
+            "Audit preservation target column types could not be read."
+        ) from exc
+    declared = target_table_service.declared_type_map(frame)
+    blank = [column for column in columns if column in declared and not declared[column]]
+    if not declared or blank:
+        raise AuditPreservationRejected(
+            "Audit preservation target column types could not be read."
+        )
+    return declared
+
+
+def _read_target_audit_snapshot(params: dict, columns: list[str]) -> tuple[object, dict[str, str] | None]:
+    """One existence check, plus declared audit types when the target will be reused.
+
+    A create, including drop-and-recreate, does not read the catalog: its
+    effective types are the planned types. The returned map is those declared
+    types only when every preserved audit column was readable.
+    """
+    import target_table_service
+
+    context = target_table_service.TargetTableContext(
+        owner=str(params["tgt_owner"]).upper(),
+        table=str(params["tgt_table"]).upper(),
+        drop_if_exists=params.get("drop_target_if_exists") is True,
+        ddl_user=(ORACLE_DDL_USER or "APP_USER").upper(),
+    )
+    exists = target_table_service._target_exists(context)
+    reuse = exists and params.get("drop_target_if_exists") is not True
+    declared = _read_reused_audit_types(params, columns) if reuse else {}
+    present = {
+        column: declared[column]
+        for column in columns
+        if column in declared and declared[column]
+    }
+    snapshot = target_table_service.TargetAuditSnapshot(
+        exists=exists,
+        reuse=reuse,
+        audit_columns=tuple(columns),
+        declared_types=present,
+    )
+    usable = present if reuse and all(column in present for column in columns) else None
+    return snapshot, usable
+
+
 def build_same_schema_audit_expressions(
     *,
     integration_type: object,
@@ -663,6 +756,9 @@ class MappingGenerator:
         self._odi_repo_reader = None
         self._audit_preservation_expressions: dict[str, str] = {}
         self._planned_target_column_plan: dict | None = None
+        # Passed into the plan executor. Not stored on the request dict.
+        self._target_audit_snapshot = None
+        self._audit_types_decided = False
         self._audit_lookup_alias: str | None = None
         self._audit_preservation_public = {
             "qualified": False, "expression_count": 0, "business_column_count": 0, "key_count": 0,
@@ -1238,69 +1334,40 @@ class MappingGenerator:
         )
         return profile
 
-    def _reject_unsupported_planned_audit(self, params: dict) -> None:
-        """Reject an unsupported planned audit type before any ODI call.
+    def _decide_effective_audit(self, params: dict) -> None:
+        """Take one target snapshot and type audit defaults before any ODI call.
 
-        The planned type is known only after the source schema is read. That
-        read is the database, not ODI, and it is the only step before the check.
+        Effective type is the planned type when this request will create the
+        target, and the snapshot's declared type when that target will be reused.
+        There is no separate planned-type gate for a reused target.
         """
-        if not _same_schema_audit_qualified(
-            integration_type=params.get("integration_type"),
-            src_owner=params.get("src_owner"),
-            tgt_owner=params.get("tgt_owner"),
-            src_model=params.get("src_model"),
-            tgt_model=params.get("tgt_model"),
-            tgt_table=params.get("tgt_table"),
-            update_key_columns=list(params.get("update_key_columns") or []),
-            join_table=params.get("join_table"),
-        ):
+        if not _audit_request_qualified(params):
             return
         try:
             plan = self._build_target_column_plan(params)
         except (RuntimeError, ValueError, SourceTableNotFound) as exc:
             raise MappingGenerationError("Target table operation failed") from exc
         self._planned_target_column_plan = plan
-        self._prepare_audit_preservation(params, plan)
+        self._type_audit_from_snapshot(params, plan)
 
-    def _retype_reused_target_audit(self, params: dict, plan: dict) -> None:
-        """Type a reused target from its declared columns, not the planned DDL.
-
-        A table this request will create or drop-and-recreate keeps the planned
-        type. A read failure does not fall back to that plan.
-        """
-        columns = list(self._audit_preservation_expressions)
-        if not columns or params.get("drop_target_if_exists") is True:
+    def _type_audit_from_snapshot(self, params: dict, plan: dict) -> None:
+        """Apply the snapshot's effective types. Does not read the catalog again."""
+        if self._audit_types_decided:
             return
-        import target_table_service
-
-        context = target_table_service.TargetTableContext(
-            owner=str(params["tgt_owner"]).upper(),
-            table=str(params["tgt_table"]).upper(),
-            drop_if_exists=False,
-            ddl_user=(ORACLE_DDL_USER or "APP_USER").upper(),
-        )
-        if not target_table_service._target_exists(context):
+        if not _audit_request_qualified(params):
+            self._prepare_audit_preservation(params, plan)
+            self._audit_types_decided = True
             return
-        try:
-            frame = target_table_service.read_table_schema(context.owner, context.table)
-        except MappingGenerationError as exc:
-            raise AuditPreservationRejected(
-                "Audit preservation target column types could not be read."
-            ) from exc
-        declared = target_table_service.declared_type_map(frame)
-        blank = [column for column in columns if column in declared and not declared[column]]
-        if not declared or blank:
-            raise AuditPreservationRejected(
-                "Audit preservation target column types could not be read."
-            )
-        if any(column not in declared for column in columns):
+        columns = _planned_audit_columns(params, plan)
+        if not columns:
+            self._prepare_audit_preservation(params, plan)
+            self._audit_types_decided = True
             return
-        revised = dict(plan)
-        revised["desired_col_defs"] = [
-            (name, declared[name] if name in columns else type_sql)
-            for name, type_sql in plan["desired_col_defs"]
-        ]
-        self._prepare_audit_preservation(params, revised)
+        snapshot, declared = _read_target_audit_snapshot(params, columns)
+        self._target_audit_snapshot = snapshot
+        typed = plan if declared is None else _plan_using_declared_types(plan, columns, declared)
+        self._prepare_audit_preservation(params, typed)
+        self._audit_types_decided = True
 
     def target_table_preflight(self, params: dict) -> dict:
         """Read-only target table preflight for mapping creation."""
@@ -1406,20 +1473,29 @@ class MappingGenerator:
 
     def _create_target_table(self, params: dict) -> dict:
         """Build a reviewed column plan, then apply it through the persistent target service."""
-        from target_table_service import execute_target_table_plan
+        from target_table_service import TargetChangedDuringGeneration, execute_target_table_plan
 
         logger.info("Creating target table from validated mapping parameters")
         try:
             plan = self._planned_target_column_plan
             if plan is None:
                 plan = self._build_target_column_plan(params)
-            self._prepare_audit_preservation(params, plan)
-            self._retype_reused_target_audit(params, plan)
-            outcome = execute_target_table_plan(self, params, plan, ORACLE_DDL_USER or "APP_USER")
+                self._planned_target_column_plan = plan
+            if not self._audit_types_decided:
+                self._type_audit_from_snapshot(params, plan)
+            outcome = execute_target_table_plan(
+                self, params, plan, ORACLE_DDL_USER or "APP_USER",
+                snapshot=self._target_audit_snapshot,
+            )
             if outcome.get("status") == "BLOCKED":
                 raise TargetTableBlockedError(str(outcome["code"]), outcome)
             return outcome
-        except (MappingGenerationError, TargetTableBlockedError, AuditPreservationRejected):
+        except (
+            MappingGenerationError,
+            TargetTableBlockedError,
+            AuditPreservationRejected,
+            TargetChangedDuringGeneration,
+        ):
             raise
         except Exception as exc:
             self._add_log("create_target_table", "FAILED", type(exc).__name__)
@@ -2138,7 +2214,7 @@ class MappingGenerator:
             # Step 2: Validation
             validated = self.validate_params(params)
             result["params"] = validated
-            self._reject_unsupported_planned_audit(validated)
+            self._decide_effective_audit(validated)
 
             result["steps"]["repository_preflight"] = self._preflight_odi_repository(validated)
             repo_result = self._resolve_odi_repository_bindings(validated)

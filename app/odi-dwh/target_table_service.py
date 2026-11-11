@@ -179,6 +179,48 @@ def read_table_schema(owner: str, table: str) -> pd.DataFrame:
     ]]
 
 
+@dataclass(frozen=True)
+class TargetAuditSnapshot:
+    """Existence and reused audit-column types taken before repository preflight."""
+
+    exists: bool
+    reuse: bool
+    audit_columns: tuple[str, ...]
+    declared_types: dict[str, str]
+
+
+class TargetChangedDuringGeneration(ValueError):
+    """The target no longer matches the snapshot this generation typed from."""
+
+    error_code = "target_changed_during_generation"
+
+
+_TARGET_CHANGED = "Target changed during generation."
+
+
+def _assert_target_snapshot(
+    context: TargetTableContext, exists: bool, snapshot: TargetAuditSnapshot | None,
+) -> None:
+    """Stop before DDL when existence or a reused audit type moved since the snapshot."""
+    if snapshot is None or exists != snapshot.exists:
+        if snapshot is not None:
+            raise TargetChangedDuringGeneration(_TARGET_CHANGED)
+        return
+    if not snapshot.reuse:
+        return
+    try:
+        frame = read_table_schema(context.owner, context.table)
+    except MappingGenerationError as exc:
+        raise TargetChangedDuringGeneration(_TARGET_CHANGED) from exc
+    declared = declared_type_map(frame)
+    changed = any(
+        declared.get(column, "") != snapshot.declared_types.get(column, "")
+        for column in snapshot.audit_columns
+    )
+    if changed:
+        raise TargetChangedDuringGeneration(_TARGET_CHANGED)
+
+
 def declared_type_map(frame: pd.DataFrame) -> dict[str, str]:
     """Column name to FULL_DATA_TYPE from read_table_schema. A null type is blank."""
     if frame is None or frame.empty:
@@ -351,6 +393,7 @@ def execute_target_table_plan(
     params: dict[str, Any],
     plan: dict[str, Any],
     ddl_user: str,
+    snapshot: TargetAuditSnapshot | None = None,
 ) -> dict[str, Any]:
     context = TargetTableContext(
         owner=params["tgt_owner"].upper(),
@@ -359,6 +402,9 @@ def execute_target_table_plan(
         ddl_user=(ddl_user or "APP_USER").upper(),
     )
     exists = _target_exists(context)
+    # The lock-free window between this check and DDL is the same one the
+    # pre-existing name/existence check has.
+    _assert_target_snapshot(context, exists, snapshot)
     if exists and context.drop_if_exists:
         _drop_target(context)
         generator._add_log("create_target_table", "INFO", f"Target table dropped: {context.owner}.{context.table}")
