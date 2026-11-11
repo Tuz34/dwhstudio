@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 import yaml
@@ -24,10 +29,34 @@ PYTHON_GATE_STEP_NAMES = (
     None,
     "Install UnixODBC headers for pyodbc",
     "Install Python dependencies",
+    "Verify pyodbc imports",
     "Run Python quality gate",
     "Run pytest with no deselections",
     "Run application security gate",
 )
+
+# Whole token in `ldconfig -p`: whitespace or start, the soname, whitespace or
+# end. The old prefix search also matched libodbc.so.20.
+EXACT_LIBRARY_PIPELINE = "ldconfig -p | grep -Eq '(^|[[:space:]])libodbc\\.so\\.2([[:space:]]|$)'"
+PREFIX_LIBRARY_PIPELINE = "ldconfig -p | grep -q 'libodbc\\.so\\.2'"
+VERIFY_PYODBC_RUN = 'python -c "import pyodbc; print(pyodbc.version)"'
+VERIFY_BLOCK = (
+    "      - name: Verify pyodbc imports\n"
+    "        working-directory: app/odi-dwh\n"
+    '        run: python -c "import pyodbc; print(pyodbc.version)"\n'
+)
+RUNTIME_CONDITION = 'if [[ "$odbc_runtime_present" -eq 1 ]]; then'
+ABSENT_LIBRARY_MESSAGE = 'echo "The ODBC runtime library libodbc.so.2 is absent."'
+_ABSENT_EXIT_RE = re.compile(
+    "(" + re.escape(ABSENT_LIBRARY_MESSAGE) + r"\n[ \t]*)exit 1"
+)
+BASH_BEHAVIOUR_SKIP_REASON = (
+    "bash is not available on this machine; UnixODBC step behaviour was not "
+    "executed (apt succeeds; apt fails with libodbc.so.2; apt fails with only "
+    "libodbc.so.20; apt fails with no runtime library)."
+)
+_LDCONFIG_EXACT = "\tlibodbc.so.2 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libodbc.so.2\n"
+_LDCONFIG_SO20 = "\tlibodbc.so.20 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libodbc.so.20\n"
 
 # Stand-in workflow for the hermetic "file present" check. It is not the
 # repository file; it only has to satisfy the same assertions.
@@ -63,7 +92,7 @@ _PRESENT_WORKFLOW = textwrap.dedent(
                 exit 0
               fi
               set +o pipefail
-              if ldconfig -p | grep -q 'libodbc\\.so\\.2'; then
+              if ldconfig -p | grep -Eq '(^|[[:space:]])libodbc\\.so\\.2([[:space:]]|$)'; then
                 odbc_runtime_present=1
               else
                 odbc_runtime_present=0
@@ -78,6 +107,9 @@ _PRESENT_WORKFLOW = textwrap.dedent(
           - name: Install Python dependencies
             working-directory: app/odi-dwh
             run: python -m pip install -r requirements.txt -r requirements-dev.txt
+          - name: Verify pyodbc imports
+            working-directory: app/odi-dwh
+            run: python -c "import pyodbc; print(pyodbc.version)"
           - name: Run Python quality gate
             working-directory: app/odi-dwh
             run: python python_quality_gate.py
@@ -131,12 +163,10 @@ def _walk_keys(node: object):
             yield from _walk_keys(item)
 
 
-def test_workflow_yaml_parses_and_python_gates_keep_their_order():
-    _require_workflow_file()
-    job = _python_gates()
+def _assert_order_and_setup(loaded: dict) -> None:
+    job = loaded["jobs"]["python-gates"]
+    assert isinstance(job, dict)
     steps = job["steps"]
-
-    assert WORKFLOW_PATH.is_file()
     assert [step.get("name") for step in steps] == list(PYTHON_GATE_STEP_NAMES)
     assert job["runs-on"] == "ubuntu-latest"
     setup = steps[1]
@@ -144,13 +174,12 @@ def test_workflow_yaml_parses_and_python_gates_keep_their_order():
     assert setup["with"]["python-version"] == "3.12"
 
 
-def test_unixodbc_step_retries_then_checks_the_runtime_library():
-    _require_workflow_file()
-    step = _python_gates()["steps"][2]
+def _assert_unixodbc_text(step: dict) -> None:
     script = step["run"]
-    library_check = "ldconfig -p | grep -q 'libodbc\\.so\\.2'"
+    assert EXACT_LIBRARY_PIPELINE in script
     warning_at = script.index("::warning::")
-    library_at = script.index(library_check)
+    library_at = script.index(EXACT_LIBRARY_PIPELINE)
+    absent_at = script.index(ABSENT_LIBRARY_MESSAGE)
 
     assert step["name"] == "Install UnixODBC headers for pyodbc"
     assert step["shell"] == "bash"
@@ -160,32 +189,30 @@ def test_unixodbc_step_retries_then_checks_the_runtime_library():
     assert "max_attempts=3" in script
     assert "sleep_seconds=$((attempt * 10))" in script
     assert 'sleep "$sleep_seconds"' in script
-    assert library_check in script
+    assert PREFIX_LIBRARY_PIPELINE not in script
+    assert RUNTIME_CONDITION in script
     assert "UnixODBC headers could not be installed" in script
     assert "pip must find a prebuilt pyodbc wheel" in script
     assert script.index("max_attempts=3") < script.index("sudo apt-get update")
     assert script.index("sudo apt-get install -y unixodbc-dev") < library_at
     assert library_at < warning_at
-    assert warning_at < script.index("exit 0", warning_at) < script.rindex("exit 1")
+    assert warning_at < script.index("exit 0", warning_at)
     assert script.index("exit 0") < library_at
+    assert script.find("exit 1", absent_at) > absent_at
+    assert script.find("exit 0", absent_at) == -1
     assert "|| true" not in script
 
 
-def test_python_gates_have_no_continue_on_error():
-    _require_workflow_file()
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+def _assert_no_continue(text: str, loaded: dict) -> None:
     job_text = text.split("  frontend-build:", 1)[0]
-
     assert "continue-on-error" not in text
     assert "continue-on-error" not in job_text
-    assert "continue-on-error" not in set(_walk_keys(_python_gates()))
+    assert "continue-on-error" not in set(_walk_keys(loaded["jobs"]["python-gates"]))
 
 
-def test_pytest_step_runs_the_full_suite_without_deselections():
-    _require_workflow_file()
-    step = _python_gates()["steps"][5]
+def _assert_pytest_step(steps: list) -> None:
+    step = steps[6]
     script = step["run"]
-
     assert step["name"] == "Run pytest with no deselections"
     assert step["working-directory"] == "app/odi-dwh"
     assert "Environment-dependent pytest exclusions must stay empty (ODI-86)." in script
@@ -197,20 +224,287 @@ def test_pytest_step_runs_the_full_suite_without_deselections():
     assert "continue-on-error" not in step
 
 
-def test_later_python_gates_stay_mandatory():
-    _require_workflow_file()
-    steps = _python_gates()["steps"]
-    install, quality, pytest_step, appsec = steps[3:]
-
+def _assert_later_steps(steps: list) -> None:
+    install, verify, quality, pytest_step, appsec = steps[3:]
+    assert install["name"] == "Install Python dependencies"
     assert install["run"] == "python -m pip install -r requirements.txt -r requirements-dev.txt"
     assert install["working-directory"] == "app/odi-dwh"
+    assert verify["name"] == "Verify pyodbc imports"
+    assert verify["working-directory"] == "app/odi-dwh"
+    assert verify["run"] == VERIFY_PYODBC_RUN
+    assert quality["name"] == "Run Python quality gate"
     assert quality["run"] == "python python_quality_gate.py"
     assert quality["working-directory"] == "app/odi-dwh"
     assert pytest_step["name"] == "Run pytest with no deselections"
+    assert appsec["name"] == "Run application security gate"
     assert appsec["run"] == "python tools/workspace/appsec_gate.py --no-write"
     assert "working-directory" not in appsec
     for step in steps:
         assert step.get("continue-on-error") is None
+
+
+def _assert_static_contract(text: str) -> None:
+    loaded = yaml.safe_load(text)
+    assert isinstance(loaded, dict)
+    _assert_order_and_setup(loaded)
+    steps = loaded["jobs"]["python-gates"]["steps"]
+    _assert_unixodbc_text(steps[2])
+    _assert_no_continue(text, loaded)
+    _assert_pytest_step(steps)
+    _assert_later_steps(steps)
+
+
+def _unixodbc_run(text: str) -> str:
+    loaded = yaml.safe_load(text)
+    step = loaded["jobs"]["python-gates"]["steps"][2]
+    assert step["name"] == "Install UnixODBC headers for pyodbc"
+    script = step["run"]
+    assert isinstance(script, str)
+    return script
+
+
+class _StepRun(NamedTuple):
+    returncode: int
+    stdout: str
+    stderr: str
+    sleeps: tuple[str, ...]
+
+
+def _write_stub(directory: Path, name: str, lines: list[str]) -> None:
+    (directory / name).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
+def _install_stubs(directory: Path) -> None:
+    # Backoff sleeps 10s then 20s. The delays stay in the step text; this stub
+    # lets the four apt/ldconfig cases finish without waiting them out.
+    _write_stub(directory, "sudo", ["#!/usr/bin/env bash", 'exec "$@"'])
+    _write_stub(
+        directory,
+        "apt-get",
+        [
+            "#!/usr/bin/env bash",
+            'here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'if [[ -f "$here/apt-fail" ]]; then',
+            "  exit 100",
+            "fi",
+            "exit 0",
+        ],
+    )
+    _write_stub(
+        directory,
+        "ldconfig",
+        [
+            "#!/usr/bin/env bash",
+            'here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'if [[ -f "$here/ldconfig-out.txt" ]]; then',
+            '  cat "$here/ldconfig-out.txt"',
+            "fi",
+            "exit 0",
+        ],
+    )
+    _write_stub(
+        directory,
+        "sleep",
+        [
+            "#!/usr/bin/env bash",
+            'here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'printf "%s\\n" "$*" >> "$here/sleep-log.txt"',
+            "exit 0",
+        ],
+    )
+
+
+def _run_unixodbc_script(script: str, *, apt_fails: bool, ldconfig: str) -> _StepRun:
+    bash = shutil.which("bash")
+    assert bash, "bash was required before executing the UnixODBC step"
+    with tempfile.TemporaryDirectory(prefix="odbc-step-") as raw_dir:
+        stub_dir = Path(raw_dir)
+        _install_stubs(stub_dir)
+        if apt_fails:
+            (stub_dir / "apt-fail").write_text("", encoding="utf-8", newline="\n")
+        if ldconfig:
+            (stub_dir / "ldconfig-out.txt").write_text(ldconfig, encoding="utf-8", newline="\n")
+        body = script.replace("\r\n", "\n").replace("\r", "\n")
+        if not body.endswith("\n"):
+            body += "\n"
+        script_path = stub_dir / "unixodbc-step.sh"
+        script_path.write_text(body, encoding="utf-8", newline="\n")
+        env = os.environ.copy()
+        env["PATH"] = str(stub_dir) + os.pathsep + env.get("PATH", "")
+        try:
+            completed = subprocess.run(
+                [bash, "-e", "-o", "pipefail", str(script_path)],
+                cwd=stub_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=20,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(
+                "UnixODBC step timed out under stubbed tools; the backoff sleep did not return"
+            ) from exc
+        sleep_log = stub_dir / "sleep-log.txt"
+        sleeps = tuple(sleep_log.read_text(encoding="utf-8").splitlines()) if sleep_log.is_file() else ()
+        return _StepRun(completed.returncode, completed.stdout, completed.stderr, sleeps)
+
+
+def _execute_unixodbc_cases(script: str) -> None:
+    cases = (
+        ("apt succeeds", False, "", 0, False, ()),
+        ("apt fails and libodbc.so.2 is present", True, _LDCONFIG_EXACT, 0, True, ("10", "20")),
+        ("apt fails and only libodbc.so.20 is present", True, _LDCONFIG_SO20, 1, False, ("10", "20")),
+        ("apt fails and no runtime library is present", True, "", 1, False, ("10", "20")),
+    )
+    for name, apt_fails, ldconfig, exit_code, expect_warning, sleeps in cases:
+        outcome = _run_unixodbc_script(script, apt_fails=apt_fails, ldconfig=ldconfig)
+        assert outcome.returncode == exit_code, (
+            f"{name}: exit {outcome.returncode}, expected {exit_code}\n"
+            f"stdout:\n{outcome.stdout}\nstderr:\n{outcome.stderr}"
+        )
+        warning = "::warning::UnixODBC headers could not be installed" in outcome.stdout
+        assert warning is expect_warning, f"{name}: warning={warning}\n{outcome.stdout}"
+        assert outcome.sleeps == sleeps, f"{name}: sleeps {outcome.sleeps}"
+
+
+def _require_bash_for_behaviour() -> str:
+    bash = shutil.which("bash")
+    if bash:
+        return bash
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.fail(
+            "GITHUB_ACTIONS=true but bash is not available. The UnixODBC step "
+            "behaviour must run in CI instead of being skipped."
+        )
+    pytest.skip(BASH_BEHAVIOUR_SKIP_REASON)
+
+
+def _mutate_always_true(text: str) -> str:
+    assert RUNTIME_CONDITION in text
+    mutated = text.replace(RUNTIME_CONDITION, "if true; then", 1)
+    assert "if true; then" in mutated
+    assert EXACT_LIBRARY_PIPELINE in mutated
+    return mutated
+
+
+def _mutate_drop_absent_exit(text: str) -> str:
+    mutated, count = _ABSENT_EXIT_RE.subn(r"\1", text, count=1)
+    assert count == 1
+    assert "exit 1" not in _unixodbc_run(mutated)
+    return mutated
+
+
+def _mutate_absent_exit_zero(text: str) -> str:
+    mutated, count = _ABSENT_EXIT_RE.subn(r"\1exit 0", text, count=1)
+    assert count == 1
+    script = _unixodbc_run(mutated)
+    assert "exit 1" not in script
+    assert script.rstrip().endswith("exit 0")
+    return mutated
+
+
+def _mutate_prefix_match(text: str) -> str:
+    assert text.count(EXACT_LIBRARY_PIPELINE) == 1
+    mutated = text.replace(EXACT_LIBRARY_PIPELINE, PREFIX_LIBRARY_PIPELINE, 1)
+    assert EXACT_LIBRARY_PIPELINE not in mutated
+    assert PREFIX_LIBRARY_PIPELINE in mutated
+    return mutated
+
+
+def _mutate_remove_verify(text: str) -> str:
+    assert text.count(VERIFY_BLOCK) == 1
+    return text.replace(VERIFY_BLOCK, "", 1)
+
+
+def _mutate_rename_verify(text: str) -> str:
+    assert text.count("Verify pyodbc imports") == 1
+    return text.replace("Verify pyodbc imports", "Check pyodbc imports", 1)
+
+
+def _mutate_move_verify_before_pip(text: str) -> str:
+    assert text.count(VERIFY_BLOCK) == 1
+    without = text.replace(VERIFY_BLOCK, "", 1)
+    anchor = "      - name: Install Python dependencies\n"
+    assert without.count(anchor) == 1
+    return without.replace(anchor, VERIFY_BLOCK + anchor, 1)
+
+
+def _mutate_verify_continue_on_error(text: str) -> str:
+    anchor = "      - name: Verify pyodbc imports\n"
+    assert text.count(anchor) == 1
+    assert "continue-on-error" not in text
+    return text.replace(anchor, anchor + "        continue-on-error: true\n", 1)
+
+
+def _must_reject(label: str, check) -> None:
+    try:
+        check()
+    except AssertionError:
+        return
+    pytest.fail(f"{label} was accepted")
+
+
+def test_workflow_yaml_parses_and_python_gates_keep_their_order():
+    _require_workflow_file()
+    assert WORKFLOW_PATH.is_file()
+    _assert_order_and_setup(_workflow())
+
+
+def test_unixodbc_step_retries_then_checks_the_runtime_library():
+    _require_workflow_file()
+    _assert_unixodbc_text(_python_gates()["steps"][2])
+
+
+def test_python_gates_have_no_continue_on_error():
+    _require_workflow_file()
+    _assert_no_continue(WORKFLOW_PATH.read_text(encoding="utf-8"), _workflow())
+
+
+def test_pytest_step_runs_the_full_suite_without_deselections():
+    _require_workflow_file()
+    _assert_pytest_step(_python_gates()["steps"])
+
+
+def test_later_python_gates_stay_mandatory():
+    _require_workflow_file()
+    _assert_later_steps(_python_gates()["steps"])
+
+
+def test_unixodbc_step_behaviour_under_stubbed_apt_and_ldconfig():
+    _require_workflow_file()
+    _require_bash_for_behaviour()
+    _execute_unixodbc_cases(_python_gates()["steps"][2]["run"])
+
+
+def test_in_memory_ci_yml_mutants_fail_the_contract():
+    # Mutants stay in memory. The repository workflow file is not rewritten.
+    _require_workflow_file()
+    original = WORKFLOW_PATH.read_text(encoding="utf-8")
+    _assert_static_contract(original)
+    step_mutants = (
+        ("Verify pyodbc imports removed", _mutate_remove_verify),
+        ("Verify pyodbc imports renamed", _mutate_rename_verify),
+        ("Verify pyodbc imports moved before pip install", _mutate_move_verify_before_pip),
+        ("Verify pyodbc imports given continue-on-error", _mutate_verify_continue_on_error),
+    )
+    for label, mutate in step_mutants:
+        mutated = mutate(original)
+        assert mutated != original
+        _must_reject(label, lambda mutated=mutated: _assert_static_contract(mutated))
+    _require_bash_for_behaviour()
+    _execute_unixodbc_cases(_unixodbc_run(original))
+    script_mutants = (
+        ("runtime condition replaced by if true", _mutate_always_true),
+        ("absent-library exit 1 removed", _mutate_drop_absent_exit),
+        ("absent-library exit 1 changed to exit 0", _mutate_absent_exit_zero),
+        ("exact soname match loosened to a prefix match", _mutate_prefix_match),
+    )
+    for label, mutate in script_mutants:
+        mutated = mutate(original)
+        assert mutated != original
+        script = _unixodbc_run(mutated)
+        _must_reject(label, lambda script=script: _execute_unixodbc_cases(script))
 
 
 # Every repository contract test above belongs in this tuple. The behaviour
@@ -221,6 +515,8 @@ _REPOSITORY_CONTRACT_TESTS = (
     test_python_gates_have_no_continue_on_error,
     test_pytest_step_runs_the_full_suite_without_deselections,
     test_later_python_gates_stay_mandatory,
+    test_unixodbc_step_behaviour_under_stubbed_apt_and_ldconfig,
+    test_in_memory_ci_yml_mutants_fail_the_contract,
 )
 
 
@@ -238,6 +534,8 @@ def _run_contract_assertions() -> None:
         try:
             test()
         except pytest.skip.Exception as exc:
+            if exc.msg == BASH_BEHAVIOUR_SKIP_REASON:
+                continue
             pytest.fail(f"{test.__name__} skipped while the workflow file exists: {exc.msg}")
 
 
