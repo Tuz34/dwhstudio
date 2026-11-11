@@ -155,6 +155,7 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
     skey_natural_key: initialData.skey_natural_key || emptyForm.skey_natural_key,
     description: initialData.description || emptyForm.description,
     mapping_name: initialData.mapping_name || emptyForm.mapping_name,
+    src_model_from_prefill: typeof initialData.src_model === 'string' && initialData.src_model.trim() !== '',
     ...prefillLoadOptions(initialData),
   });
 
@@ -278,7 +279,7 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
             </div>
             <div>
               <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Schema (optional)</label>
-              <input value={form.src_schema} onChange={e => set('src_schema', e.target.value)} placeholder="HR, SH..." className={inputCls} />
+              <input value={form.src_schema} onChange={e => setForm(prev => ({ ...prev, src_schema: e.target.value, src_schema_typed: true }))} placeholder="HR, SH..." className={inputCls} />
             </div>
           </div>
           <div>

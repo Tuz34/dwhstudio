@@ -23,13 +23,13 @@ def test_wizard_internal_owners_match_the_generator_set():
     owners = re.search(r"INTERNAL_SOURCE_OWNERS = Object\.freeze\(\[(.*?)\]\)", text, re.DOTALL)
     assert owners is not None
     listed = re.findall(r"'([A-Z][A-Z0-9_]*)'", owners.group(1))
-    assert listed == sorted(ALLOWED_INTERNAL_OWNERS)
+    assert listed == [mapping_generator.CLASSIC_DWH_SOURCE_OWNER]
+    assert mapping_generator.CLASSIC_DWH_SOURCE_OWNER == "DWH"
+    assert set(ALLOWED_INTERNAL_OWNERS) == {"DWH", "ODS", "AUDIT_USER", "DWH_FLAT"}
     model = re.search(r"INTERNAL_SOURCE_MODEL = '([A-Z][A-Z0-9_]*)'", text)
     assert model is not None
     assert model.group(1) == mapping_generator.CLASSIC_INTERNAL_SOURCE_MODEL == "ORACLE_DWH"
-    for owner in sorted(ALLOWED_INTERNAL_OWNERS):
-        assert classic_internal_source_model(owner) == "ORACLE_DWH"
-        assert classic_internal_source_model(owner.lower()) == "ORACLE_DWH"
-    assert classic_internal_source_model("HR") is None
-    assert classic_internal_source_model("SH") is None
-    assert classic_internal_source_model("") is None
+    assert classic_internal_source_model("DWH") == "ORACLE_DWH"
+    assert classic_internal_source_model("dwh") == "ORACLE_DWH"
+    for owner in ("ODS", "AUDIT_USER", "DWH_FLAT", "HR", "SH", ""):
+        assert classic_internal_source_model(owner) is None

@@ -581,6 +581,41 @@ def _hint_target(raw: dict) -> tuple[str | None, str | None]:
     return owner or _identifier(raw.get("target_schema") or raw.get("tgt_owner")), table
 
 
+_EXPLICIT_MODEL_NAMES = frozenset({
+    "SQL_SERVER", "MSSQL", "ADVENTUREWORK_PRODUCTION", "SRC_HR", "SRC_SH", "TGT_DWH", "DWH",
+})
+
+
+def _model_name_at(tokens: list[_Token], index: int) -> str | None:
+    if index < 0 or index >= len(tokens) or tokens[index].kind != "word":
+        return None
+    name = _identifier(tokens[index].value)
+    if name and (name.startswith("ORACLE_") or name in _EXPLICIT_MODEL_NAMES):
+        return name
+    return None
+
+
+def _explicit_source_model(tokens: list[_Token]) -> tuple[str | None, set[int]]:
+    """Return a source model the sentence names, and the tokens that name it."""
+    phrases = (
+        ("SOURCE", "MODEL", "CODE"),
+        ("SRC", "MODEL"),
+        ("SOURCE", "MODEL"),
+        ("KAYNAK", "MODELI"),
+        ("KAYNAK", "MODEL"),
+    )
+    for index in range(len(tokens)):
+        if tokens[index].kind == "word" and tokens[index].value == "SRC_MODEL":
+            name = _model_name_at(tokens, index + 1)
+            if name:
+                return name, {index, index + 1}
+        for phrase in phrases:
+            if _sequence(tokens, index, phrase, set()) and _model_name_at(tokens, index + len(phrase)):
+                name = _model_name_at(tokens, index + len(phrase))
+                return name, set(range(index, index + len(phrase) + 1))
+    return None, set()
+
+
 def _explicit_mapping_name(tokens: list[_Token]) -> str | None:
     for index in range(len(tokens) - 2):
         if (tokens[index].kind == "word" and tokens[index].value in {"MAPPING", "MAP"}
@@ -620,9 +655,10 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
 
     tokens = _lex(message)
     stated: set[str] = set()
+    explicit_model, model_taken = _explicit_source_model(tokens)
     explicit_owner, explicit_table, target_taken, target_marker_seen = _explicit_target(tokens)
-    user_source_owner, user_source_table, source_taken = _explicit_source(tokens, target_taken)
-    identifier_taken = target_taken | source_taken
+    user_source_owner, user_source_table, source_taken = _explicit_source(tokens, target_taken | model_taken)
+    identifier_taken = target_taken | source_taken | model_taken
     keys, key_taken = _keys(tokens, identifier_taken)
     intent_taken = identifier_taken | key_taken
     layer = _layer(tokens, intent_taken)
@@ -680,7 +716,11 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
     if source_table:
         proposal["source_table"] = source_table
         proposal["src_table"] = source_table
-        proposal["src_model"] = classic_internal_source_model(source_owner) or "ORACLE_SOURCE"
+        if explicit_model:
+            proposal["src_model"] = explicit_model
+            stated.add("source_model")
+        else:
+            proposal["src_model"] = classic_internal_source_model(source_owner) or "ORACLE_SOURCE"
     if layer:
         proposal["target_layer"] = layer
         target_model = _TARGET_MODEL_BY_LAYER.get(layer)
@@ -711,7 +751,7 @@ def normalize_mapping_request(message: str, raw: object) -> dict | None:
     if warnings:
         proposal["warnings"] = warnings
     proposal["stated_fields"] = [
-        field for field in ("source_schema", "source_table", "target_layer",
+        field for field in ("source_schema", "source_table", "source_model", "target_layer",
                             "target_schema", "target_table", "mapping_name",
                             "load_type", "key_columns") if field in stated
     ]

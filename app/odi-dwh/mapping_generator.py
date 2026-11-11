@@ -110,9 +110,12 @@ def _sql_string_literal(value: str | None, fallback: str = "ORACLE_SOURCE") -> s
 
 _SOURCE_SYSTEM_LITERAL = _sql_string_literal(SOURCE_SYSTEM_NAME, "ORACLE_SOURCE")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$]{0,127}$")
-# Reviewed classic acceptance reads internal owners through ORACLE_DWH.
-# INTERNAL_SOURCE_MODELS has no per-owner map; both codes share that read path.
+# Only the DWH owner is proposed as ORACLE_DWH. ODS, AUDIT_USER and DWH_FLAT
+# keep the external source model. INTERNAL_SOURCE_MODELS is the read path for
+# a caller that already chose ORACLE_ODS or ORACLE_DWH; it is not this map.
+CLASSIC_DWH_SOURCE_OWNER = "DWH"
 CLASSIC_INTERNAL_SOURCE_MODEL = "ORACLE_DWH"
+_REPOSITORY_UNAVAILABLE = "repository_preflight_failed"
 _AUDIT_DEFAULT_TAIL_RE = re.compile(r"\s+DEFAULT\s+.*\Z", re.IGNORECASE | re.DOTALL)
 _AUDIT_NOT_NULL_RE = re.compile(r"\s+NOT\s+NULL\s*\Z", re.IGNORECASE)
 _AUDIT_TYPE_RE = re.compile(
@@ -132,9 +135,9 @@ _SQL_STRING_LITERAL_RE = re.compile(r"'(?:''|[^'])*'\Z")
 
 
 def classic_internal_source_model(owner: object) -> str | None:
-    """Return ORACLE_DWH for an internal owner, or None for any other owner."""
+    """Return ORACLE_DWH for the DWH owner, or None for every other owner."""
     text = str(owner or "").strip().upper()
-    if text in ALLOWED_INTERNAL_OWNERS:
+    if text == CLASSIC_DWH_SOURCE_OWNER:
         return CLASSIC_INTERNAL_SOURCE_MODEL
     return None
 
@@ -163,31 +166,92 @@ def _audit_type_family(oracle_type: str) -> str:
     return "character"
 
 
-def _default_expression_family(expression: str) -> str | None:
-    if expression == "CURRENT_TIMESTAMP":
-        return "timestamp_tz"
-    if expression.startswith(("TRUNC(", "TO_DATE(")):
-        return "date"
-    if _SQL_STRING_LITERAL_RE.fullmatch(expression):
-        return "char"
-    return None
+# Pre-existing audit defaults and the Oracle type they already have.
+# CURRENT_TIMESTAMP is TIMESTAMP(6) WITH TIME ZONE. TRUNC and TO_DATE are DATE.
+_DATETIME_DEFAULT_TYPE = {
+    "CURRENT_TIMESTAMP": ("timestamp_tz", 6),
+    "TRUNC(CURRENT_TIMESTAMP)": ("date", None),
+    "TO_DATE('9999-12-31','YYYY-MM-DD')": ("date", None),
+}
+_DECLARED_DATETIME_RE = re.compile(
+    r"^(DATE|TIMESTAMP(?:\((\d+)\))?( WITH LOCAL TIME ZONE| WITH TIME ZONE)?)$"
+)
+_CHAR_LENGTH_RE = re.compile(r"^(?:VARCHAR2|CHAR)\((\d+)(?: (BYTE|CHAR))?\)$")
+_NATIONAL_CHAR_RE = re.compile(r"^(?:NVARCHAR2|NCHAR)\(\d+\)$")
+
+
+def _declared_datetime(oracle_type: str) -> tuple[str, int | None] | None:
+    """Family and precision of a DATE or TIMESTAMP target, or None."""
+    match = _DECLARED_DATETIME_RE.fullmatch(oracle_type)
+    if match is None:
+        return None
+    if match.group(1) == "DATE":
+        return ("date", None)
+    precision = int(match.group(2)) if match.group(2) else 6
+    zone = match.group(3) or ""
+    if zone == " WITH LOCAL TIME ZONE":
+        family = "timestamp_ltz"
+    elif zone == " WITH TIME ZONE":
+        family = "timestamp_tz"
+    else:
+        family = "timestamp"
+    return (family, precision)
+
+
+def _sql_literal_text(expression: str) -> str | None:
+    if not _SQL_STRING_LITERAL_RE.fullmatch(expression):
+        return None
+    return expression[1:-1].replace("''", "'")
+
+
+def _typed_datetime_default(expression: str, oracle_type: str) -> str:
+    """CAST a datetime default unless it already has exactly the declared type.
+
+    DATE targets keep TRUNC(CURRENT_TIMESTAMP) and TO_DATE(...).
+    CURRENT_TIMESTAMP is kept only for TIMESTAMP [ (6) ] WITH TIME ZONE.
+    Every other supported datetime type is CAST(<expression> AS <declared type>).
+    """
+    current = _DATETIME_DEFAULT_TYPE.get(expression)
+    declared = _declared_datetime(oracle_type)
+    if declared is None:
+        raise AuditPreservationRejected("Audit preservation column type is not supported.")
+    if current is not None and current == declared:
+        return expression
+    return f"CAST({expression} AS {oracle_type})"
+
+
+def _typed_character_default(expression: str, oracle_type: str) -> str:
+    """CAST a character default. CHAR and VARCHAR2 literals must fit the length."""
+    sized = _CHAR_LENGTH_RE.fullmatch(oracle_type)
+    if sized:
+        literal = _sql_literal_text(expression)
+        if literal is None:
+            raise AuditPreservationRejected(
+                "Audit preservation character default is not a literal."
+            )
+        limit = int(sized.group(1))
+        semantics = sized.group(2) or "BYTE"
+        size = len(literal) if semantics == "CHAR" else len(literal.encode("utf-8"))
+        if size > limit:
+            raise AuditPreservationRejected(
+                "Audit preservation character default does not fit the declared length."
+            )
+    elif not _NATIONAL_CHAR_RE.fullmatch(oracle_type):
+        raise AuditPreservationRejected("Audit preservation column type is not supported.")
+    return f"CAST({expression} AS {oracle_type})"
 
 
 def _typed_audit_default(expression: str, type_sql: object) -> str:
     """Render one audit default so every CASE branch has the column datatype.
 
-    CURRENT_TIMESTAMP is TIMESTAMP WITH TIME ZONE. TO_TIMESTAMP makes a
-    TIMESTAMP. A quoted session number is CHAR; TO_NUMBER makes a NUMBER.
-    A character literal is CHAR. CAST covers every other supported type.
-    DATE defaults that are already DATE stay as they are.
+    A quoted session number is CHAR; TO_NUMBER makes a NUMBER. A character
+    literal is CAST to the declared type when it fits. Datetime defaults are
+    CAST to the declared type, or left unchanged when they already have it.
     TO_NUMBER('AMBIGUOUS') stays in the subquery WHERE, so the selected
-    value remains the column itself for TIMESTAMP, VARCHAR2, and NUMBER.
+    value remains the column itself.
     """
     oracle_type = _canonical_audit_type(type_sql)
     family = _audit_type_family(oracle_type)
-    current = _default_expression_family(expression)
-    if family == "date" and current == "date":
-        return expression
     if family == "number":
         # Only the ODI session token becomes a number. Other defaults are not numeric.
         if expression != _SESSION_BATCH_SQL:
@@ -198,16 +262,9 @@ def _typed_audit_default(expression: str, type_sql: object) -> str:
         if oracle_type == "NUMBER":
             return converted
         return f"CAST({converted} AS {oracle_type})"
-    if family == "timestamp":
-        # CURRENT_TIMESTAMP is TIMESTAMP WITH TIME ZONE. TO_TIMESTAMP returns TIMESTAMP.
-        rendered = (
-            f"TO_TIMESTAMP(TO_CHAR({expression},'YYYY-MM-DD HH24:MI:SS.FF6'),"
-            f"'YYYY-MM-DD HH24:MI:SS.FF6')"
-        )
-        if oracle_type == "TIMESTAMP":
-            return rendered
-        return f"CAST({rendered} AS {oracle_type})"
-    return f"CAST({expression} AS {oracle_type})"
+    if family in {"date", "timestamp"}:
+        return _typed_datetime_default(expression, oracle_type)
+    return _typed_character_default(expression, oracle_type)
 
 
 def _identifier_or_none(value: object) -> str | None:
@@ -1222,15 +1279,20 @@ class MappingGenerator:
                 "target_datastore_exists": None,
             }
             try:
+                # Internal sources need the same read-only identity the generate
+                # path stores on _odi_source_identity. Without it, binding
+                # resolution rejects the source before any repository read.
+                if validated.get("src_model") in INTERNAL_SOURCE_MODELS:
+                    self._preflight_odi_repository(validated)
                 repository = self._resolve_odi_repository_bindings(validated)
-            except Exception as exc:
+            except Exception:
                 repository = {
                     "status": "unavailable",
                     "mapping_exists": None,
                     "source_datastore_exists": None,
                     "target_datastore_exists": None,
                     "repository_connection_attempted": True,
-                    "error": str(exc).split("\n")[0],
+                    "error": _REPOSITORY_UNAVAILABLE,
                 }
 
             return {

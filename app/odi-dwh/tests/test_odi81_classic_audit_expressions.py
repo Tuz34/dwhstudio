@@ -60,6 +60,64 @@ def _register(connection: sqlite3.Connection) -> None:
         "TRUNC", 1, lambda value: None if value is None else str(value)[:10],
     )
     connection.create_function("TO_NUMBER", 1, _to_number)
+    # Production emits CAST(... AS TIMESTAMP[(n)] [WITH ...] ZONE). SQLite gives
+    # that CAST numeric affinity and turns the timestamp into a year. The UDF
+    # keeps the value. It is not part of the Oracle text the assertions check.
+    connection.create_function("ODI_AUDIT_DATETIME", 1, lambda value: value)
+
+
+_DATETIME_CAST_TYPE_RE = re.compile(
+    r"DATE|TIMESTAMP(?:\(\d+\))?(?: WITH LOCAL TIME ZONE| WITH TIME ZONE)?"
+)
+
+
+def _sqlite_sql(expression: str) -> str:
+    """Rewrite Oracle datetime CASTs so the SQLite double can execute them."""
+    out: list[str] = []
+    index = 0
+    upper = expression.upper()
+    while True:
+        at = upper.find("CAST(", index)
+        if at < 0:
+            out.append(expression[index:])
+            break
+        depth = 1
+        cursor = at + 5
+        while cursor < len(expression) and depth:
+            char = expression[cursor]
+            if char == "'":
+                cursor += 1
+                while cursor < len(expression):
+                    if expression[cursor] == "'" and cursor + 1 < len(expression) and expression[cursor + 1] == "'":
+                        cursor += 2
+                        continue
+                    if expression[cursor] == "'":
+                        cursor += 1
+                        break
+                    cursor += 1
+                continue
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            cursor += 1
+        if depth:
+            out.append(expression[index:])
+            break
+        interior = expression[at + 5:cursor - 1]
+        marker = interior.upper().rfind(" AS ")
+        if marker < 0:
+            out.append(expression[index:cursor])
+            index = cursor
+            continue
+        inner = _sqlite_sql(interior[:marker])
+        declared = interior[marker + 4:].strip()
+        if _DATETIME_CAST_TYPE_RE.fullmatch(declared.upper()):
+            out.append(expression[index:at] + f"ODI_AUDIT_DATETIME({inner})")
+        else:
+            out.append(expression[index:at] + f"CAST({inner} AS {declared})")
+        index = cursor
+    return "".join(out)
 
 
 def evaluate_audit_rows(main: sqlite3.Connection, owner: str, source: str, target: str,
@@ -79,7 +137,7 @@ def evaluate_audit_rows(main: sqlite3.Connection, owner: str, source: str, targe
                 side.executemany(
                     f'INSERT INTO "{owner}"."{name}" VALUES ({placeholders})', rows,
                 )
-        selected = ", ".join(f'({expressions[name]})' for name in expressions)
+        selected = ", ".join(f'({_sqlite_sql(expressions[name])})' for name in expressions)
         business = ", ".join(f'SRC."{name}"' for name in source_columns)
         return side.execute(
             f'SELECT {business}, {selected} FROM "{owner}"."{source}" SRC ORDER BY SRC."{source_columns[0]}"'
@@ -177,7 +235,8 @@ def test_executed_sql_preserves_nulls_and_fails_closed_on_ambiguity():
     assert changed[5] is None
     assert changed[4] != "OLD_INS" and changed[4] is not None
     assert changed[6] == _BATCH_VALUE
-    assert created[3] is not None and created[4] == created[3]
+    assert isinstance(created[3], str) and "-" in created[3] and ":" in created[3]
+    assert created[4] == created[3]
     assert created[6] == _BATCH_VALUE
     main.execute(
         'INSERT INTO "ODS_ODI81N_F1" VALUES (?,?,?,?,?,?,?)',
@@ -328,6 +387,22 @@ def _groovy_literal(value: str) -> str:
     return "'''" + value + "'''"
 
 
+def _attr_call(item: object) -> str:
+    """Groovy Attr literal. A string is a name. A dict may carry an ODI datatype."""
+    if isinstance(item, str):
+        return f'new Attr(name: "{item}")'
+    name = str(item["name"])
+    fields = [f'name: "{name}"']
+    code = item.get("code")
+    if code:
+        fields.append(f'dataType: new TypeCode(code: "{code}")')
+    if "length" in item:
+        fields.append(f"length: {int(item['length'])}")
+    if "scale" in item:
+        fields.append(f"scale: {int(item['scale'])}")
+    return "new Attr(" + ", ".join(fields) + ")"
+
+
 def _run_mapping_assignment(tmp_path: Path, spec: dict) -> dict:
     """Execute the real rewrite, qualification, and setExpressionText block."""
     from tests import dim_product_mapping_fake_sdk as sdk
@@ -350,10 +425,10 @@ def _run_mapping_assignment(tmp_path: Path, spec: dict) -> dict:
         else:
             properties.append(f'System.setProperty("{key}", {_groovy_literal(value)})')
     source_attributes = ", ".join(
-        f'new Attr(name: "{name}")' for name in spec.get("source_attributes", ("ENTITY_ID", "ATTR_TEXT"))
+        _attr_call(name) for name in spec.get("source_attributes", ("ENTITY_ID", "ATTR_TEXT"))
     )
     target_attributes = ", ".join(
-        f'new Attr(name: "{name}")' for name in spec.get("target_attributes", ("ENTITY_ID", "INSERT_DATE"))
+        _attr_call(name) for name in spec.get("target_attributes", ("ENTITY_ID", "INSERT_DATE"))
     )
     keys = ", ".join(f'"{key}"' for key in spec.get("keys", ("ENTITY_ID",)))
     harness = f'''
@@ -372,10 +447,20 @@ class StoreHolder {{
     ModelHolder model
     ModelHolder getModel() {{ model }}
 }}
+class TypeCode {{
+    String code
+    String getCode() {{ code }}
+}}
 class Attr {{
     String name
     String expression
+    Object dataType
+    Object length
+    Object scale
     String getName() {{ name }}
+    Object getDataType() {{ dataType }}
+    Object getLength() {{ length }}
+    Object getScale() {{ scale }}
     void setExpressionText(String text) {{ expression = text }}
     void setUpdateIndicator(boolean value) {{}}
     void setIsUpdate(boolean value) {{}}
@@ -439,7 +524,7 @@ def _new_key_value(expression: str, source_name: str) -> object:
         connection.execute(f'CREATE TABLE DWH."{source_name}" (ENTITY_ID, ATTR_TEXT)')
         connection.execute(f'INSERT INTO DWH."{source_name}" VALUES (2,\'NEW\')')
         return connection.execute(
-            f'SELECT {expression} FROM DWH."{source_name}" {source_name}'
+            f'SELECT {_sqlite_sql(expression)} FROM DWH."{source_name}" {source_name}'
         ).fetchone()[0]
     finally:
         connection.close()
@@ -607,10 +692,7 @@ _SUPPORTED_AUDIT_TYPES = (
     "VARCHAR2(50) DEFAULT 'ORACLE_SAMPLE_SCHEMAS'",
     "NUMBER NOT NULL",
 )
-_TIMESTAMP_DEFAULT = (
-    "TO_TIMESTAMP(TO_CHAR(CURRENT_TIMESTAMP,'YYYY-MM-DD HH24:MI:SS.FF6'),"
-    "'YYYY-MM-DD HH24:MI:SS.FF6')"
-)
+_TIMESTAMP_DEFAULT = "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"
 _LIVE_DEFAULTS = {
     "F1": {
         "INSERT_DATE": _TIMESTAMP_DEFAULT,
@@ -704,6 +786,11 @@ def _branch_sql_type(branch: str, column: str) -> str:
     raise AssertionError(f"unclassified branch: {text}")
 
 
+def _comparable_type(text: str) -> str:
+    """TIMESTAMP(6) is the default precision, so it compares equal to bare TIMESTAMP."""
+    return text.replace("TIMESTAMP(6)", "TIMESTAMP")
+
+
 def _assert_branches_match(expression: str, column: str, oracle_type: str, default_sql: str | None = None) -> None:
     results = _case_results(expression)
     ambiguous, *middle, matched = results
@@ -716,7 +803,7 @@ def _assert_branches_match(expression: str, column: str, oracle_type: str, defau
         found = _branch_sql_type(result, column)
         if found == "COLUMN":
             found = oracle_type
-        assert found == oracle_type, (column, oracle_type, found, result)
+        assert _comparable_type(found) == _comparable_type(oracle_type), (column, oracle_type, found, result)
 
 
 def _typed_expression(column: str, type_sql: str) -> str:
@@ -756,12 +843,42 @@ def test_live_audit_case_branches_match_the_target_datatype(flow):
     del _generator_unused
 
 
+_CHAR_LITERALS = {
+    "CURRENT_FLAG": "Y",
+    "SOURCE_SYSTEM": mapping_generator._SOURCE_SYSTEM_LITERAL,
+    "ETL_BATCH_ID": '<%=odiRef.getSession("SESS_NO")%>',
+}
+_NON_LITERAL_CHAR_COLUMNS = {"INSERT_DATE", "UPDATE_DATE", "EFFECTIVE_FROM", "EFFECTIVE_TO"}
+_SIZED_CHAR_RE = re.compile(r"^(?:VARCHAR2|CHAR)\((\d+)(?: (BYTE|CHAR))?\)$")
+
+
+def _character_rejection(column: str, oracle_type: str) -> str | None:
+    """Expected rejection for a CHAR/VARCHAR2 default, independent of the builder."""
+    sized = _SIZED_CHAR_RE.fullmatch(oracle_type)
+    if sized is None:
+        return None
+    if column in _NON_LITERAL_CHAR_COLUMNS:
+        return "character default is not a literal"
+    literal = _CHAR_LITERALS[column]
+    limit = int(sized.group(1))
+    semantics = sized.group(2) or "BYTE"
+    size = len(literal) if semantics == "CHAR" else len(literal.encode("utf-8"))
+    if size > limit:
+        return "does not fit the declared length"
+    return None
+
+
 @pytest.mark.parametrize("column", _AUDIT_COLUMNS)
 @pytest.mark.parametrize("type_sql", _SUPPORTED_AUDIT_TYPES)
 def test_each_audit_column_and_supported_type_is_branch_consistent(column, type_sql):
     oracle_type = _canonical_audit_type(type_sql)
     if _audit_type_family(oracle_type) == "number" and column != "ETL_BATCH_ID":
         with pytest.raises(AuditPreservationRejected, match="numeric default is not a session number"):
+            _typed_expression(column, type_sql)
+        return
+    rejection = _character_rejection(column, oracle_type)
+    if rejection is not None:
+        with pytest.raises(AuditPreservationRejected, match=re.escape(rejection)):
             _typed_expression(column, type_sql)
         return
     expression = _typed_expression(column, type_sql)
@@ -806,3 +923,181 @@ def test_empty_source_columns_name_only_the_source_model():
     unknown = SourceTableNotFound("not a model")
     assert str(unknown) == "Source table not found through source model UNKNOWN"
     assert "not a model" not in str(unknown)
+
+
+def _default_sql(column: str, type_sql: str) -> str:
+    _ambiguous, *middle, _matched = _case_results(_typed_expression(column, type_sql))
+    assert middle and len(set(middle)) == 1
+    return middle[0]
+
+
+@pytest.mark.parametrize(("column", "type_sql", "expected"), [
+    ("INSERT_DATE", "DATE", "CAST(CURRENT_TIMESTAMP AS DATE)"),
+    ("INSERT_DATE", "TIMESTAMP", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"),
+    ("INSERT_DATE", "TIMESTAMP(6)", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(6))"),
+    ("INSERT_DATE", "TIMESTAMP(3)", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(3))"),
+    ("INSERT_DATE", "TIMESTAMP WITH TIME ZONE", "CURRENT_TIMESTAMP"),
+    ("INSERT_DATE", "TIMESTAMP(6) WITH TIME ZONE", "CURRENT_TIMESTAMP"),
+    ("INSERT_DATE", "TIMESTAMP(3) WITH TIME ZONE", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(3) WITH TIME ZONE)"),
+    ("INSERT_DATE", "TIMESTAMP WITH LOCAL TIME ZONE", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP WITH LOCAL TIME ZONE)"),
+    ("INSERT_DATE", "TIMESTAMP(6) WITH LOCAL TIME ZONE", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(6) WITH LOCAL TIME ZONE)"),
+    ("INSERT_DATE", "TIMESTAMP(9) WITH LOCAL TIME ZONE", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(9) WITH LOCAL TIME ZONE)"),
+    ("UPDATE_DATE", "TIMESTAMP", "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"),
+    ("EFFECTIVE_FROM", "DATE", "TRUNC(CURRENT_TIMESTAMP)"),
+    ("EFFECTIVE_FROM", "TIMESTAMP(6)", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP(6))"),
+    ("EFFECTIVE_FROM", "TIMESTAMP(6) WITH TIME ZONE", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP(6) WITH TIME ZONE)"),
+    ("EFFECTIVE_FROM", "TIMESTAMP(6) WITH LOCAL TIME ZONE", "CAST(TRUNC(CURRENT_TIMESTAMP) AS TIMESTAMP(6) WITH LOCAL TIME ZONE)"),
+    ("EFFECTIVE_TO", "DATE", "TO_DATE('9999-12-31','YYYY-MM-DD')"),
+    ("EFFECTIVE_TO", "TIMESTAMP(6)", "CAST(TO_DATE('9999-12-31','YYYY-MM-DD') AS TIMESTAMP(6))"),
+    ("EFFECTIVE_TO", "TIMESTAMP WITH TIME ZONE", "CAST(TO_DATE('9999-12-31','YYYY-MM-DD') AS TIMESTAMP WITH TIME ZONE)"),
+    ("EFFECTIVE_TO", "TIMESTAMP WITH LOCAL TIME ZONE", "CAST(TO_DATE('9999-12-31','YYYY-MM-DD') AS TIMESTAMP WITH LOCAL TIME ZONE)"),
+])
+def test_datetime_defaults_use_plain_oracle_for_the_declared_type(column, type_sql, expected):
+    """4936390 emitted TO_CHAR/TO_TIMESTAMP for a TIMESTAMP target. Oracle rejects that."""
+    assert _default_sql(column, type_sql) == expected
+
+
+def test_character_literals_cast_to_the_declared_type_when_they_fit():
+    literal = mapping_generator._SOURCE_SYSTEM_LITERAL
+    assert _default_sql("CURRENT_FLAG", "CHAR(1)") == "CAST('Y' AS CHAR(1))"
+    assert _default_sql("CURRENT_FLAG", "VARCHAR2(1 CHAR)") == "CAST('Y' AS VARCHAR2(1 CHAR))"
+    assert _default_sql("SOURCE_SYSTEM", "VARCHAR2(50 CHAR)") == f"CAST('{literal}' AS VARCHAR2(50 CHAR))"
+    assert _default_sql("SOURCE_SYSTEM", "NVARCHAR2(1)") == f"CAST('{literal}' AS NVARCHAR2(1))"
+    assert _default_sql("ETL_BATCH_ID", "NCHAR(1)") == f"CAST({_SESSION_BATCH_SQL} AS NCHAR(1))"
+    assert len(literal) > 1
+    short = len(literal) - 1
+    with pytest.raises(AuditPreservationRejected, match="does not fit the declared length"):
+        _typed_expression("SOURCE_SYSTEM", "CHAR(1)")
+    with pytest.raises(AuditPreservationRejected, match="does not fit the declared length"):
+        _typed_expression("SOURCE_SYSTEM", f"VARCHAR2({short} CHAR)")
+    with pytest.raises(AuditPreservationRejected, match="character default is not a literal"):
+        _typed_expression("EFFECTIVE_FROM", "VARCHAR2(40)")
+
+
+def test_byte_length_rejects_a_literal_that_fits_in_characters():
+    with pytest.raises(AuditPreservationRejected, match="does not fit the declared length"):
+        mapping_generator._typed_character_default("'Ä'", "VARCHAR2(1)")
+    assert mapping_generator._typed_character_default("'Ä'", "VARCHAR2(1 CHAR)") == "CAST('Ä' AS VARCHAR2(1 CHAR))"
+    assert mapping_generator._typed_character_default("'Ä'", "VARCHAR2(2)") == "CAST('Ä' AS VARCHAR2(2))"
+    assert "Ä" not in "Audit preservation character default does not fit the declared length."
+
+
+def _number_flag_columns() -> list[dict]:
+    return [
+        {"COLUMN_NAME": "ENTITY_ID", "ORACLE_TYPE": "NUMBER(10)", "IS_NULLABLE": "N"},
+        {"COLUMN_NAME": "ATTR_TEXT", "ORACLE_TYPE": "VARCHAR2(40)", "IS_NULLABLE": "Y"},
+        {"COLUMN_NAME": "CURRENT_FLAG", "ORACLE_TYPE": "NUMBER(1)", "IS_NULLABLE": "Y"},
+    ]
+
+
+def test_numeric_non_session_default_is_rejected_before_any_ddl(monkeypatch):
+    import odi_orchestrator
+    import target_table_service
+
+    ddl: list[bool] = []
+    constructed: list[bool] = []
+    monkeypatch.setattr(
+        target_table_service, "execute_target_table_plan", lambda *_args, **_kwargs: ddl.append(True),
+    )
+    real_init = odi_orchestrator.OdiOrchestrator.__init__
+
+    def spy_init(self, *args, **kwargs):
+        constructed.append(True)
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(odi_orchestrator.OdiOrchestrator, "__init__", spy_init)
+    generator = MappingGenerator()
+    generator._source_columns_for = lambda _params: _number_flag_columns()
+    validated = generator.validate_params(driver.classic_params("F1"))
+    with pytest.raises(AuditPreservationRejected, match="numeric default is not a session number"):
+        generator._create_target_table(validated)
+    assert ddl == []
+    assert constructed == []
+
+
+def test_numeric_rejection_reaches_the_wizard_as_a_redacted_200(app_client, monkeypatch):
+    """The route has no error-code table for this rejection, so the body is generic."""
+    import odi_orchestrator
+    import target_table_service
+
+    ddl: list[bool] = []
+    constructed: list[bool] = []
+    monkeypatch.setattr(
+        target_table_service, "execute_target_table_plan", lambda *_args, **_kwargs: ddl.append(True),
+    )
+    real_init = odi_orchestrator.OdiOrchestrator.__init__
+
+    def spy_init(self, *args, **kwargs):
+        constructed.append(True)
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(odi_orchestrator.OdiOrchestrator, "__init__", spy_init)
+    monkeypatch.setattr(MappingGenerator, "_source_columns_for", lambda self, _params: _number_flag_columns())
+    monkeypatch.setattr(
+        MappingGenerator, "_preflight_odi_repository",
+        lambda self, _params: {"status": "passed", "side_effects": False, "ikm_id": "7"},
+    )
+    monkeypatch.setattr(
+        MappingGenerator, "_resolve_odi_repository_bindings",
+        lambda self, _params: {"status": "passed", "mapping_exists": False},
+    )
+    monkeypatch.setattr(MappingGenerator, "_log_to_mapping_log", lambda self, *_args, **_kwargs: None)
+    response = app_client.post("/api/mapping/generate", json=driver.classic_generate_body("F1"))
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["overall_status"] == "FAILED"
+    assert body["error"] == "mapping generation failed."
+    assert body["error_type"] == "OperationError"
+    assert "session number" not in response.get_data(as_text=True)
+    assert "create_target_table" not in body["steps"]
+    assert "create_mapping" not in body["steps"]
+    assert ddl == []
+    assert constructed == []
+
+
+_QUOTED_BATCH = "'<%=odiRef.getSession(\"SESS_NO\")%>'"
+
+
+def _fallback_spec(attribute: object) -> dict:
+    return {
+        "source_name": "SRC_ROW",
+        "src_schema": (11, "LOGICAL_A"),
+        "tgt_schema": (22, "LOGICAL_B"),
+        "integration": "IU",
+        "source_attributes": ("ENTITY_ID",),
+        "target_attributes": (attribute,),
+        "odi.expressions": None,
+        "odi.audit_preservation_columns": None,
+        "odi.audit_lookup_alias": None,
+    }
+
+
+def test_graph_fallback_casts_a_number_session_batch(tmp_path):
+    """4936390 always quoted the session token, including on a NUMBER column."""
+    report = _run_mapping_assignment(tmp_path, _fallback_spec(
+        {"name": "ETL_BATCH_ID", "code": "NUMBER", "length": 19, "scale": 0},
+    ))
+    assert report["rejected"] is False, report["error_text"]
+    assert report["assigned"]["ETL_BATCH_ID"] == f"CAST(TO_NUMBER({_QUOTED_BATCH}) AS NUMBER(19,0))"
+    bare = _run_mapping_assignment(tmp_path, _fallback_spec(
+        {"name": "ETL_BATCH_ID", "code": "NUMBER"},
+    ))
+    assert bare["assigned"]["ETL_BATCH_ID"] == f"TO_NUMBER({_QUOTED_BATCH})"
+    floating = _run_mapping_assignment(tmp_path, _fallback_spec(
+        {"name": "ETL_BATCH_ID", "code": "BINARY_DOUBLE"},
+    ))
+    assert floating["assigned"]["ETL_BATCH_ID"] == f"CAST(TO_NUMBER({_QUOTED_BATCH}) AS BINARY_DOUBLE)"
+
+
+def test_graph_fallback_keeps_the_quoted_session_literal_without_a_datatype(tmp_path):
+    report = _run_mapping_assignment(tmp_path, _fallback_spec("ETL_BATCH_ID"))
+    assert report["rejected"] is False, report["error_text"]
+    assert report["assigned"]["ETL_BATCH_ID"] == _QUOTED_BATCH
+    dated = _run_mapping_assignment(tmp_path, _fallback_spec("INSERT_DATE"))
+    assert dated["assigned"]["INSERT_DATE"] == "CURRENT_TIMESTAMP"
+
+
+def test_session_batch_fallback_calls_the_typed_helper():
+    text = _mapping_script()
+    assert text.count("tAttr.setExpressionText(typedSessionBatch(tAttr))") == 2
+    assert "setExpressionText(\"'<%=odiRef.getSession" not in text

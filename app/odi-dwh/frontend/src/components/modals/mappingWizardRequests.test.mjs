@@ -157,23 +157,59 @@ test('Type 2 creates only the exact SCD2 modal handoff with current form values'
   assert.throws(() => buildScd2Handoff(form), /Choose Type 2/);
 });
 
-test('an untouched internal source schema sends the internal source model', () => {
-  for (const schema of ['DWH', 'dwh', ' ODS ', 'AUDIT_USER', 'DWH_FLAT']) {
-    const request = buildMappingRequest({ ...form, src_model: 'ORACLE_SOURCE', src_schema: schema });
-    assert.equal(request.params.src_model, 'ORACLE_DWH', schema);
-    const handoff = buildScd2Handoff({
-      ...form, src_model: 'ORACLE_SOURCE', src_schema: schema, load_type: 'type2',
+test('only a typed empty-form DWH schema selects the internal source model', () => {
+  const typed = buildMappingRequest({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'DWH', src_schema_typed: true,
+  });
+  assert.equal(typed.params.src_model, 'ORACLE_DWH');
+  const lower = buildMappingRequest({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: ' dwh ', src_schema_typed: true,
+  });
+  assert.equal(lower.params.src_model, 'ORACLE_DWH');
+  for (const schema of ['ODS', 'AUDIT_USER', 'DWH_FLAT', 'HR']) {
+    const request = buildMappingRequest({
+      ...form, src_model: 'ORACLE_SOURCE', src_schema: schema, src_schema_typed: true,
     });
-    assert.equal(handoff.payload.props.mappingRequest.src_model, 'ORACLE_DWH', schema);
+    assert.equal(request.params.src_model, 'ORACLE_SOURCE', schema);
   }
+  const untouched = buildMappingRequest({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'DWH',
+  });
+  assert.equal(untouched.params.src_model, 'ORACLE_SOURCE');
+});
+
+test('a prefilled source model and the Type 2 handoff stay exactly as received', () => {
+  const prefilled = buildMappingRequest({
+    ...form,
+    src_model: 'ORACLE_SOURCE',
+    src_schema: 'DWH',
+    src_model_from_prefill: true,
+    src_schema_typed: true,
+  });
+  assert.equal(prefilled.params.src_model, 'ORACLE_SOURCE');
+  const handoff = buildScd2Handoff({
+    ...form,
+    src_model: 'ORACLE_SOURCE',
+    src_schema: 'DWH',
+    load_type: 'type2',
+    src_model_from_prefill: true,
+    src_schema_typed: true,
+  });
+  assert.equal(handoff.payload.props.mappingRequest.src_model, 'ORACLE_SOURCE');
+  const typedHandoff = buildScd2Handoff({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'DWH', load_type: 'type2', src_schema_typed: true,
+  });
+  assert.equal(typedHandoff.payload.props.mappingRequest.src_model, 'ORACLE_SOURCE');
 });
 
 test('a touched source model and an external schema stay as entered', () => {
   const touched = buildMappingRequest({
-    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'DWH', src_model_touched: true,
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'DWH', src_model_touched: true, src_schema_typed: true,
   });
   assert.equal(touched.params.src_model, 'ORACLE_SOURCE');
-  const external = buildMappingRequest({ ...form, src_model: 'ORACLE_SOURCE', src_schema: 'HR' });
+  const external = buildMappingRequest({
+    ...form, src_model: 'ORACLE_SOURCE', src_schema: 'HR', src_schema_typed: true,
+  });
   assert.equal(external.params.src_model, 'ORACLE_SOURCE');
 });
 
@@ -181,6 +217,8 @@ test('only the source model field marks the model as touched', () => {
   const source = readFileSync(new URL('./MappingWizard.jsx', import.meta.url), 'utf8');
   assert.equal(source.split('src_model_touched').length - 1, 1);
   assert.match(source, /src_model: e\.target\.value, src_model_touched: true/);
+  assert.match(source, /src_model_from_prefill: typeof initialData\.src_model === 'string'/);
+  assert.match(source, /src_schema: e\.target\.value, src_schema_typed: true/);
   assert.match(source, /const requestedSourceModel = resolveWizardSourceModel\(form\)/);
 });
 

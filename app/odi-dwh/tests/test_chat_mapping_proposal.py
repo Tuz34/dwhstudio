@@ -419,10 +419,36 @@ def test_dwh_owner_to_ods_matches_classic_acceptance_models():
 
 
 @pytest.mark.parametrize("owner", ["ODS", "AUDIT_USER", "DWH_FLAT"])
-def test_other_internal_owners_use_the_classic_internal_source_model(owner):
+def test_other_internal_owners_keep_the_external_source_model(owner):
+    """a645d5a sent these owners as ORACLE_SOURCE. Only DWH is ORACLE_DWH."""
     result = normalize_mapping_request(f"Model {owner}.ORDERS into ODS as merge, key ID", {})
-    assert result["src_model"] == "ORACLE_DWH"
+    assert result["src_model"] == "ORACLE_SOURCE"
     assert result["tgt_model"] == "ORACLE_ODS"
+    assert "source_model" not in result["stated_fields"]
+
+
+def test_an_explicit_source_model_in_the_sentence_is_kept():
+    """4936390 replaced a stated model with ORACLE_DWH whenever the owner was internal."""
+    english = normalize_mapping_request(
+        "Model DWH.ORDERS into ODS as merge, key ID, source model ORACLE_SOURCE",
+        {"operation": "CREATE", "src_model": "ORACLE_HR"},
+    )
+    assert english["src_schema"] == "DWH"
+    assert english["src_table"] == "ORDERS"
+    assert english["src_model"] == "ORACLE_SOURCE"
+    assert "source_model" in english["stated_fields"]
+    turkish = normalize_mapping_request(
+        "DWH.ORDERS tablosunu ODS katmanına insert update olarak modelle, anahtar ID, kaynak model ORACLE_HR",
+        {"operation": "CREATE"},
+    )
+    assert turkish["src_model"] == "ORACLE_HR"
+    assert "source_model" in turkish["stated_fields"]
+    hinted = normalize_mapping_request(
+        "Model DWH.ORDERS into ODS as merge, key ID",
+        {"operation": "CREATE", "src_model": "ORACLE_HR"},
+    )
+    assert hinted["src_model"] == "ORACLE_DWH"
+    assert "source_model" not in hinted["stated_fields"]
 
 
 def test_external_owner_keeps_the_external_source_model():
