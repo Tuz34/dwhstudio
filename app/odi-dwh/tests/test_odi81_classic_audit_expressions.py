@@ -1649,3 +1649,246 @@ def test_target_changed_keeps_the_generic_wizard_sentence():
     assert cleaned["error"] == "mapping generation failed."
     assert cleaned["error_code"] == "target_changed_during_generation"
     assert cleaned["error"] != _AUDIT_PRESERVATION_SENTENCE
+
+
+_REUSED_COLUMNS = {
+    "ENTITY_ID", "ATTR_TEXT", "VALUE_AMT", "INSERT_DATE", "UPDATE_DATE",
+    "SOURCE_SYSTEM", "ETL_BATCH_ID", "CURRENT_FLAG", "EFFECTIVE_FROM", "EFFECTIVE_TO",
+}
+_FIRST_TARGET = "ODS_ODI81N_F1"
+_SECOND_TARGET = "ODS_ODI81N_F1_B"
+
+
+def _target_params(table: str) -> dict:
+    params = driver.classic_params("F1")
+    params["tgt_table"] = table
+    params["mapping_name"] = "MAP_" + table.removeprefix("ODS_")
+    return params
+
+
+def _quoted_target(table: str) -> str:
+    return f'"DWH"."{table}"'
+
+
+def _mentions_only(expressions: dict[str, str], table: str, other: str) -> None:
+    own = _quoted_target(table)
+    foreign = _quoted_target(other)
+    assert expressions
+    for text in expressions.values():
+        assert own in text
+        assert foreign not in text
+
+
+def _bind_catalog(monkeypatch, read_schema, ddl: list[str]) -> None:
+    import target_table_service
+
+    monkeypatch.setattr(target_table_service, "_target_exists", lambda _context: True)
+    monkeypatch.setattr(target_table_service, "read_table_schema", read_schema)
+    monkeypatch.setattr(
+        target_table_service, "_verify_key_on_existing",
+        lambda _context, _plan: {"status": "ALREADY_PRESENT", "columns": ["ENTITY_ID"], "kind": "primary"},
+    )
+    monkeypatch.setattr(target_table_service, "_target_columns", lambda _context: set(_REUSED_COLUMNS))
+    monkeypatch.setattr(target_table_service, "_create_target", lambda *_args, **_kwargs: ddl.append("create"))
+    monkeypatch.setattr(target_table_service, "_drop_target", lambda _context: ddl.append("drop"))
+    monkeypatch.setattr(target_table_service, "_apply_grants", lambda _context: ddl.append("grant"))
+    monkeypatch.setattr(target_table_service, "_write_creation_audit", lambda *_args, **_kwargs: ddl.append("audit"))
+
+
+def _bind_reused_pipeline(monkeypatch, read_schema, preflight=None):
+    """One generator, catalog stubs, and the flag seen on each type decision."""
+    ddl: list[str] = []
+    sent: list[dict] = []
+    flags: list[bool] = []
+
+    def passed(self, _params):
+        return {"status": "passed", "ikm_id": "7"}
+
+    def create_mapping(self, params):
+        sent.append({
+            "table": params["tgt_table"],
+            "expressions": dict(self._audit_preservation_expressions),
+            "snapshot": self._target_audit_snapshot,
+        })
+        return {}
+
+    real_type = MappingGenerator._type_audit_from_snapshot
+
+    def spy_type(self, params, plan):
+        flags.append(self._audit_types_decided)
+        return real_type(self, params, plan)
+
+    monkeypatch.setattr(MappingGenerator, "_preflight_odi_repository", preflight or passed)
+    monkeypatch.setattr(MappingGenerator, "_resolve_odi_repository_bindings", lambda self, _params: {})
+    monkeypatch.setattr(MappingGenerator, "_register_odi_datastores", lambda self, _params: {})
+    monkeypatch.setattr(MappingGenerator, "_create_odi_mapping", create_mapping)
+    monkeypatch.setattr(MappingGenerator, "_populate_lineage", lambda self, _params: {})
+    monkeypatch.setattr(MappingGenerator, "_generate_tests", lambda self, _params: {})
+    monkeypatch.setattr(MappingGenerator, "_take_snapshot", lambda self, _params: {})
+    monkeypatch.setattr(MappingGenerator, "_log_to_mapping_log", lambda self, *_args, **_kwargs: None)
+    monkeypatch.setattr(MappingGenerator, "_type_audit_from_snapshot", spy_type)
+    _bind_catalog(monkeypatch, read_schema, ddl)
+    generator = MappingGenerator()
+    generator._source_columns_for = lambda _params: [dict(column) for column in _SOURCE_COLUMNS]
+    return generator, flags, sent, ddl
+
+
+def test_one_generator_two_reused_targets_keep_their_own_case_text(monkeypatch):
+    """3476d3c returned SUCCESS for both and left the first target inside the second CASE."""
+    reads: list[tuple[str, str]] = []
+
+    def read_schema(owner, table):
+        reads.append((owner, table))
+        return _declared_frame(_F1_DECLARED)
+
+    generator, flags, sent, ddl = _bind_reused_pipeline(monkeypatch, read_schema)
+    first = generator.generate_from_params(_target_params(_FIRST_TARGET))
+    second = generator.generate_from_params(_target_params(_SECOND_TARGET))
+    assert first["overall_status"] == "SUCCESS"
+    assert second["overall_status"] == "SUCCESS"
+    assert [item["table"] for item in sent] == [_FIRST_TARGET, _SECOND_TARGET]
+    _mentions_only(sent[0]["expressions"], _FIRST_TARGET, _SECOND_TARGET)
+    _mentions_only(sent[1]["expressions"], _SECOND_TARGET, _FIRST_TARGET)
+    assert flags == [False, False]
+    assert (sent[0]["snapshot"].owner, sent[0]["snapshot"].table) == ("DWH", _FIRST_TARGET)
+    assert (sent[1]["snapshot"].owner, sent[1]["snapshot"].table) == ("DWH", _SECOND_TARGET)
+    assert sent[0]["snapshot"] is not sent[1]["snapshot"]
+    assert ddl == []
+    assert reads == [
+        ("DWH", _FIRST_TARGET), ("DWH", _FIRST_TARGET),
+        ("DWH", _SECOND_TARGET), ("DWH", _SECOND_TARGET),
+    ]
+
+
+def test_request_after_a_rejected_request_does_not_keep_the_decided_flag(monkeypatch):
+    """A failed generate leaves the flag set. The next generate on that object must not keep it."""
+    reads: list[tuple[str, str]] = []
+
+    def read_schema(owner, table):
+        reads.append((owner, table))
+        return _declared_frame(_F1_DECLARED)
+
+    calls: list[str] = []
+
+    def preflight(self, _params):
+        calls.append("preflight")
+        if len(calls) == 1:
+            raise mapping_generator.RepositoryPreflightBlockedError({"code": "repository_lookup_failed"})
+        return {"status": "passed", "ikm_id": "7"}
+
+    generator, flags, sent, ddl = _bind_reused_pipeline(monkeypatch, read_schema, preflight)
+    rejected = generator.generate_from_params(_target_params(_FIRST_TARGET))
+    assert rejected["overall_status"] == "FAILED"
+    assert rejected["error_code"] == "repository_preflight_failed"
+    assert generator._audit_types_decided is True
+    assert _quoted_target(_FIRST_TARGET) in generator._audit_preservation_expressions["ETL_BATCH_ID"]
+    followed = generator.generate_from_params(_target_params(_SECOND_TARGET))
+    assert followed["overall_status"] == "SUCCESS"
+    assert flags == [False, False]
+    assert len(sent) == 1
+    _mentions_only(sent[0]["expressions"], _SECOND_TARGET, _FIRST_TARGET)
+    assert (sent[0]["snapshot"].owner, sent[0]["snapshot"].table) == ("DWH", _SECOND_TARGET)
+    assert ddl == []
+    assert [table for _owner, table in reads] == [_FIRST_TARGET, _SECOND_TARGET, _SECOND_TARGET]
+
+
+def test_executor_refuses_a_snapshot_taken_for_another_target(monkeypatch):
+    """Identical existence and audit types still stop before DDL when the target identity differs."""
+    from target_table_service import (
+        TargetAuditSnapshot,
+        TargetChangedDuringGeneration,
+        execute_target_table_plan,
+    )
+
+    ddl: list[str] = []
+    reads: list[tuple[str, str]] = []
+
+    def read_schema(owner, table):
+        reads.append((owner, table))
+        return _declared_frame(_F1_DECLARED)
+
+    _bind_catalog(monkeypatch, read_schema, ddl)
+    snapshot = TargetAuditSnapshot(
+        exists=True,
+        reuse=True,
+        audit_columns=tuple(_F1_DECLARED),
+        declared_types=dict(_F1_DECLARED),
+        owner="DWH",
+        table=_FIRST_TARGET,
+    )
+    plan = {"src_columns": [], "col_defs": [], "desired_col_defs": [], "defaults_added": []}
+    with pytest.raises(TargetChangedDuringGeneration) as caught:
+        execute_target_table_plan(
+            MappingGenerator(), _target_params(_SECOND_TARGET), plan, "APP_USER", snapshot=snapshot,
+        )
+    assert caught.value.error_code == "target_changed_during_generation"
+    assert str(caught.value) == "Target changed during generation."
+    assert ddl == []
+    assert reads == []
+
+
+def test_type_audit_refuses_a_snapshot_taken_for_another_target(monkeypatch):
+    """The decided flag must not keep another target's CASE once the snapshot identity differs."""
+    import target_table_service
+    from target_table_service import TargetAuditSnapshot, TargetChangedDuringGeneration
+
+    reads: list[tuple[str, str]] = []
+
+    def read_schema(owner, table):
+        reads.append((owner, table))
+        return _declared_frame(_F1_DECLARED)
+
+    monkeypatch.setattr(target_table_service, "read_table_schema", read_schema)
+    monkeypatch.setattr(target_table_service, "_target_exists", lambda _context: True)
+    generator = MappingGenerator()
+    generator._source_columns_for = lambda _params: [dict(column) for column in _SOURCE_COLUMNS]
+    params = generator.validate_params(_target_params(_SECOND_TARGET))
+    plan = generator._build_target_column_plan(params)
+    generator._audit_types_decided = True
+    generator._target_audit_snapshot = TargetAuditSnapshot(
+        exists=True,
+        reuse=True,
+        audit_columns=("ETL_BATCH_ID",),
+        declared_types={"ETL_BATCH_ID": "NUMBER"},
+        owner="DWH",
+        table=_FIRST_TARGET,
+    )
+    generator._audit_preservation_expressions = {"ETL_BATCH_ID": _quoted_target(_FIRST_TARGET)}
+    with pytest.raises(TargetChangedDuringGeneration) as caught:
+        generator._type_audit_from_snapshot(params, plan)
+    assert caught.value.error_code == "target_changed_during_generation"
+    assert reads == []
+    assert generator._audit_preservation_expressions["ETL_BATCH_ID"] == _quoted_target(_FIRST_TARGET)
+
+
+def test_graph_style_create_still_types_from_the_reused_snapshot(monkeypatch):
+    """A direct _create_target_table, as mapping_graph.node_create_table does, has no early decision.
+
+    Round 5 still applies: the flag is false, so this call reads the snapshot and types
+    ETL_BATCH_ID from the reused NUMBER column, not from the planned VARCHAR2(20).
+    """
+    ddl: list[str] = []
+    reads: list[tuple[str, str]] = []
+
+    def read_schema(owner, table):
+        reads.append((owner, table))
+        return _declared_frame({**_F1_DECLARED, "ETL_BATCH_ID": "NUMBER"})
+
+    _bind_catalog(monkeypatch, read_schema, ddl)
+    generator = MappingGenerator()
+    generator._source_columns_for = lambda _params: _columns_with("ETL_BATCH_ID", "VARCHAR2(20)")
+    params = generator.validate_params(driver.classic_params("F1"))
+    assert generator._audit_types_decided is False
+    assert generator._target_audit_snapshot is None
+    outcome = generator._create_target_table(params)
+    assert outcome["status"] == "ALREADY_IN_SYNC"
+    assert generator._audit_types_decided is True
+    assert ddl == []
+    assert reads == [("DWH", _FIRST_TARGET), ("DWH", _FIRST_TARGET)]
+    _assert_branches_match(
+        generator._audit_preservation_expressions["ETL_BATCH_ID"],
+        "ETL_BATCH_ID", "NUMBER", f"TO_NUMBER({_SESSION_BATCH_SQL})",
+    )
+    assert _quoted_target(_FIRST_TARGET) in generator._audit_preservation_expressions["ETL_BATCH_ID"]
+    snapshot = generator._target_audit_snapshot
+    assert (snapshot.owner, snapshot.table) == ("DWH", _FIRST_TARGET)

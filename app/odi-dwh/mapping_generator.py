@@ -433,11 +433,16 @@ def _read_target_audit_snapshot(params: dict, columns: list[str]) -> tuple[objec
         for column in columns
         if column in declared and declared[column]
     }
+    owner, table = target_table_service._normalized_target_identity(
+        params.get("tgt_owner"), params.get("tgt_table"),
+    )
     snapshot = target_table_service.TargetAuditSnapshot(
         exists=exists,
         reuse=reuse,
         audit_columns=tuple(columns),
         declared_types=present,
+        owner=owner,
+        table=table,
     )
     usable = present if reuse and all(column in present for column in columns) else None
     return snapshot, usable
@@ -754,6 +759,10 @@ class MappingGenerator:
         self._batch_id = str(uuid.uuid4())[:8]
         self._log_entries = []
         self._odi_repo_reader = None
+        self._reset_request_audit_state()
+
+    def _reset_request_audit_state(self) -> None:
+        """Drop audit decisions so another generate on this object cannot reuse them."""
         self._audit_preservation_expressions: dict[str, str] = {}
         self._planned_target_column_plan: dict | None = None
         # Passed into the plan executor. Not stored on the request dict.
@@ -1352,6 +1361,11 @@ class MappingGenerator:
 
     def _type_audit_from_snapshot(self, params: dict, plan: dict) -> None:
         """Apply the snapshot's effective types. Does not read the catalog again."""
+        from target_table_service import _refuse_different_target
+
+        _refuse_different_target(
+            self._target_audit_snapshot, params.get("tgt_owner"), params.get("tgt_table"),
+        )
         if self._audit_types_decided:
             return
         if not _audit_request_qualified(params):
@@ -2186,6 +2200,7 @@ class MappingGenerator:
             Dictionary: batch_id, params, steps (result of each step),
             overall_status and log.
         """
+        self._reset_request_audit_state()
         # Step 1: Parse prompt
         params = self.parse_prompt(user_prompt)
         return self.generate_from_params(params)
@@ -2201,6 +2216,7 @@ class MappingGenerator:
             Dictionary: batch_id, params, steps (result of each step),
             overall_status and log.
         """
+        self._reset_request_audit_state()
         result = {
             "batch_id": self._batch_id,
             "params": None,

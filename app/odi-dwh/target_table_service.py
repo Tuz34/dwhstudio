@@ -181,12 +181,14 @@ def read_table_schema(owner: str, table: str) -> pd.DataFrame:
 
 @dataclass(frozen=True)
 class TargetAuditSnapshot:
-    """Existence and reused audit-column types taken before repository preflight."""
+    """Existence, reused audit types, and the target identity they were read for."""
 
     exists: bool
     reuse: bool
     audit_columns: tuple[str, ...]
     declared_types: dict[str, str]
+    owner: str
+    table: str
 
 
 class TargetChangedDuringGeneration(ValueError):
@@ -198,14 +200,31 @@ class TargetChangedDuringGeneration(ValueError):
 _TARGET_CHANGED = "Target changed during generation."
 
 
+def _normalized_target_identity(owner: object, table: object) -> tuple[str, str]:
+    """Strip and uppercase, the same transform as MappingGenerator._validate_identifier."""
+    return (str(owner or "").strip().upper(), str(table or "").strip().upper())
+
+
+def _refuse_different_target(
+    snapshot: TargetAuditSnapshot | None, owner: object, table: object,
+) -> None:
+    """Refuse a snapshot taken for another target before DDL or mapping create."""
+    if snapshot is None:
+        return
+    recorded = _normalized_target_identity(snapshot.owner, snapshot.table)
+    if recorded != _normalized_target_identity(owner, table):
+        raise TargetChangedDuringGeneration(_TARGET_CHANGED)
+
+
 def _assert_target_snapshot(
     context: TargetTableContext, exists: bool, snapshot: TargetAuditSnapshot | None,
 ) -> None:
-    """Stop before DDL when existence or a reused audit type moved since the snapshot."""
-    if snapshot is None or exists != snapshot.exists:
-        if snapshot is not None:
-            raise TargetChangedDuringGeneration(_TARGET_CHANGED)
+    """Stop before DDL when the snapshot names another target, or existence or a reused type moved."""
+    if snapshot is None:
         return
+    _refuse_different_target(snapshot, context.owner, context.table)
+    if exists != snapshot.exists:
+        raise TargetChangedDuringGeneration(_TARGET_CHANGED)
     if not snapshot.reuse:
         return
     try:
