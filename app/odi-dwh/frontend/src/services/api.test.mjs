@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { apiPost, getSchema, planScd2, request, runMapping } from './api.js';
+import { apiPost, getOdiMappings, getSchema, planScd2, request, runMapping } from './api.js';
 
 
 function installDocumentStub() {
@@ -196,4 +196,31 @@ test('dynamic schema path segments are encoded', async () => {
   await getSchema('DWH.TABLE/with space');
 
   assert.equal(requestedUrl, '/api/schema/DWH.TABLE%2Fwith%20space');
+});
+
+
+test('getOdiMappings keeps a list body and attaches truncation headers', async () => {
+  installDocumentStub();
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: {
+      get(name) {
+        const table = {
+          'X-ODI-Mappings-Truncated': '1',
+          'X-ODI-Mappings-Limit': '500',
+        };
+        return table[name];
+      },
+    },
+    text: async () => '[{"MAPPING_NAME":"MAP_A"}]',
+  });
+
+  const data = await getOdiMappings();
+
+  assert.equal(Array.isArray(data), true);
+  assert.equal(data.length, 1);
+  assert.equal(data[0].MAPPING_NAME, 'MAP_A');
+  assert.equal(data.truncated, true);
+  assert.equal(data.limit, 500);
 });

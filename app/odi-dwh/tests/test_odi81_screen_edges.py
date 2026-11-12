@@ -195,8 +195,14 @@ def test_mappings_route_uses_the_same_layer_rules(app_client, monkeypatch):
         app_module,
         "odi_get_mapping_lineage",
         lambda limit=100: json.dumps([
-            _component("MAP_ODI81N_F3_UI", "ODI81N_SRC_F3", "ODI81N_SRC_F3", IS_TARGET="N"),
-            _component("MAP_ODI81N_F3_UI", "EDW_ODI81N_F3_UI", "EDW_ODI81N_F3_UI", IS_TARGET="Y"),
+            {
+                **_component("MAP_ODI81N_F3_UI", "ODI81N_SRC_F3", "ODI81N_SRC_F3", IS_TARGET="N"),
+                "MAPPING_RANK": 1,
+            },
+            {
+                **_component("MAP_ODI81N_F3_UI", "EDW_ODI81N_F3_UI", "EDW_ODI81N_F3_UI", IS_TARGET="Y"),
+                "MAPPING_RANK": 1,
+            },
         ]),
     )
     response = app_client.get("/api/odi/mappings")
@@ -508,8 +514,11 @@ def test_lineage_query_adds_is_target_from_the_details_expression_joins():
         "r.QUALIFIED_NAME as TABLE_QUALIFIED_NAME",
     ):
         assert column in body
-    assert "ORDER BY m.NAME, c.TYPE_NAME" in body
-    assert "FETCH FIRST {limit} ROWS ONLY" in body
+    assert "ORDER BY m2.NAME, m2.I_MAPPING" in body
+    assert "ORDER BY m.NAME, c.TYPE_NAME, c.I_MAP_COMP" in body
+    assert "FETCH FIRST :lmt ROWS ONLY" in body
+    assert "FETCH FIRST {limit}" not in body
+    assert "params={\"lmt\": int(limit)}" in body or "params={'lmt': int(limit)}" in body
     assert "FROM {ODI_REPO_SCHEMA}.SNP_MAPPING m" in body
     assert "LEFT JOIN {ODI_REPO_SCHEMA}.SNP_PROJECT p ON p.I_PROJECT = m.I_PROJECT" in body
     assert "LEFT JOIN {ODI_REPO_SCHEMA}.SNP_FOLDER f ON f.I_FOLDER = m.I_FOLDER" in body

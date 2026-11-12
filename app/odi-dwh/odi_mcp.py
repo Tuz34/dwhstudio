@@ -15,11 +15,12 @@ mcp = FastMCP("ODI_Repository_MCP_Server")
 odi_orch = OdiOrchestrator()
 logger = logging.getLogger(__name__)
 
-def execute_odi_select(sql: str) -> pd.DataFrame:
+def execute_odi_select(sql: str, params: dict | None = None) -> pd.DataFrame:
     """Execute the given SQL as the configured ODI repository user and return a DataFrame."""
     conn = oracledb.connect(user=ODI_REPO_USER, password=ODI_REPO_PASSWORD, dsn=ODI_REPO_DSN or ORACLE_DSN)
     try:
-        df = pd.read_sql(sql, conn)
+        read_kwargs = {"params": params} if params else {}
+        df = pd.read_sql(sql, conn, **read_kwargs)
         # Convert datetime values to strings
         for col in df.select_dtypes(include=['datetime64', 'datetimetz']).columns:
             df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -286,12 +287,25 @@ def odi_get_knowledge_modules() -> str:
 def odi_get_mapping_lineage(limit: int = 50) -> str:
     """Retrieve ODI mapping components (Data Lineage), including filters, distinct, and join objects.
 
-    IS_TARGET is Y for a DATASTORE or FILE component that has at least one
-    output attribute with a populated expression, using the same SNP_MAP_CP /
-    SNP_MAP_ATTR / SNP_MAP_EXPR joins as odi_get_mapping_details.
+    `limit` is a mapping count: the first N mappings by name then I_MAPPING,
+    with every component row of those mappings. MAPPING_RANK is that CTE's
+    ROW_NUMBER() in the same order. IS_TARGET is Y for a DATASTORE
+    or FILE component that has at least one output attribute with a populated
+    expression, using the same SNP_MAP_CP / SNP_MAP_ATTR / SNP_MAP_EXPR joins
+    as odi_get_mapping_details.
     """
     sql = f"""
+        WITH capped_mappings AS (
+            SELECT
+                m2.I_MAPPING,
+                ROW_NUMBER() OVER (ORDER BY m2.NAME, m2.I_MAPPING) AS MAPPING_RANK
+            FROM {ODI_REPO_SCHEMA}.SNP_MAPPING m2
+            ORDER BY m2.NAME, m2.I_MAPPING
+            FETCH FIRST :lmt ROWS ONLY
+        )
         SELECT
+            m.I_MAPPING AS MAPPING_ID,
+            capped.MAPPING_RANK AS MAPPING_RANK,
             m.NAME as MAPPING_NAME,
             p.PROJECT_CODE as PROJECT_CODE,
             p.PROJECT_NAME as PROJECT_NAME,
@@ -316,15 +330,15 @@ def odi_get_mapping_lineage(limit: int = 50) -> str:
                 ELSE 'N'
             END AS IS_TARGET
         FROM {ODI_REPO_SCHEMA}.SNP_MAPPING m
+        JOIN capped_mappings capped ON capped.I_MAPPING = m.I_MAPPING
         LEFT JOIN {ODI_REPO_SCHEMA}.SNP_PROJECT p ON p.I_PROJECT = m.I_PROJECT
         LEFT JOIN {ODI_REPO_SCHEMA}.SNP_FOLDER f ON f.I_FOLDER = m.I_FOLDER
         JOIN {ODI_REPO_SCHEMA}.SNP_MAP_COMP c ON m.I_MAPPING = c.I_OWNER_MAPPING
         LEFT JOIN {ODI_REPO_SCHEMA}.SNP_MAP_REF r ON c.I_MAP_REF = r.I_MAP_REF
-        ORDER BY m.NAME, c.TYPE_NAME
-        FETCH FIRST {limit} ROWS ONLY
+        ORDER BY m.NAME, c.TYPE_NAME, c.I_MAP_COMP
     """
     try:
-        df = execute_odi_select(sql)
+        df = execute_odi_select(sql, params={"lmt": int(limit)})
         return df.to_json(orient='records', force_ascii=False)
     except Exception as e:
         return safe_error_json("ODI mapping lineage read", e)

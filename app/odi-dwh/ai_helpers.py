@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 
@@ -9,7 +10,7 @@ from flask import has_request_context, session
 import ai_egress as requests
 import config
 from ai_egress import local_openai_settings
-from app_helpers import _group_odi_mapping_lineage_items
+from app_helpers import OdiMappingRankError, _cap_odi_lineage_rows_by_mapping_id, _group_odi_mapping_lineage_items
 from config import ORACLE_DSN
 from db import execute_select
 from health_helpers import _chk_claude, _chk_llm, _chk_local_openai
@@ -149,12 +150,24 @@ def _modeled_tables_answer(message: str | None = None):
             "raw": "",
         }
 
-    raw_data = odi_get_mapping_lineage(limit=100)
+    modeled_cap = 100
+    # One mapping past the cap: a full page is not truncation.
+    raw_data = odi_get_mapping_lineage(limit=modeled_cap + 1)
     items = json.loads(raw_data)
     if not isinstance(items, list):
         items = []
+    try:
+        kept, truncated = _cap_odi_lineage_rows_by_mapping_id(items, modeled_cap)
+    except OdiMappingRankError:
+        logging.getLogger(__name__).error("ODI mapping list failed: %s", OdiMappingRankError.__name__)
+        return {
+            "aciklama": "This request could not list mappings.",
+            "queries": [],
+            "raw": "",
+        }
+    grouped = _group_odi_mapping_lineage_items(kept)
     rows = []
-    for m in _group_odi_mapping_lineage_items(items):
+    for m in grouped:
         target = "?"
         if m.get("TGT_TABLE") not in (None, "?"):
             target = f"{m.get('TGT_OWNER', 'DWH')}.{m.get('TGT_TABLE')}"
@@ -165,8 +178,13 @@ def _modeled_tables_answer(message: str | None = None):
             "LAYER": m.get("LAYER"),
             "DESCRIPTION": m.get("DESC"),
         })
+    aciklama = "Tables modeled in the current ODI mapping inventory are listed below."
+    if truncated:
+        aciklama = (
+            f"{aciklama} This listing summarises the first {modeled_cap} mappings."
+        )
     return {
-        "aciklama": "Tables modeled in the current ODI mapping inventory are listed below.",
+        "aciklama": aciklama,
         "queries": [{
             "action": "select",
             "label": "Modeled Tables",

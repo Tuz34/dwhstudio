@@ -4,12 +4,13 @@ import json
 
 from flask import Blueprint, current_app, jsonify, request
 
-from app_helpers import _group_odi_mapping_lineage_items
+from app_helpers import _cap_odi_lineage_rows_by_mapping_id, _group_odi_mapping_lineage_items
 from routes.deps import get_app_module
 from routes.error_responses import redacted_error, redacted_operation_result
 
 
 bp = Blueprint("ops_read", __name__)
+ODI_MAPPINGS_LIST_CAP = 500
 
 
 @bp.route("/api/monitoring/freshness")
@@ -441,23 +442,28 @@ def api_odi_scenarios():
 @bp.route("/api/odi/mappings")
 def api_odi_mappings():
     app_module = get_app_module()
-    raw_data = "[]"
     try:
-        raw_data = app_module.odi_get_mapping_lineage(limit=100)
+        # One mapping past the cap: a full page is not truncation.
+        raw_data = app_module.odi_get_mapping_lineage(limit=ODI_MAPPINGS_LIST_CAP + 1)
         items = json.loads(raw_data)
         if not isinstance(items, list):
             return current_app.response_class(response=raw_data, status=200, mimetype="application/json")
-        return jsonify(_group_odi_mapping_lineage_items(items))
+        kept, truncated = _cap_odi_lineage_rows_by_mapping_id(items, ODI_MAPPINGS_LIST_CAP)
+        grouped = _group_odi_mapping_lineage_items(kept)
+        response = jsonify(grouped)
+        if truncated:
+            response.headers["X-ODI-Mappings-Truncated"] = "1"
+            response.headers["X-ODI-Mappings-Limit"] = str(ODI_MAPPINGS_LIST_CAP)
+        return response
     except Exception as exc:
-        app_module.logger.error("Critical mappings error: %s", type(exc).__name__)
-        return current_app.response_class(response=raw_data, status=200, mimetype="application/json")
+        return redacted_error("Operational read", exc)
 
 
 @bp.route("/api/odi/lineage")
 def api_odi_lineage():
     app_module = get_app_module()
     try:
-        data_str = app_module.odi_get_mapping_lineage()
+        data_str = app_module.odi_get_mapping_lineage(limit=50)
         return current_app.response_class(response=data_str, status=200, mimetype="application/json")
     except Exception as exc:
         return redacted_error("Operational read", exc)

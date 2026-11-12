@@ -142,6 +142,29 @@ def _base_route_source_table(items: list) -> str:
     return ", ".join(sorted(sources))
 
 
+class OdiMappingRankError(ValueError):
+    """A lineage row has no integer MAPPING_RANK from the SQL cap."""
+
+
+def _require_mapping_rank(item: object) -> int:
+    if isinstance(item, dict) and "MAPPING_RANK" in item:
+        rank = item["MAPPING_RANK"]
+        if type(rank) is int:
+            return rank
+    raise OdiMappingRankError("mapping rank is missing or not an integer")
+
+
+def _cap_odi_lineage_rows_by_mapping_id(items: list, cap: int) -> tuple[list, bool]:
+    """Keep component rows whose SQL MAPPING_RANK is within the cap.
+
+    The lineage CTE assigns that rank. Names and ids are not ordered here.
+    A missing or non-integer rank fails the request. Callers group after this.
+    """
+    ranks = [_require_mapping_rank(item) for item in items]
+    kept = [item for item, rank in zip(items, ranks) if rank <= cap]
+    return kept, any(rank > cap for rank in ranks)
+
+
 def _group_odi_mapping_lineage_items(items: list) -> list:
     grouped = {}
     grouped_items = {}

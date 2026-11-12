@@ -3,6 +3,7 @@
  * All /api/* calls are routed from here.
  * The CSRF token is added automatically (compatible with Flask-WTF).
  */
+import { attachMappingsCap } from '../components/dataops/mappingListCap.js';
 import { refusedRequestMessage } from '../refusedRequestContract.js';
 
 function getCsrfToken() {
@@ -172,7 +173,15 @@ export const clearHistory    = ()        => apiPost('/api/clear', {});
 export const getOdiSessions  = ()        => apiGet('/api/odi/sessions');
 export const getOdiScenarios = ()        => apiGet('/api/odi/scenarios');
 export const getOdiKms       = ()        => apiGet('/api/odi/kms');
-export const getOdiMappings  = ()        => apiGet('/api/odi/mappings');
+export async function getOdiMappings() {
+  const res = await fetch('/api/odi/mappings', buildFetchOptions({ method: 'GET' }));
+  if (!res.ok) throw await responseError(res);
+  const text = await res.text();
+  if (!text) return [];
+  let data;
+  try { data = JSON.parse(text); } catch { return text; }
+  return attachMappingsCap(data, res.headers);
+}
 export const getOdiMappingDetail = (name) => apiGet('/api/odi/mapping_detail', { mapping_name: name });
 export const getOdiSessionSuggestion = (body) => apiPost('/api/odi/session_suggestion', body);
 
