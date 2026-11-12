@@ -303,7 +303,7 @@ def test_internal_preflight_route_skips_repository_even_if_it_would_explode(app_
 
 
 def test_external_preflight_keeps_the_reader_path(monkeypatch):
-    """External failure text is the exception's first line, as on a645d5a."""
+    """An external repository failure returns a fixed sentence and the class name."""
     _quiet_database(monkeypatch)
     called = []
     monkeypatch.setattr(
@@ -326,7 +326,10 @@ def test_external_preflight_keeps_the_reader_path(monkeypatch):
     reader.resolve_datastore.side_effect = RuntimeError("password=secret\nhost=10.1.2.3")
     failed = generator.target_table_preflight(params)
     assert failed["repository"]["status"] == "unavailable"
-    assert failed["repository"]["error"] == "password=secret"
+    assert failed["repository"]["error"] == "Repository identity check failed."
+    assert failed["repository"]["error_type"] == "RuntimeError"
+    assert "password" not in json.dumps(failed)
+    assert "secret" not in json.dumps(failed)
     assert failed["repository"]["mapping_exists"] is None
     assert failed["repository"]["source_datastore_exists"] is None
     assert failed["repository"]["target_datastore_exists"] is None

@@ -1,4 +1,10 @@
 import { DATAMART_TYPE2_ONLY_WARNING } from '../../datamartContract.js';
+import {
+  AUDIT_PRESERVATION_REJECTED_CODE,
+  AUDIT_PRESERVATION_REJECTED_MESSAGE,
+} from '../../refusedRequestContract.js';
+
+export { AUDIT_PRESERVATION_REJECTED_CODE, AUDIT_PRESERVATION_REJECTED_MESSAGE };
 
 const IDENTIFIER = /^[A-Z][A-Z0-9_]{0,127}$/;
 const MAX_KEY_COLUMNS = 8;
@@ -172,9 +178,41 @@ export function getFriendlyFailure(text = '') {
   return 'The run stopped before completion.';
 }
 
-export const AUDIT_PRESERVATION_REJECTED_CODE = 'audit_preservation_rejected';
-export const AUDIT_PRESERVATION_REJECTED_MESSAGE =
-  "The target table's audit column types are not supported for audit preservation. Nothing was created.";
+const EXPECTED_SKIP_DETAILS = new Set([
+  'Audit preservation does not apply to this load.',
+  'Source datastore already exists.',
+  'Target datastore already exists.',
+  'SKEY not requested',
+  'skey_natural_key was not specified',
+  'No SKEY change',
+  'Target table did not change',
+  'No rollback record found.',
+]);
+
+export function neutralSkipDetail(detail) {
+  const text = stripHelpLinks(detail);
+  if (EXPECTED_SKIP_DETAILS.has(text)) return text;
+  return 'Step skipped.';
+}
+
+export function wizardHeadlineDetail(result, log) {
+  if (result?.error) return String(result.error);
+  const entries = Array.isArray(log) ? log : [];
+  const failed = entries.find(entry => (
+    ['FAILED', 'ERROR'].includes(String(entry?.status || '').toUpperCase())
+  ));
+  return failed?.detail ? String(failed.detail) : '';
+}
+
+export function wizardStepTone(status) {
+  const value = String(status || '').toUpperCase();
+  if (value === 'FAILED' || value === 'ERROR') return 'failure';
+  if (value === 'WARNING' || value === 'WAITING') return 'warning';
+  if (['SUCCESS', 'CREATED', 'RECONCILED', 'ALREADY_IN_SYNC', 'AUTO_APPROVED'].includes(value)) {
+    return 'success';
+  }
+  return 'neutral';
+}
 
 export function selectWizardFailureMessage(result, text) {
   if (result?.error_code === AUDIT_PRESERVATION_REJECTED_CODE) {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { sameTable, tableMeta, uniqueImpactRows } from './impactAnalysisModel.js';
+import { layerMatches, sameTable, tableMeta, uniqueImpactRows } from './impactAnalysisModel.js';
 
 
 test('impact model normalizes ODI schema aliases and table identity', () => {
@@ -15,6 +15,16 @@ test('impact model normalizes ODI schema aliases and table identity', () => {
       badge: 'bg-emerald-50 text-emerald-700 border-emerald-100',
     },
   );
+});
+
+
+test('a missing layer matches only the unfiltered list', () => {
+  assert.equal(layerMatches('', ''), true);
+  assert.equal(layerMatches(undefined, ''), true);
+  assert.equal(layerMatches('', 'ODS'), false);
+  assert.equal(layerMatches('EDW', 'EDW'), true);
+  assert.equal(layerMatches('EDW', 'ODS'), false);
+  assert.equal(layerMatches('DM', 'DM'), true);
 });
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from flask import current_app, jsonify
 
 from datamart_contract import DATAMART_REQUIRES_TYPE2_CODE, DATAMART_TYPE2_ONLY_WARNING
+from skip_sentences import EXPECTED_SKIP_SENTENCES, STEP_SKIPPED
 
 
 _FAILURE_STATUSES = {"BLOCKED", "ERROR", "FAILED", "FAILURE", "INVALID", "SKIPPED"}
@@ -21,6 +22,13 @@ def redacted_error(action: str, exc: BaseException, *, status: int = 500):
 
 def redacted_write_error(action: str, exc: BaseException):
     return redacted_error(action, exc)
+
+
+def _skip_replacement(item):
+    """Keep an allowlisted skip sentence as written. Every other replaced skip value is neutral."""
+    if isinstance(item, str) and item.strip() in EXPECTED_SKIP_SENTENCES:
+        return item
+    return STEP_SKIPPED
 
 
 def redacted_operation_result(value, action: str):
@@ -45,9 +53,9 @@ def redacted_operation_result(value, action: str):
         if normalized_key in {"error", "error_message"} and item:
             cleaned[key] = fixed_error if fixed_error is not None else f"{action} failed."
         elif normalized_key == "reason" and failed and item:
-            cleaned[key] = f"{action} failed."
+            cleaned[key] = _skip_replacement(item) if status == "SKIPPED" else f"{action} failed."
         elif normalized_key == "detail" and failed and item:
-            cleaned[key] = f"{action} failed."
+            cleaned[key] = _skip_replacement(item) if status == "SKIPPED" else f"{action} failed."
         else:
             cleaned[key] = redacted_operation_result(item, action)
     if had_error:

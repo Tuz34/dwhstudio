@@ -118,7 +118,12 @@ def odi_get_knowledge_modules() -> str:
 
 @mcp.tool()
 def odi_get_mapping_lineage(limit: int = 50) -> str:
-    """Retrieve ODI mapping components (Data Lineage), including filters, distinct, and join objects."""
+    """Retrieve ODI mapping components (Data Lineage), including filters, distinct, and join objects.
+
+    IS_TARGET is Y for a DATASTORE or FILE component that has at least one
+    output attribute with a populated expression, using the same SNP_MAP_CP /
+    SNP_MAP_ATTR / SNP_MAP_EXPR joins as odi_get_mapping_details.
+    """
     sql = f"""
         SELECT
             m.NAME as MAPPING_NAME,
@@ -127,7 +132,23 @@ def odi_get_mapping_lineage(limit: int = 50) -> str:
             f.FOLDER_NAME as FOLDER_NAME,
             c.NAME as COMP_NAME,
             c.TYPE_NAME as COMP_TYPE,
-            r.QUALIFIED_NAME as TABLE_QUALIFIED_NAME
+            r.QUALIFIED_NAME as TABLE_QUALIFIED_NAME,
+            CASE
+                WHEN UPPER(c.TYPE_NAME) IN ('DATASTORE', 'FILE')
+                 AND EXISTS (
+                    SELECT 1
+                    FROM {ODI_REPO_SCHEMA}.SNP_MAP_CP cp
+                    JOIN {ODI_REPO_SCHEMA}.SNP_MAP_ATTR a
+                      ON a.I_OWNER_MAP_CP = cp.I_MAP_CP
+                    LEFT JOIN {ODI_REPO_SCHEMA}.SNP_MAP_EXPR e
+                      ON e.I_OWNER_MAP_ATTR = a.I_MAP_ATTR
+                    WHERE cp.I_OWNER_MAP_COMP = c.I_MAP_COMP
+                      AND cp.DIRECTION = 'O'
+                      AND TRIM(e.TXT) IS NOT NULL
+                 )
+                THEN 'Y'
+                ELSE 'N'
+            END AS IS_TARGET
         FROM {ODI_REPO_SCHEMA}.SNP_MAPPING m
         LEFT JOIN {ODI_REPO_SCHEMA}.SNP_PROJECT p ON p.I_PROJECT = m.I_PROJECT
         LEFT JOIN {ODI_REPO_SCHEMA}.SNP_FOLDER f ON f.I_FOLDER = m.I_FOLDER

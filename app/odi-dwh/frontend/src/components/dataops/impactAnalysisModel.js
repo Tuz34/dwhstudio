@@ -23,6 +23,12 @@ const ODI_SCHEMA_TO_DB_SCHEMA = {
 
 export const LAYER_OPTIONS = ['', 'ODS', 'EDW', 'DM'];
 
+export function layerMatches(mappingLayer, selectedLayer) {
+  const selected = cleanName(selectedLayer).toUpperCase();
+  if (!selected) return true;
+  return cleanName(mappingLayer).toUpperCase() === selected;
+}
+
 function normalizeSchema(schema) {
   const key = cleanName(schema).toUpperCase();
   return ODI_SCHEMA_TO_DB_SCHEMA[key] || schema;

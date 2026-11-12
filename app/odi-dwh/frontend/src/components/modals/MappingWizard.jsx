@@ -11,10 +11,13 @@ import {
   getLoadOptionError,
   getMappingOutcome,
   mappingName,
+  neutralSkipDetail,
   prefillLoadOptions,
   resolveWizardSourceModel,
   selectWizardFailureMessage,
   validateLoadOptions,
+  wizardHeadlineDetail,
+  wizardStepTone,
 } from './mappingWizardRequests';
 
 const STEPS = ['Source', 'Target', 'Options', 'Confirm'];
@@ -60,6 +63,8 @@ const getFriendlyStepDetail = (entry = {}, result = {}) => {
   const step = entry.step;
   const status = String(entry.status || '').toUpperCase();
   const detail = stripHelpLinks(entry.detail || '');
+
+  if (status === 'SKIPPED') return neutralSkipDetail(entry.detail);
 
   if (status === 'FAILED' || status === 'ERROR') {
     const selected = selectWizardFailureMessage(result, detail || result.error);
@@ -203,7 +208,7 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
   const inputCls = 'w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400';
   const resultFailed = TERMINAL_FAILURES.has(String(result?.overall_status || '').toLowerCase()) || Boolean(result?.error);
   const resultSteps = Array.isArray(result?.log) ? result.log : [];
-  const primaryError = result?.error || resultSteps.find(entry => ['FAILED', 'ERROR'].includes(String(entry.status || '').toUpperCase()))?.detail;
+  const primaryError = wizardHeadlineDetail(result, resultSteps);
   const friendlyError = selectWizardFailureMessage(result, primaryError);
   const outcome = getMappingOutcome(result);
   const selectedLoadType = LOAD_TYPES.find(({ value }) => value === form.load_type);
@@ -470,15 +475,13 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
               <div className="divide-y divide-slate-100 max-h-64 overflow-auto">
                 {resultSteps.map((entry, idx) => {
                   const status = String(entry.status || '').toUpperCase();
-                  const isBad = ['FAILED', 'ERROR'].includes(status);
-                  const isWarn = ['WARNING', 'WAITING'].includes(status);
-                  const isOk = ['SUCCESS', 'CREATED', 'RECONCILED', 'ALREADY_IN_SYNC', 'AUTO_APPROVED'].includes(status);
+                  const tone = wizardStepTone(status);
                   return (
                     <div key={`${entry.step || 'step'}-${idx}`} className="px-4 py-3 grid grid-cols-[minmax(0,1fr)_auto] gap-3 text-sm">
                       <div className="min-w-0">
                         <p className="font-semibold text-slate-700 capitalize">{getStepLabel(entry.step)}</p>
                         <p className="text-xs text-slate-500 break-words mt-0.5">{getFriendlyStepDetail(entry, result)}</p>
-                        {isBad && entry.detail && (
+                        {tone === 'failure' && entry.detail && (
                           <details className="mt-1 text-[11px] text-slate-400">
                             <summary className="cursor-pointer font-semibold">Technical details</summary>
                             <p className="font-mono break-words mt-1">{stripHelpLinks(entry.detail)}</p>
@@ -487,9 +490,9 @@ export function MappingWizard({ open, onClose, initialData = {} }) {
                       </div>
                       <span className={clsx(
                         'self-start text-[10px] font-black uppercase px-2 py-1 rounded-full',
-                        isBad ? 'bg-rose-100 text-rose-700' :
-                          isWarn ? 'bg-amber-100 text-amber-700' :
-                            isOk ? 'bg-emerald-100 text-emerald-700' :
+                        tone === 'failure' ? 'bg-rose-100 text-rose-700' :
+                          tone === 'warning' ? 'bg-amber-100 text-amber-700' :
+                            tone === 'success' ? 'bg-emerald-100 text-emerald-700' :
                               'bg-slate-100 text-slate-600'
                       )}>
                         {getStatusLabel(status)}
