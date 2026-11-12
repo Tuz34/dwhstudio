@@ -32,6 +32,6 @@ unlock persistent buttons, submit write forms, call write endpoints, or capture 
 
 ## Dormant Linear heartbeat
 
-The existing cheap-gate prototype remains under `D:\Proje\automation\heartbeat`. It performs no work unless manually
+The existing cheap-gate prototype remains in a separate local automation tree (`<automation-root>/heartbeat`). It performs no work unless manually
 run, and its registration script requires the explicit `-Arm` switch. No recurring task is registered or enabled by
 this slice. Idle checks use no LLM; any future activation requires a manual dry run and exact approval.

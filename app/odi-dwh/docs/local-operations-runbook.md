@@ -1,19 +1,19 @@
 # Local Operations Runbook
 
-This runbook covers local development and operator validation for DWH Studio on
-this workstation. It does not install services, create scheduled tasks, change
+This runbook covers local development and operator validation for DWH Studio in
+a local installation. It does not install services, create scheduled tasks, change
 firewall rules, run ODI scenarios, or execute DB writes.
 
 ## Start Order
 
 1. Confirm Oracle database and listener are already available through the local
-   operator process used on this machine.
+   operator process.
 2. Start WebLogic/ODI only when ODI agent-backed actions are needed:
-   - Admin console was previously reached at `http://pardus:7001/console`.
-   - ODI managed server command used successfully:
-     `C:\Oracle\Middleware\Oracle_Home\user_projects\domains\base_domain\bin\startManagedWebLogic.cmd ODI_server1 http://localhost:7001`
+   - Admin console: `http://<odi-host>:7001/console`.
+   - Example ODI managed server command (replace `<oracle-home>`):
+     `<oracle-home>\user_projects\domains\base_domain\bin\startManagedWebLogic.cmd ODI_server1 http://localhost:7001`
 3. Start the Flask backend from the app root:
-   - `D:\Proje\app\odi-dwh\start_app.bat`, or
+   - `start_app.bat`, or
    - `.venv\Scripts\python.exe -X utf8 local_app_control.py start --open-browser`
    The launcher stops existing listeners on the configured app port, starts one
    detached local Flask process, and writes logs under `logs\`.
@@ -24,7 +24,7 @@ firewall rules, run ODI scenarios, or execute DB writes.
 ## Stop Order
 
 1. Stop local Flask backend:
-   - `D:\Proje\app\odi-dwh\stop_app.bat`, or
+   - `stop_app.bat`, or
    - `.venv\Scripts\python.exe -X utf8 local_app_control.py stop`
 2. Confirm port 5000 has no duplicate listeners:
    - `.venv\Scripts\python.exe -X utf8 local_app_control.py status`
@@ -86,17 +86,17 @@ If `/api/status` returns 200 but behavior looks stale:
 
 1. Check port owner with `netstat -aon | findstr " :5000 "`.
 2. Confirm only one listener exists.
-3. Restart from `D:\Proje\app\odi-dwh`.
+3. Restart from `app/odi-dwh` in the repository.
 4. Run `operator_smoke.py` before browser QA.
 
-On this machine, Windows may show the listener child executable as system
-Python because the `.venv\Scripts\python.exe` launcher delegates to a Python
-child process. The stronger evidence is single listener plus restart from the
+If Windows shows the listener child executable as system Python, the
+`.venv\Scripts\python.exe` launcher may have delegated to a Python child
+process. The stronger evidence is single listener plus restart from the
 app root plus successful smoke.
 
 ### PowerShell Start-Process failure
 
-This workstation has shown a duplicate `Path`/`PATH` environment-key issue with
+A duplicate `Path`/`PATH` environment-key issue has been observed with
 PowerShell `Start-Process`. Use the batch launcher or `local_app_control.py`
 instead of relying on `Start-Process`.
 
