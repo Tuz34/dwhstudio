@@ -131,6 +131,29 @@ Examples from the code and tests (Oracle sample schemas `HR` and `SH` as sources
 - **Watermarks:** incremental strategies track a watermark column per source table.
 - **Audit schema:** alert log, mapping log, data lineage, mapping snapshot, and mapping run state.
 
+## What has been verified on a live system
+
+Five load patterns were each built from a chat request and the application's own ODI generator.
+ODS insert/update, ODS truncate and insert, and EDW Type 1 used the mapping wizard; EDW Type 2
+and Datamart Type 2 used the Type 2 screen. Each ran against Oracle Database 19c and ODI
+12.2.1.4 with an initial run, a run after a source change, and a run with no source change.
+The source change was one update and one insert for ODS insert/update and EDW Type 1, and
+changed tracked attributes plus an insert for both Type 2 patterns. For ODS truncate and
+insert, the source changed and the target was truncated and reloaded. Count-only checks covered
+row counts, key parity, and audit timestamps; Type 2 checks also covered total, current, and
+closed counts and parity between current rows and the source. No row values were used.
+
+- ODS insert/update.
+- ODS truncate and insert.
+- EDW Type 1.
+- EDW Type 2, including start and end dates and the current flag.
+- Datamart Type 2; Datamart objects live in the warehouse schema with a `DM_` prefix.
+
+The run panel reports the ODI session number and row counts. The no-change run left the
+checked result unchanged, but physical no-op behavior of MERGE on unchanged rows has not
+been proven: ODI counters still report rows touched. Audit-column type combinations beyond
+those exercised have not been verified. An error session has not been shown on the run panel.
+
 ## Tests and quality gates
 
 GitHub Actions runs these gates, a frontend build, and a secret scan for every pull request and main push. Pytest runs with no deselections. Skill templates in `app/odi-dwh/docs/agent-skills/` are tracked source contracts; CI does not install or activate them.
@@ -148,11 +171,24 @@ From the repository root:
 python tools/workspace/appsec_gate.py --no-write
 ```
 
+## How changes are made
+
+Since the initial baseline commit, every change on `main` has landed through a pull request.
+In the current process, each pull request is reviewed by an AI coding agent other than its
+author. CI gates include a secret scan over the full history, a quality gate with a fixed
+baseline, the full test suite with no deselections, and an application-security endpoint
+gate. Updates to the running installation are delivered by tooling kept outside this repository,
+which compares file hashes with the delivered commit and keeps the replaced files as before-images.
+
 ## Roadmap
 
-Post-publication items: transaction and atomicity hardening of the ODI and Oracle execution paths
-(for example making the incremental append and the watermark update one unit), plus the other
-planned items listed in [SECURITY.md](SECURITY.md).
+Open items:
+
+- Response-redaction hardening.
+- Groovy edge cases in mapping create/update.
+- Mapping-list paging.
+- Chat phrasing coverage.
+- Fixed `DIM_PRODUCT` contract migration.
 
 ## Security
 
