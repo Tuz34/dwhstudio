@@ -13,6 +13,7 @@ import {
   displayType,
   impactLabel,
   impactTitle,
+  layerMatches,
   purposeText,
   sameTable,
   shortName,
@@ -32,7 +33,8 @@ function TableBadge({ value }) {
 }
 
 function LayerBadge({ layer }) {
-  const value = cleanName(layer || 'ODS').toUpperCase();
+  const value = cleanName(layer).toUpperCase();
+  if (!value) return null;
   const tone =
     value === 'EDW' ? 'border-indigo-200 bg-indigo-50 text-indigo-700' :
     value === 'DM' ? 'border-amber-200 bg-amber-50 text-amber-700' :
@@ -108,7 +110,6 @@ export function ImpactAnalysis() {
 
   const visibleMappings = useMemo(() => {
     const q = search.toLowerCase();
-    const layer = selectedLayer.toUpperCase();
     return mappings.filter(m => {
       const haystack = [
         m.MAPPING_NAME,
@@ -117,8 +118,7 @@ export function ImpactAnalysis() {
         m.DESC,
         m.LAYER,
       ].join(' ').toLowerCase();
-      const layerOk = !layer || cleanName(m.LAYER || 'ODS').toUpperCase() === layer;
-      return layerOk && (!q || haystack.includes(q));
+      return layerMatches(m.LAYER, selectedLayer) && (!q || haystack.includes(q));
     });
   }, [mappings, search, selectedLayer]);
 

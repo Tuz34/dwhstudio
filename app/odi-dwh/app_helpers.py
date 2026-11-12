@@ -23,6 +23,128 @@ def df_to_jsonable(df: pd.DataFrame) -> list:
 
 # Page helpers
 
+_DATASTORE_TYPES = frozenset({"FILE", "XML", "DATASTORE", "XSD"})
+_TARGET_FLAG_VALUES = frozenset({"Y", "YES", "TRUE", "1"})
+# Highest name rank wins. A structural target adds 1000 and beats every name.
+_NAME_RANKS = (
+    ("DM_", 70),
+    ("DIM_", 60),
+    ("EDW_", 50),
+    ("ODS_", 40),
+    ("STG_", 30),
+    ("DWH_", 10),
+)
+_LAYER_BY_PREFIX = (
+    ("DM_", "DM"),
+    ("DIM_", "EDW"),
+    ("EDW_", "EDW"),
+    ("ODS_", "ODS"),
+    ("STG_", "STG"),
+    ("SKEY_", "SKEY"),
+)
+_SCHEMA_LAYERS = {"ODS": "ODS", "STG": "STG", "EDW": "EDW", "DM": "DM"}
+
+
+def _text(value: object) -> str:
+    return str(value).strip() if value else ""
+
+
+def _remember_project_fields(entry: dict, item: dict) -> None:
+    folder_name = _text(item.get("FOLDER_NAME") or item.get("folder_name"))
+    project_code = _text(item.get("PROJECT_CODE") or item.get("project_code"))
+    project_name = _text(item.get("PROJECT_NAME") or item.get("project_name"))
+    if folder_name and not entry.get("folder_name"):
+        entry["FOLDER_NAME"] = folder_name
+        entry["folder_name"] = folder_name
+    if project_code and not entry.get("project_code"):
+        entry["PROJECT_CODE"] = project_code
+        entry["project_code"] = project_code
+        entry["project"] = project_code
+    if project_name and not entry.get("project_name"):
+        entry["PROJECT_NAME"] = project_name
+        entry["project_name"] = project_name
+        entry["project"] = entry.get("project") or project_name
+
+
+def _flag_is_target(value: object) -> bool:
+    if value is True or value == 1:
+        return True
+    return str(value or "").strip().upper() in _TARGET_FLAG_VALUES
+
+
+def _row_is_structural_target(item: dict) -> bool:
+    component_type = str(item.get("COMP_TYPE") or "").upper()
+    if component_type not in _DATASTORE_TYPES:
+        return False
+    if _flag_is_target(item.get("IS_TARGET")) or _flag_is_target(item.get("is_target")):
+        return True
+    expression = item.get("EXPRESSION")
+    return isinstance(expression, str) and bool(expression.strip())
+
+
+def _target_name_rank(short_name: str, comp_name: str, qualified: str, mapping_name: str) -> int:
+    ranks = [
+        rank
+        for prefix, rank in _NAME_RANKS
+        if short_name.startswith(prefix) or comp_name.startswith(prefix)
+    ]
+    if qualified.upper().startswith("ODS."):
+        ranks.append(40)
+    mapping = mapping_name.upper()
+    skey_requested = "_SKEY_" in mapping or mapping.startswith("MAP_SKEY")
+    if skey_requested and (short_name.startswith("SKEY_") or comp_name.startswith("SKEY_")):
+        ranks.append(20)
+    if comp_name.startswith("TGT_"):
+        ranks.append(5)
+    return max(ranks) if ranks else 0
+
+
+def _choose_mapping_target(rows: list[dict], mapping_name: str) -> dict | None:
+    structural = [row for row in rows if row["structural"]]
+    pool = structural or rows
+    best: dict | None = None
+    best_key = (-1, -1)
+    for row in pool:
+        qualified = row["qualified"]
+        if not qualified:
+            continue
+        name_rank = _target_name_rank(row["short"], row["comp"], qualified, mapping_name)
+        if row["structural"]:
+            rank = 1000 + name_rank
+        elif name_rank <= 0:
+            continue
+        else:
+            rank = name_rank
+        key = (rank, row["index"])
+        if key > best_key:
+            best = row
+            best_key = key
+    return best
+
+
+def _layer_for_target(qualified: str) -> str:
+    parts = qualified.split(".")
+    short = (parts[1] if len(parts) > 1 else qualified).upper()
+    owner = parts[0].upper() if len(parts) > 1 else ""
+    for prefix, layer in _LAYER_BY_PREFIX:
+        if short.startswith(prefix):
+            return layer
+    return _SCHEMA_LAYERS.get(owner, "")
+
+
+def _source_names(rows: list[dict], chosen: dict | None) -> str:
+    names = []
+    for row in rows:
+        if chosen is not None and row["index"] == chosen["index"]:
+            continue
+        if row["component_type"] not in _DATASTORE_TYPES:
+            continue
+        source_name = row["qualified"] or row["comp_display"]
+        if source_name:
+            names.append(source_name)
+    return ", ".join(sorted(set(names)))
+
+
 def _group_odi_mapping_lineage_items(items: list) -> list:
     grouped = {}
     for it in items:
@@ -33,15 +155,23 @@ def _group_odi_mapping_lineage_items(items: list) -> list:
         if k not in grouped:
             grouped[k] = {
                 "MAPPING_NAME": str(name),
-                "SRC_TABLE": "?",
+                "FOLDER_NAME": "",
+                "folder_name": "",
+                "PROJECT_CODE": "",
+                "project_code": "",
+                "PROJECT_NAME": "",
+                "project_name": "",
+                "project": "",
+                "SRC_TABLE": "",
                 "TGT_TABLE": "?",
                 "TGT_OWNER": "DWH",
-                "LAYER": "STG",
+                "LAYER": "",
                 "DESC": "",
                 "COMP_COUNT": 0,
                 "JOIN_COUNT": 0,
-                "SRC_LIST": set(),
+                "_ROWS": [],
             }
+        _remember_project_fields(grouped[k], it)
 
         grouped[k]["COMP_COUNT"] += 1
         qname = str(it.get("TABLE_QUALIFIED_NAME") or "").strip()
@@ -58,40 +188,15 @@ def _group_odi_mapping_lineage_items(items: list) -> list:
         if ctype == "FILTER":
             grouped[k]["HAS_FILTER"] = True
 
-        mn_up = str(name).upper()
-        qname_short = qname.split(".")[-1].upper() if qname else ""
-        is_target = (
-            qname.upper().startswith("ODS.") or
-            qname_short.startswith("ODS_") or
-            qname_short.startswith("DWH_") or
-            cname.startswith("ODS_") or
-            cname.startswith("DWH_") or
-            cname.startswith("TGT_") or
-            (qname_short.startswith("SKEY_") and ("_SKEY_" in mn_up or mn_up.startswith("MAP_SKEY")))
-        )
-
-        if is_target and qname:
-            parts = qname.split(".")
-            tgt_name = parts[1] if len(parts) > 1 else qname
-            grouped[k]["TGT_OWNER"] = parts[0] if len(parts) > 1 else "DWH"
-            grouped[k]["TGT_TABLE"] = tgt_name
-            tn_up = tgt_name.upper()
-            if tn_up.startswith("ODS_"):
-                grouped[k]["LAYER"] = "ODS"
-            elif tn_up.startswith("SKEY_"):
-                grouped[k]["LAYER"] = "SKEY"
-            elif tn_up.startswith("EDW_"):
-                grouped[k]["LAYER"] = "EDW"
-            elif tn_up.startswith("DM_"):
-                grouped[k]["LAYER"] = "DM"
-            else:
-                grouped[k]["LAYER"] = "STG"
-        elif qname or cname:
-            sn = qname if qname else cname
-            if ctype in ["FILE", "XML", "DATASTORE", "XSD"]:
-                grouped[k]["SRC_LIST"].add(sn)
-            if grouped[k]["SRC_TABLE"] == "?" or ctype in ["FILE", "XML"]:
-                grouped[k]["SRC_TABLE"] = sn
+        grouped[k]["_ROWS"].append({
+            "index": len(grouped[k]["_ROWS"]),
+            "qualified": qname,
+            "short": qname.split(".")[-1].upper() if qname else "",
+            "comp": cname,
+            "comp_display": str(it.get("COMP_NAME") or ""),
+            "component_type": ctype,
+            "structural": _row_is_structural_target(it),
+        })
 
         mn = str(name).upper()
         if "FLAT_FILE" in mn and "DWH" in mn:
@@ -109,10 +214,16 @@ def _group_odi_mapping_lineage_items(items: list) -> list:
         else:
             grouped[k]["DESC"] = mn.replace("MAP_", "").replace("_", " ").title()
 
-    for k in grouped:
-        if grouped.get(k) and "SRC_LIST" in grouped[k]:
-            grouped[k]["SRC_TABLE"] = ", ".join(sorted(list(grouped[k]["SRC_LIST"])))
-            del grouped[k]["SRC_LIST"]
+    for item in grouped.values():
+        rows = item.pop("_ROWS")
+        chosen = _choose_mapping_target(rows, item["MAPPING_NAME"])
+        if chosen is not None:
+            qualified = chosen["qualified"]
+            parts = qualified.split(".")
+            item["TGT_OWNER"] = parts[0] if len(parts) > 1 else "DWH"
+            item["TGT_TABLE"] = parts[1] if len(parts) > 1 else qualified
+            item["LAYER"] = _layer_for_target(qualified)
+        item["SRC_TABLE"] = _source_names(rows, chosen)
     return list(grouped.values())
 
 

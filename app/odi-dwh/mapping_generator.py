@@ -37,6 +37,16 @@ from datamart_contract import DATAMART_REQUIRES_TYPE2_CODE, DATAMART_TYPE2_ONLY_
 from exceptions import MappingGenerationError
 from ikm_policy import is_update_ikm, normalize_repository_preflight, resolve_approved_ikm, verified_source_identity
 from mapping_state_manager import redact_sensitive_text
+from skip_sentences import (
+    AUDIT_PRESERVATION_DOES_NOT_APPLY,
+    NO_ROLLBACK_RECORD,
+    NO_SKEY_CHANGE,
+    SKEY_NATURAL_KEY_NOT_SPECIFIED,
+    SKEY_NOT_REQUESTED,
+    SOURCE_DATASTORE_ALREADY_EXISTS,
+    TARGET_DATASTORE_ALREADY_EXISTS,
+    TARGET_TABLE_DID_NOT_CHANGE,
+)
 from source_connector import get_source_connector
 
 logger = logging.getLogger("mapping_generator")
@@ -1345,12 +1355,16 @@ class MappingGenerator:
             "business_column_count": profile["business_column_count"],
             "key_count": profile["key_count"],
         }
-        state = "SUCCESS" if profile["qualified"] is True else "SKIPPED"
-        self._add_log(
-            "audit_preservation", state,
-            "qualified={qualified} expressions={expression_count} "
-            "business_columns={business_column_count} keys={key_count}".format(**self._audit_preservation_public),
-        )
+        if profile["qualified"] is True:
+            self._add_log(
+                "audit_preservation", "SUCCESS",
+                "qualified={qualified} expressions={expression_count} "
+                "business_columns={business_column_count} keys={key_count}".format(
+                    **self._audit_preservation_public
+                ),
+            )
+        else:
+            self._add_log("audit_preservation", "SKIPPED", AUDIT_PRESERVATION_DOES_NOT_APPLY)
         return profile
 
     def _decide_effective_audit(self, params: dict) -> None:
@@ -1469,7 +1483,8 @@ class MappingGenerator:
                         "source_datastore_exists": None,
                         "target_datastore_exists": None,
                         "repository_connection_attempted": True,
-                        "error": str(exc).split("\n")[0],
+                        "error": "Repository identity check failed.",
+                        "error_type": type(exc).__name__,
                     }
 
             return {
@@ -1793,8 +1808,7 @@ class MappingGenerator:
                     "model_code": odi_src_model_code,
                     "datastore": src_ds_name,
                 }
-                self._add_log("register_datastores", "SKIPPED",
-                              f"Source datastore exists: {odi_src_model_code}.{src_ds_name}")
+                self._add_log("register_datastores", "SKIPPED", SOURCE_DATASTORE_ALREADY_EXISTS)
             else:
                 src_result = orch.register_datastore(
                     model_code=odi_src_model_code,
@@ -1851,8 +1865,7 @@ class MappingGenerator:
                     "model_code": odi_tgt_model_code,
                     "datastore": tgt_ds_name,
                 }
-                self._add_log("register_datastores", "SKIPPED",
-                              f"Target datastore exists: {odi_tgt_model_code}.{tgt_ds_name}")
+                self._add_log("register_datastores", "SKIPPED", TARGET_DATASTORE_ALREADY_EXISTS)
                 if key_kwargs:
                     # Existing datastore: add the missing key only; never recreate it.
                     key_result = orch.register_datastore(
@@ -2266,7 +2279,7 @@ class MappingGenerator:
                 skey_result = self._create_skey(validated)
                 result["steps"]["create_skey"] = skey_result
             else:
-                self._add_log("create_skey", "SKIPPED", "SKEY not requested")
+                self._add_log("create_skey", "SKIPPED", SKEY_NOT_REQUESTED)
                 result["steps"]["create_skey"] = {"skipped": True}
 
             # Step 6: Lineage
@@ -2413,9 +2426,9 @@ class MappingGenerator:
                     skey_result = self._create_skey(skey_params)
                     result["steps"]["update_skey"] = skey_result
                 else:
-                    self._add_log("update_skey", "SKIPPED", "skey_natural_key was not specified")
+                    self._add_log("update_skey", "SKIPPED", SKEY_NATURAL_KEY_NOT_SPECIFIED)
             else:
-                self._add_log("update_skey", "SKIPPED", "No SKEY change")
+                self._add_log("update_skey", "SKIPPED", NO_SKEY_CHANGE)
 
             # Step 4: Refresh lineage
             lineage_result = self._populate_lineage(update_params)
@@ -2428,7 +2441,7 @@ class MappingGenerator:
                 test_result = self._generate_tests({"tgt_owner": tgt_owner, "tgt_table": tgt_table})
                 result["steps"]["regenerate_tests"] = test_result
             else:
-                self._add_log("regenerate_tests", "SKIPPED", "Target table did not change")
+                self._add_log("regenerate_tests", "SKIPPED", TARGET_TABLE_DID_NOT_CHANGE)
 
             # Step 6: Subsequent snapshot (state after changes)
             final_name = changes.get("new_mapping_name", mapping_name)
@@ -2617,10 +2630,9 @@ class MappingGenerator:
                     self._add_log("rollback_objects", "SUCCESS",
                                    f"Rolled back: {rollback_result}")
                     result["steps"]["rollback"] = rollback_result
-                except Exception as e:
-                    self._add_log("rollback_objects", "SKIPPED",
-                                   f"No rollback record found: {e}")
-                    result["steps"]["rollback"] = {"skipped": True, "reason": str(e)}
+                except Exception:
+                    self._add_log("rollback_objects", "SKIPPED", NO_ROLLBACK_RECORD)
+                    result["steps"]["rollback"] = {"skipped": True, "reason": NO_ROLLBACK_RECORD}
 
             # Step 3: DELETE record in MAPPING_LOG
             self._log_to_mapping_log(

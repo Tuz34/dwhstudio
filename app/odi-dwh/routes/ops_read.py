@@ -4,6 +4,7 @@ import json
 
 from flask import Blueprint, current_app, jsonify, request
 
+from app_helpers import _group_odi_mapping_lineage_items
 from routes.deps import get_app_module
 from routes.error_responses import redacted_error, redacted_operation_result
 
@@ -446,130 +447,7 @@ def api_odi_mappings():
         items = json.loads(raw_data)
         if not isinstance(items, list):
             return current_app.response_class(response=raw_data, status=200, mimetype="application/json")
-
-        grouped = {}
-        for item in items:
-            name = item.get("MAPPING_NAME")
-            if not name:
-                continue
-            key = str(name).strip().upper()
-
-            if key not in grouped:
-                folder_name = item.get("FOLDER_NAME") or item.get("folder_name") or ""
-                project_code = item.get("PROJECT_CODE") or item.get("project_code") or ""
-                project_name = item.get("PROJECT_NAME") or item.get("project_name") or ""
-                grouped[key] = {
-                    "MAPPING_NAME": str(name),
-                    "FOLDER_NAME": str(folder_name) if folder_name else "",
-                    "folder_name": str(folder_name) if folder_name else "",
-                    "PROJECT_CODE": str(project_code) if project_code else "",
-                    "project_code": str(project_code) if project_code else "",
-                    "PROJECT_NAME": str(project_name) if project_name else "",
-                    "project_name": str(project_name) if project_name else "",
-                    "project": str(project_code or project_name) if (project_code or project_name) else "",
-                    "SRC_TABLE": "?",
-                    "TGT_TABLE": "?",
-                    "TGT_OWNER": "DWH",
-                    "LAYER": "STG",
-                    "DESC": "",
-                    "COMP_COUNT": 0,
-                    "JOIN_COUNT": 0,
-                    "SRC_LIST": set(),
-                }
-            else:
-                folder_name = item.get("FOLDER_NAME") or item.get("folder_name")
-                project_code = item.get("PROJECT_CODE") or item.get("project_code")
-                project_name = item.get("PROJECT_NAME") or item.get("project_name")
-                if folder_name and not grouped[key].get("folder_name"):
-                    grouped[key]["FOLDER_NAME"] = str(folder_name)
-                    grouped[key]["folder_name"] = str(folder_name)
-                if project_code and not grouped[key].get("project_code"):
-                    grouped[key]["PROJECT_CODE"] = str(project_code)
-                    grouped[key]["project_code"] = str(project_code)
-                    grouped[key]["project"] = str(project_code)
-                if project_name and not grouped[key].get("project_name"):
-                    grouped[key]["PROJECT_NAME"] = str(project_name)
-                    grouped[key]["project_name"] = str(project_name)
-                    grouped[key]["project"] = grouped[key].get("project") or str(project_name)
-
-            grouped[key]["COMP_COUNT"] += 1
-
-            qualified_name = str(item.get("TABLE_QUALIFIED_NAME") or "").strip()
-            comp_type = str(item.get("COMP_TYPE") or "").upper()
-            comp_name = str(item.get("COMP_NAME") or "").upper()
-
-            if comp_type == "JOIN" or comp_type == "LOOKUP":
-                grouped[key]["JOIN_COUNT"] += 1
-            expression = item.get("EXPRESSION")
-            if expression:
-                expression_text = str(expression).strip()
-                if any(char in expression_text for char in ["'", "(", " ", "+", "||"]) or "." not in expression_text:
-                    grouped[key]["HAS_EXP"] = True
-            if comp_type == "FILTER":
-                grouped[key]["HAS_FILTER"] = True
-
-            mapping_name_upper = str(name).upper()
-            qualified_short = qualified_name.split(".")[-1].upper() if qualified_name else ""
-            is_target = (
-                qualified_name.upper().startswith("ODS.")
-                or qualified_short.startswith("ODS_")
-                or qualified_short.startswith("DWH_")
-                or comp_name.startswith("ODS_")
-                or comp_name.startswith("DWH_")
-                or comp_name.startswith("TGT_")
-                or (
-                    qualified_short.startswith("SKEY_")
-                    and ("_SKEY_" in mapping_name_upper or mapping_name_upper.startswith("MAP_SKEY"))
-                )
-            )
-
-            if is_target and qualified_name:
-                parts = qualified_name.split(".")
-                target_name = parts[1] if len(parts) > 1 else qualified_name
-                grouped[key]["TGT_OWNER"] = parts[0] if len(parts) > 1 else "DWH"
-                grouped[key]["TGT_TABLE"] = target_name
-
-                target_name_upper = target_name.upper()
-                if target_name_upper.startswith("ODS_"):
-                    grouped[key]["LAYER"] = "ODS"
-                elif target_name_upper.startswith("SKEY_"):
-                    grouped[key]["LAYER"] = "SKEY"
-                elif target_name_upper.startswith("EDW_"):
-                    grouped[key]["LAYER"] = "EDW"
-                elif target_name_upper.startswith("DM_"):
-                    grouped[key]["LAYER"] = "DM"
-                else:
-                    grouped[key]["LAYER"] = "STG"
-            elif qualified_name or comp_name:
-                source_name = qualified_name if qualified_name else comp_name
-                if comp_type in ["FILE", "XML", "DATASTORE", "XSD"]:
-                    grouped[key]["SRC_LIST"].add(source_name)
-                if grouped[key]["SRC_TABLE"] == "?" or comp_type in ["FILE", "XML"]:
-                    grouped[key]["SRC_TABLE"] = source_name
-
-            mapping_name_display = str(name).upper()
-            if "FLAT_FILE" in mapping_name_display and "DWH" in mapping_name_display:
-                grouped[key]["DESC"] = "Flat File -> DWH"
-            elif "_TO_ODS" in mapping_name_display:
-                src_part = mapping_name_display.split("_TO_ODS")[0].replace("MAP_", "").replace("_", " ")
-                grouped[key]["DESC"] = f"{src_part.title()} -> ODS"
-            elif "_SKEY_" in mapping_name_display or mapping_name_display.startswith("MAP_SKEY"):
-                src_part = mapping_name_display.replace("MAP_SKEY_", "").replace("MAP_", "").replace("_", " ")
-                grouped[key]["DESC"] = f"{src_part.title()} -> SKEY"
-            elif "_TO_EDW" in mapping_name_display:
-                grouped[key]["DESC"] = "ODS -> EDW (Core)"
-            elif "_TO_DM" in mapping_name_display:
-                grouped[key]["DESC"] = "EDW -> DM (Mart)"
-            else:
-                grouped[key]["DESC"] = mapping_name_display.replace("MAP_", "").replace("_", " ").title()
-
-        for key in grouped:
-            if grouped.get(key) and "SRC_LIST" in grouped[key]:
-                sorted_sources = sorted(list(grouped[key]["SRC_LIST"]))
-                grouped[key]["SRC_TABLE"] = ", ".join(sorted_sources)
-                del grouped[key]["SRC_LIST"]
-
-        return jsonify(list(grouped.values()))
+        return jsonify(_group_odi_mapping_lineage_items(items))
     except Exception as exc:
         app_module.logger.error("Critical mappings error: %s", type(exc).__name__)
         return current_app.response_class(response=raw_data, status=200, mimetype="application/json")

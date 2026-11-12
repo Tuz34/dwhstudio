@@ -84,7 +84,7 @@ def test_operation_result_redacts_http_200_diagnostics_but_keeps_success_output(
 
     assert cleaned["error"] == "mapping update failed."
     assert cleaned["error_type"] == "OperationError"
-    assert cleaned["steps"]["snapshot"]["reason"] == "mapping update failed."
+    assert cleaned["steps"]["snapshot"]["reason"] == "Step skipped."
     assert cleaned["steps"]["operator"]["odi_result"] == "Scenario ready"
     assert secret_detail not in str(cleaned)
 

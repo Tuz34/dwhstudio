@@ -3,9 +3,10 @@ from __future__ import annotations
 from flask import current_app, jsonify
 
 from datamart_contract import DATAMART_REQUIRES_TYPE2_CODE, DATAMART_TYPE2_ONLY_WARNING
+from skip_sentences import EXPECTED_SKIP_SENTENCES, STEP_SKIPPED
 
 
-_FAILURE_STATUSES = {"BLOCKED", "ERROR", "FAILED", "FAILURE", "INVALID", "SKIPPED"}
+_FAILURE_STATUSES = {"BLOCKED", "ERROR", "FAILED", "FAILURE", "INVALID"}
 _AUDIT_PRESERVATION_REJECTED = "audit_preservation_rejected"
 _AUDIT_PRESERVATION_SENTENCE = (
     "The target table's audit column types are not supported for audit preservation. "
@@ -23,6 +24,13 @@ def redacted_write_error(action: str, exc: BaseException):
     return redacted_error(action, exc)
 
 
+def _visible_skip_detail(item) -> str:
+    text = str(item).strip()
+    if text in EXPECTED_SKIP_SENTENCES:
+        return text
+    return STEP_SKIPPED
+
+
 def redacted_operation_result(value, action: str):
     """Remove diagnostic exception text from otherwise successful JSON responses."""
 
@@ -33,6 +41,7 @@ def redacted_operation_result(value, action: str):
 
     status = str(value.get("status") or value.get("overall_status") or "").upper()
     failed = status in _FAILURE_STATUSES
+    skipped = status == "SKIPPED" or value.get("skipped") is True
     had_error = any(str(key).lower() in {"error", "error_message"} and item for key, item in value.items())
     code = value.get("error_code")
     fixed_error = (
@@ -44,10 +53,10 @@ def redacted_operation_result(value, action: str):
         normalized_key = str(key).lower()
         if normalized_key in {"error", "error_message"} and item:
             cleaned[key] = fixed_error if fixed_error is not None else f"{action} failed."
-        elif normalized_key == "reason" and failed and item:
+        elif normalized_key in {"reason", "detail"} and item and failed:
             cleaned[key] = f"{action} failed."
-        elif normalized_key == "detail" and failed and item:
-            cleaned[key] = f"{action} failed."
+        elif normalized_key in {"reason", "detail"} and item and skipped:
+            cleaned[key] = _visible_skip_detail(item)
         else:
             cleaned[key] = redacted_operation_result(item, action)
     if had_error:

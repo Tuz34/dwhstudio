@@ -3,6 +3,7 @@
  * All /api/* calls are routed from here.
  * The CSRF token is added automatically (compatible with Flask-WTF).
  */
+import { refusedRequestMessage } from '../refusedRequestContract.js';
 
 function getCsrfToken() {
   return document.querySelector('meta[name="csrf-token"]')?.content || '';
@@ -65,10 +66,11 @@ async function responseError(res, { captureErrorBody = false, captureScd2Error =
   let errorType;
   let capturedBody;
   let scd2Error = null;
+  let payload = null;
   const contentType = res.headers?.get?.('content-type') || '';
   if (contentType.includes('application/json') && typeof res.json === 'function') {
     try {
-      const payload = await res.json();
+      payload = await res.json();
       // Only the mapping run opts in. The Error message stays the generic status text.
       if (captureErrorBody && plainObject(payload)) capturedBody = payload;
       if (typeof payload?.error_type === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(payload.error_type)) {
@@ -80,7 +82,8 @@ async function responseError(res, { captureErrorBody = false, captureScd2Error =
     }
   }
 
-  const message = HTTP_ERROR_MESSAGES[res.status] || (res.status >= 500 ? 'Service request failed.' : 'Request failed.');
+  const allowlisted = res.status === 400 ? refusedRequestMessage(payload?.error_code) : null;
+  const message = allowlisted || HTTP_ERROR_MESSAGES[res.status] || (res.status >= 500 ? 'Service request failed.' : 'Request failed.');
   const error = new Error(message);
   error.status = res.status;
   if (errorType) error.errorType = errorType;
