@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -423,6 +424,28 @@ def _rows_past_cap_with_shared_name(cap: int) -> list[dict]:
     return rows
 
 
+def _rows_past_cap_extra_has_lower_component_ids(cap: int) -> list[dict]:
+    """The extra mapping shares the last name and its component ids sort first.
+
+    Outer order is name, type, component id, so this page lists mapping
+    `cap + 1` before mapping `cap`. The CTE still orders that name by id.
+    """
+    rows: list[dict] = []
+    for index in range(cap - 1):
+        rows.extend(_folder_pair(
+            f"MAP_CAP_{index:03d}",
+            index + 1,
+            "F1",
+            f"HR.SRC_{index:03d}",
+            f"DWH.ODS_TGT_{index:03d}",
+            (index + 1) * 10,
+        ))
+    shared = f"MAP_CAP_{cap - 1:03d}"
+    rows.extend(_folder_pair(shared, cap, "F1", "HR.KEPT_SOURCE", "DWH.ODS_KEPT", 100_000))
+    rows.extend(_folder_pair(shared, cap + 1, "F2", "HR.EXTRA_SOURCE", "DWH.ODS_EXTRA", 1))
+    return rows
+
+
 def _rows_inside_cap_with_shared_name() -> list[dict]:
     """Two ids share a name. Both are inside either cap. A third name does not."""
     return [
@@ -566,3 +589,96 @@ def test_same_named_mappings_inside_the_cap_merge_as_on_0ac6fa2(surface, app_cli
     assert listed[0]["TARGET_TABLE"] == "DWH.ODS_OTHER"
     assert listed[1]["SOURCE_TABLES"] == "HR.EXTRA_SOURCE, HR.SRC_INSIDE"
     assert listed[1]["TARGET_TABLE"] == "?"
+
+
+@pytest.mark.parametrize("cap", [MAPPINGS_LIST_CAP, 100])
+def test_lower_component_ids_do_not_change_the_cte_mapping(cap, app_client, monkeypatch):
+    """Component order lists the extra mapping first. The CTE still keeps the lower id."""
+    from app_helpers import _group_odi_mapping_lineage_items
+
+    rows = _rows_past_cap_extra_has_lower_component_ids(cap)
+    shared = f"MAP_CAP_{cap - 1:03d}"
+    probe = _sql_mapping_page(rows, cap + 1)
+    page = _sql_mapping_page(rows, cap)
+    probe_ids = [row["MAPPING_ID"] for row in probe if row["MAPPING_NAME"] == shared]
+    page_ids = list(dict.fromkeys(row["MAPPING_ID"] for row in page if row["MAPPING_NAME"] == shared))
+    assert probe_ids[0] == cap + 1
+    assert page_ids == [cap]
+    expected = _group_odi_mapping_lineage_items(page)
+    assert expected[-1]["SRC_TABLE"] == "HR.KEPT_SOURCE"
+    assert "HR.EXTRA_SOURCE" not in json.dumps(expected)
+
+    if cap == MAPPINGS_LIST_CAP:
+        import app as app_module
+
+        calls = _install_lineage(monkeypatch, app_module, rows)
+        response = app_client.get("/api/odi/mappings")
+        assert response.status_code == 200
+        assert calls == [cap + 1]
+        assert response.get_json() == expected
+        assert response.headers.get("X-ODI-Mappings-Truncated") == "1"
+        assert response.headers.get("X-ODI-Mappings-Limit") == str(cap)
+        return
+
+    import ai_helpers
+
+    calls = _install_lineage(monkeypatch, ai_helpers, rows)
+    body = ai_helpers._modeled_tables_answer()
+    assert calls == [cap + 1]
+    listed = body["queries"][0]["result"]["rows"]
+    assert [row["MAPPING_NAME"] for row in listed] == [item["MAPPING_NAME"] for item in expected]
+    assert listed[-1]["SOURCE_TABLES"] == "HR.KEPT_SOURCE"
+    assert listed[-1]["TARGET_TABLE"] == "DWH.ODS_KEPT"
+    blob = json.dumps(body)
+    assert "HR.EXTRA_SOURCE" not in blob
+    assert "ODS_EXTRA" not in blob
+    assert "F2" not in blob
+    base = "Tables modeled in the current ODI mapping inventory are listed below."
+    assert body["aciklama"] == f"{base} This listing summarises the first {cap} mappings."
+
+
+def test_mappings_route_grouping_failure_returns_fixed_error(app_client, monkeypatch, caplog):
+    """A grouping error is the fixed redacted body. Raw cap+1 rows stay out of it."""
+    import app as app_module
+    import routes.ops_read as ops_read
+
+    secret = "MAPPING_ID 999001 HR.SENTINEL_SOURCE"
+    rows = _pair_rows("MAP_ERR", 1)
+    rows.append({
+        "MAPPING_ID": 999001,
+        "MAPPING_NAME": "MAP_SENTINEL",
+        "PROJECT_CODE": "ORA_DWH",
+        "PROJECT_NAME": "Oracle DWH",
+        "FOLDER_NAME": "F_SENTINEL",
+        "COMP_NAME": "SENTINEL_SRC",
+        "COMP_TYPE": "DATASTORE",
+        "TABLE_QUALIFIED_NAME": "HR.SENTINEL_SOURCE",
+        "IS_TARGET": "N",
+    })
+
+    def fake_lineage(limit=50):
+        return json.dumps(rows)
+
+    def boom(_items):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(app_module, "odi_get_mapping_lineage", fake_lineage)
+    monkeypatch.setattr(ops_read, "_group_odi_mapping_lineage_items", boom)
+    with caplog.at_level(logging.ERROR):
+        response = app_client.get("/api/odi/mappings")
+
+    assert response.status_code == 500
+    assert response.get_json() == {
+        "error": "Operational read failed.",
+        "error_type": "RuntimeError",
+    }
+    body = response.get_data(as_text=True)
+    assert "MAPPING_ID" not in body
+    assert "HR.SENTINEL_SOURCE" not in body
+    assert "MAP_SENTINEL" not in body
+    assert "MAP_ERR" not in body
+    assert secret not in body
+    assert secret not in caplog.text
+    logged = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
+    assert "Operational read failed: RuntimeError" in logged
+    assert all("MAPPING_ID" not in message and "SENTINEL" not in message for message in logged)

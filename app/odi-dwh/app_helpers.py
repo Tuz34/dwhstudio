@@ -142,23 +142,42 @@ def _base_route_source_table(items: list) -> str:
     return ", ".join(sorted(sources))
 
 
-def _cap_odi_lineage_rows_by_mapping_id(items: list, cap: int) -> tuple[list, bool]:
-    """Keep rows of the first `cap` distinct MAPPING_IDs in input order.
+def _mapping_id_number(mapping_id: object) -> int | float:
+    """I_MAPPING for the CTE order. Non-numeric ids sort after every number."""
+    if isinstance(mapping_id, bool) or mapping_id is None:
+        return float("inf")
+    if isinstance(mapping_id, (int, float)):
+        return mapping_id
+    text = str(mapping_id).strip()
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return float(text)
+        except ValueError:
+            return float("inf")
 
-    Input order is the lineage SQL order. A later mapping id truncates the
-    page even when its name matches a kept mapping. Callers group after this.
+
+def _cap_odi_lineage_rows_by_mapping_id(items: list, cap: int) -> tuple[list, bool]:
+    """Keep rows of the first `cap` mappings in the lineage CTE order.
+
+    The CTE orders by MAPPING_NAME, then MAPPING_ID as a number. A missing name
+    sorts last, as Oracle ORDER BY does. Component-row order does not choose
+    the page. A later id truncates even when its name matches a kept mapping.
+    Callers group after this.
     """
-    order: list = []
-    seen: set = set()
+    pairs: dict = {}
     for item in items:
         mapping_id = item.get("MAPPING_ID")
-        if mapping_id in seen:
+        if mapping_id in pairs:
             continue
-        seen.add(mapping_id)
-        order.append(mapping_id)
-    if len(order) <= cap:
+        name = item.get("MAPPING_NAME")
+        name_key = (1, "") if name is None else (0, str(name))
+        pairs[mapping_id] = (name_key, _mapping_id_number(mapping_id))
+    ordered = sorted(pairs, key=lambda mapping_id: pairs[mapping_id])
+    if len(ordered) <= cap:
         return items, False
-    keep = set(order[:cap])
+    keep = set(ordered[:cap])
     return [item for item in items if item.get("MAPPING_ID") in keep], True
 
 

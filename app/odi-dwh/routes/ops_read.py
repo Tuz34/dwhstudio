@@ -442,7 +442,6 @@ def api_odi_scenarios():
 @bp.route("/api/odi/mappings")
 def api_odi_mappings():
     app_module = get_app_module()
-    raw_data = "[]"
     try:
         # One mapping past the cap: a full page is not truncation.
         raw_data = app_module.odi_get_mapping_lineage(limit=ODI_MAPPINGS_LIST_CAP + 1)
@@ -457,8 +456,7 @@ def api_odi_mappings():
             response.headers["X-ODI-Mappings-Limit"] = str(ODI_MAPPINGS_LIST_CAP)
         return response
     except Exception as exc:
-        app_module.logger.error("Critical mappings error: %s", type(exc).__name__)
-        return current_app.response_class(response=raw_data, status=200, mimetype="application/json")
+        return redacted_error("Operational read", exc)
 
 
 @bp.route("/api/odi/lineage")
