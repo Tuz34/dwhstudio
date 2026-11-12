@@ -89,9 +89,10 @@ def odi_get_recent_sessions(limit: int = 20) -> str:
 
 
 # EVIDENCE_READ_BUDGET_S is the caller's total wait on time.monotonic, from
-# connect through close. The driver caps below are only the worker's own
-# per-round-trip limits (oracledb 2.4.1: tcp_connect_timeout is seconds,
-# call_timeout is milliseconds for one round trip).
+# function entry (before Thread.start) through the worker. The driver caps
+# below are only the worker's own per-round-trip limits (oracledb 2.4.1:
+# tcp_connect_timeout is seconds, call_timeout is milliseconds for one
+# round trip).
 EVIDENCE_READ_BUDGET_S = 5
 EVIDENCE_CONNECT_TIMEOUT_S = 1.0
 EVIDENCE_CALL_TIMEOUT_MS = 2000
@@ -100,9 +101,9 @@ _EVIDENCE_MAX_SAFE_INTEGER = 2**53 - 1
 _EVIDENCE_READ_SLOTS = threading.BoundedSemaphore(2)
 
 
-def _wait_evidence(done: threading.Event, budget_s: float) -> bool:
-    """Wait on the monotonic clock. A late set after this returns is ignored."""
-    deadline = time.monotonic() + float(budget_s)
+def _wait_evidence(done: threading.Event, budget_s: float, *, started_at: float) -> bool:
+    """Wait until started_at + budget_s. A late set after this returns is ignored."""
+    deadline = float(started_at) + float(budget_s)
     remaining = deadline - time.monotonic()
     if remaining < 0:
         remaining = 0.0
@@ -145,37 +146,43 @@ def _evidence_worker(
     """Own the connection. No Flask context. Log only an exception class name."""
     conn = None
     try:
-        conn = oracledb.connect(
-            user=ODI_REPO_USER,
-            password=ODI_REPO_PASSWORD,
-            dsn=ODI_REPO_DSN or ORACLE_DSN,
-            tcp_connect_timeout=EVIDENCE_CONNECT_TIMEOUT_S,
-            retry_count=0,
-        )
-        conn.call_timeout = EVIDENCE_CALL_TIMEOUT_MS
-        cursor = conn.cursor()
-        cursor.prefetchrows = 2
-        cursor.execute(sql, {"sess_no": session_no})
-        box["result"] = _finish_evidence_row(
-            _take_evidence_row(cursor, session_no),
-            include_error_text=include_error_text,
-        )
-    except (oracledb.Error, OSError) as exc:
-        box["result"] = None
-        logger.warning("%s", type(exc).__name__)
-    finally:
         try:
-            if conn is not None:
-                conn.close()
+            conn = oracledb.connect(
+                user=ODI_REPO_USER,
+                password=ODI_REPO_PASSWORD,
+                dsn=ODI_REPO_DSN or ORACLE_DSN,
+                tcp_connect_timeout=EVIDENCE_CONNECT_TIMEOUT_S,
+                retry_count=0,
+            )
+            conn.call_timeout = EVIDENCE_CALL_TIMEOUT_MS
+            cursor = conn.cursor()
+            cursor.prefetchrows = 2
+            cursor.execute(sql, {"sess_no": session_no})
+            box["result"] = _finish_evidence_row(
+                _take_evidence_row(cursor, session_no),
+                include_error_text=include_error_text,
+            )
         except (oracledb.Error, OSError) as exc:
+            box["result"] = None
             logger.warning("%s", type(exc).__name__)
         finally:
-            done.set()
-            _EVIDENCE_READ_SLOTS.release()
+            try:
+                if conn is not None:
+                    conn.close()
+            except (oracledb.Error, OSError) as exc:
+                logger.warning("%s", type(exc).__name__)
+    except Exception as exc:
+        # Thread boundary. The default excepthook prints the message.
+        # A close failure must not discard a row already stored on the box.
+        logger.warning("%s", type(exc).__name__)
+    finally:
+        done.set()
+        _EVIDENCE_READ_SLOTS.release()
 
 
 def read_session_run_evidence(session_no: int, *, include_error_text: bool) -> dict | None:
     """One SNP_SESSION statement. The caller waits at most EVIDENCE_READ_BUDGET_S."""
+    started_at = time.monotonic()
     if (
         type(session_no) is not int
         or isinstance(session_no, bool)
@@ -210,9 +217,13 @@ def read_session_run_evidence(session_no: int, *, include_error_text: bool) -> d
     )
     started = False
     try:
-        worker.start()
+        try:
+            worker.start()
+        except RuntimeError as exc:
+            logger.warning("%s", type(exc).__name__)
+            return None
         started = True
-        if not _wait_evidence(done, EVIDENCE_READ_BUDGET_S):
+        if not _wait_evidence(done, EVIDENCE_READ_BUDGET_S, started_at=started_at):
             return None
         result = box.get("result")
         return result if isinstance(result, dict) else None

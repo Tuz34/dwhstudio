@@ -56,12 +56,17 @@ export function applyListResponse(state, listedNames) {
   const runDialog = state.runDialog && state.runDialog.mappingName === requested
     ? null
     : state.runDialog;
-  return {
+  // Same cancel as delete and close: the old response can never apply,
+  // including when a later list contains this mapping again.
+  const cancelled = beginDetailRequest({
     ...state,
     listedNames: names,
     detail: null,
     runDialog,
     runStatus,
+  }, null);
+  return {
+    ...cancelled.state,
     cleared: true,
   };
 }

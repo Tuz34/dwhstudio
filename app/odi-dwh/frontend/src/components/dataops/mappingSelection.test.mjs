@@ -41,14 +41,26 @@ test('refresh keeps A while detail B is pending, then a late B response is ignor
   assert.equal(state.runDialog, null);
   assert.equal(state.runStatus.A, 'running');
   assert.equal(state.runStatus.B, undefined);
-  assert.equal(state.requestedName, 'B');
+  assert.equal(state.requestedName, null);
+  assert.notEqual(state.latestSeq, pending.requestSeq);
 
-  const late = applyDetailResponse(state, {
+  const whileGone = applyDetailResponse(state, {
     requestSeq: pending.requestSeq,
     mappingName: 'B',
     detail: { MAPPING_NAME: 'B' },
   });
-  assert.equal(late, state);
+  assert.equal(whileGone, state);
+
+  const restored = applyListResponse(state, ['A', 'B']);
+  assert.equal(restored.cleared, false);
+  assert.equal(restored.requestedName, null);
+  assert.equal(restored.latestSeq, state.latestSeq);
+  const late = applyDetailResponse(restored, {
+    requestSeq: pending.requestSeq,
+    mappingName: 'B',
+    detail: { MAPPING_NAME: 'B' },
+  });
+  assert.equal(late, restored);
   assert.equal(late.detail, null);
 });
 
@@ -66,11 +78,23 @@ test('mirror: pending A is dropped when the refreshed list keeps only B', () => 
   assert.equal(state.runDialog, null);
   assert.equal(state.runStatus.B, 'done');
   assert.equal(state.runStatus.A, undefined);
-  const late = applyDetailResponse(state, {
+  assert.equal(state.requestedName, null);
+  assert.notEqual(state.latestSeq, pending.requestSeq);
+  const whileGone = applyDetailResponse(state, {
     requestSeq: pending.requestSeq,
     mappingName: 'A',
     detail: { MAPPING_NAME: 'A' },
   });
+  assert.equal(whileGone, state);
+  const restored = applyListResponse(state, ['A', 'B']);
+  assert.equal(restored.requestedName, null);
+  assert.equal(restored.latestSeq, state.latestSeq);
+  const late = applyDetailResponse(restored, {
+    requestSeq: pending.requestSeq,
+    mappingName: 'A',
+    detail: { MAPPING_NAME: 'A' },
+  });
+  assert.equal(late, restored);
   assert.equal(late.detail, null);
 });
 
@@ -121,8 +145,12 @@ test('mirror: cancelling the latest request ignores the response that was in fli
   let state = tracking();
   const pending = beginDetailRequest(state, 'B');
   const cancelled = beginDetailRequest(pending.state, null);
+  assert.equal(cancelled.state.requestedName, null);
+  assert.notEqual(cancelled.state.latestSeq, pending.requestSeq);
   state = applyListResponse(cancelled.state, ['A', 'B']);
   assert.equal(state.cleared, false);
+  assert.equal(state.requestedName, null);
+  assert.equal(state.latestSeq, cancelled.state.latestSeq);
   const late = applyDetailResponse(state, {
     requestSeq: pending.requestSeq,
     mappingName: 'B',
@@ -149,4 +177,13 @@ test('MappingList applies the selection decisions synchronously', () => {
   assert.ok(loadMappings.includes('applyListResponse('));
   assert.ok(loadMappings.includes('selectedNameRef.current'));
   assert.equal(source.includes('selectedNameRef.current = detail?.MAPPING_NAME'), false);
+  const handleDelete = source.slice(
+    source.indexOf('const handleDelete'),
+    source.indexOf('const filtered = mappings.filter'),
+  );
+  assert.ok(handleDelete.includes('beginDetailRequest(selectionRef.current, null)'));
+  const closeAt = source.indexOf('fa-xmark');
+  assert.ok(source.slice(Math.max(0, closeAt - 500), closeAt).includes(
+    'beginDetailRequest(selectionRef.current, null)',
+  ));
 });

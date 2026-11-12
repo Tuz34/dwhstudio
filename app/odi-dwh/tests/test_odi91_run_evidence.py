@@ -6,8 +6,10 @@ Offline only. These tests must fail on the pre-change contract and service.
 from __future__ import annotations
 
 import copy
+import io
 import json
 import logging
+import sys
 import threading
 import time
 from pathlib import Path
@@ -446,6 +448,9 @@ def _install_evidence_driver(monkeypatch, script):
             closed_event = script.get("closed_event")
             if closed_event is not None:
                 closed_event.set()
+            error = script.get("close_error")
+            if error is not None:
+                raise error
 
     def connect(*_args, **kwargs):
         script["tcp_connect_timeout"] = kwargs.get("tcp_connect_timeout", "missing")
@@ -909,3 +914,171 @@ def test_round3_driver_error_closes_and_logs_only_the_class(monkeypatch, caplog)
     assert "SECRET" not in caplog.text
     assert "SECRET" not in json.dumps(outcome.payload)
     assert [record.message for record in caplog.records if record.name == "odi_mcp"] == ["TimeoutError"]
+
+
+# --- round 4: thread boundary, and a vanished selection stays invalid -------
+
+_THREAD_MARKER = "SYNTHETIC_THREAD_MESSAGE"
+
+
+def _install_thread_probe(monkeypatch):
+    """Record threading.excepthook and stderr. The marker must not surface."""
+    seen = []
+    stderr = io.StringIO()
+
+    def hook(args):
+        seen.append(args)
+
+    monkeypatch.setattr(threading, "excepthook", hook)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    return seen, stderr
+
+
+def _assert_thread_marker_hidden(seen, stderr, caplog):
+    pieces = [stderr.getvalue(), caplog.text]
+    for args in seen:
+        pieces.append(f"{args.exc_type.__name__}: {args.exc_value}")
+    for record in caplog.records:
+        pieces.append(record.getMessage())
+        pieces.append(repr(record.args))
+        if record.exc_info and record.exc_info[1] is not None:
+            pieces.append(str(record.exc_info[1]))
+    assert _THREAD_MARKER not in "\n".join(pieces)
+    assert seen == []
+
+
+def _both_evidence_slots_free(odi_mcp):
+    acquired = 0
+    try:
+        while acquired < 2 and odi_mcp._EVIDENCE_READ_SLOTS.acquire(blocking=False):
+            acquired += 1
+        return acquired == 2
+    finally:
+        for _ in range(acquired):
+            odi_mcp._EVIDENCE_READ_SLOTS.release()
+
+
+def _run_service_within_budget(monkeypatch, remote):
+    """The service call itself must return inside EVIDENCE_READ_BUDGET_S."""
+    import odi_mcp
+
+    setup_pipeline(monkeypatch, run=remote)
+    box = {}
+
+    def invoke():
+        try:
+            box["outcome"] = service.execute_mapping_run(Mock(), _options())
+        except Exception as exc:  # noqa: BLE001 - the test records a failed call
+            box["error"] = type(exc).__name__
+
+    caller = threading.Thread(target=invoke, daemon=True, name="odi-evidence-budget-probe")
+    started = time.monotonic()
+    caller.start()
+    caller.join(odi_mcp.EVIDENCE_READ_BUDGET_S)
+    elapsed = time.monotonic() - started
+    assert not caller.is_alive(), "evidence service exceeded EVIDENCE_READ_BUDGET_S"
+    assert elapsed < odi_mcp.EVIDENCE_READ_BUDGET_S
+    assert "error" not in box, box.get("error")
+    _finish_evidence_workers()
+    return box["outcome"]
+
+
+def _odi_mcp_warnings(caplog):
+    return [record.message for record in caplog.records if record.name == "odi_mcp"]
+
+
+def test_round4_connect_value_error_stays_inside_the_worker(monkeypatch, caplog):
+    import odi_mcp
+
+    script = _evidence_script(connect_error=ValueError(_THREAD_MARKER))
+    _install_evidence_driver(monkeypatch, script)
+    seen, stderr = _install_thread_probe(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="odi_mcp"):
+        outcome = _run_service_within_budget(monkeypatch, with_session(done()))
+    _finish_evidence_workers()
+    assert script["sql"] == []
+    assert script["closed"] is False
+    assert outcome.status_code == 200
+    assert outcome.payload["session_number"] == 311
+    assert "counts" not in outcome.payload
+    assert _THREAD_MARKER not in json.dumps(outcome.payload)
+    assert _odi_mcp_warnings(caplog) == ["ValueError"]
+    _assert_thread_marker_hidden(seen, stderr, caplog)
+    assert _both_evidence_slots_free(odi_mcp)
+
+
+def test_round4_close_value_error_keeps_the_row_and_hides_the_message(monkeypatch, caplog):
+    import odi_mcp
+
+    script = _evidence_script(close_error=ValueError(_THREAD_MARKER))
+    _install_evidence_driver(monkeypatch, script)
+    seen, stderr = _install_thread_probe(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="odi_mcp"):
+        outcome = _run_service_within_budget(monkeypatch, with_session(done()))
+    _finish_evidence_workers()
+    assert script["closed"] is True
+    assert outcome.status_code == 200
+    assert outcome.payload["counts"] == COUNTS
+    assert outcome.payload["session_number"] == 311
+    assert _THREAD_MARKER not in json.dumps(outcome.payload)
+    assert _odi_mcp_warnings(caplog) == ["ValueError"]
+    _assert_thread_marker_hidden(seen, stderr, caplog)
+    assert _both_evidence_slots_free(odi_mcp)
+
+
+def test_round4_thread_start_runtime_error_is_absent(monkeypatch, caplog):
+    import odi_mcp
+
+    real_start = threading.Thread.start
+
+    def boom(self):
+        if self.name == "odi-evidence-read":
+            raise RuntimeError(_THREAD_MARKER)
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    seen, stderr = _install_thread_probe(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="odi_mcp"):
+        row = odi_mcp.read_session_run_evidence(311, include_error_text=False)
+    assert row is None
+    assert _THREAD_MARKER not in " ".join(_odi_mcp_warnings(caplog))
+    _assert_thread_marker_hidden(seen, stderr, caplog)
+    assert _both_evidence_slots_free(odi_mcp)
+
+
+def test_round4_monotonic_clock_starts_before_thread_start(monkeypatch):
+    """The budget clock is running before Thread.start, from function entry."""
+    import odi_mcp
+
+    order = []
+    real_start = threading.Thread.start
+    real_mono = time.monotonic
+    real_read = odi_mcp.read_session_run_evidence
+
+    def spy_start(self):
+        if self.name == "odi-evidence-read":
+            order.append("start")
+        return real_start(self)
+
+    def spy_mono():
+        order.append("mono")
+        return real_mono()
+
+    def wrapped(session_no, *, include_error_text):
+        order.append("enter")
+        try:
+            return real_read(session_no, include_error_text=include_error_text)
+        finally:
+            order.append("leave")
+
+    monkeypatch.setattr(threading.Thread, "start", spy_start)
+    monkeypatch.setattr(odi_mcp.time, "monotonic", spy_mono)
+    monkeypatch.setattr(odi_mcp, "read_session_run_evidence", wrapped)
+    script = _evidence_script()
+    _install_evidence_driver(monkeypatch, script)
+    outcome = _run(monkeypatch, with_session(done()))
+    _finish_evidence_workers()
+    assert outcome.payload["counts"] == COUNTS
+    entered = order.index("enter")
+    started = order.index("start")
+    assert "mono" in order[entered:started]
