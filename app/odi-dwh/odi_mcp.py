@@ -288,20 +288,24 @@ def odi_get_mapping_lineage(limit: int = 50) -> str:
     """Retrieve ODI mapping components (Data Lineage), including filters, distinct, and join objects.
 
     `limit` is a mapping count: the first N mappings by name then I_MAPPING,
-    with every component row of those mappings. IS_TARGET is Y for a DATASTORE
+    with every component row of those mappings. MAPPING_RANK is that CTE's
+    ROW_NUMBER() in the same order. IS_TARGET is Y for a DATASTORE
     or FILE component that has at least one output attribute with a populated
     expression, using the same SNP_MAP_CP / SNP_MAP_ATTR / SNP_MAP_EXPR joins
     as odi_get_mapping_details.
     """
     sql = f"""
         WITH capped_mappings AS (
-            SELECT m2.I_MAPPING
+            SELECT
+                m2.I_MAPPING,
+                ROW_NUMBER() OVER (ORDER BY m2.NAME, m2.I_MAPPING) AS MAPPING_RANK
             FROM {ODI_REPO_SCHEMA}.SNP_MAPPING m2
             ORDER BY m2.NAME, m2.I_MAPPING
             FETCH FIRST :lmt ROWS ONLY
         )
         SELECT
             m.I_MAPPING AS MAPPING_ID,
+            capped.MAPPING_RANK AS MAPPING_RANK,
             m.NAME as MAPPING_NAME,
             p.PROJECT_CODE as PROJECT_CODE,
             p.PROJECT_NAME as PROJECT_NAME,

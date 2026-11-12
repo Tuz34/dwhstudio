@@ -142,43 +142,27 @@ def _base_route_source_table(items: list) -> str:
     return ", ".join(sorted(sources))
 
 
-def _mapping_id_number(mapping_id: object) -> int | float:
-    """I_MAPPING for the CTE order. Non-numeric ids sort after every number."""
-    if isinstance(mapping_id, bool) or mapping_id is None:
-        return float("inf")
-    if isinstance(mapping_id, (int, float)):
-        return mapping_id
-    text = str(mapping_id).strip()
-    try:
-        return int(text)
-    except ValueError:
-        try:
-            return float(text)
-        except ValueError:
-            return float("inf")
+class OdiMappingRankError(ValueError):
+    """A lineage row has no integer MAPPING_RANK from the SQL cap."""
+
+
+def _require_mapping_rank(item: object) -> int:
+    if isinstance(item, dict) and "MAPPING_RANK" in item:
+        rank = item["MAPPING_RANK"]
+        if type(rank) is int:
+            return rank
+    raise OdiMappingRankError("mapping rank is missing or not an integer")
 
 
 def _cap_odi_lineage_rows_by_mapping_id(items: list, cap: int) -> tuple[list, bool]:
-    """Keep rows of the first `cap` mappings in the lineage CTE order.
+    """Keep component rows whose SQL MAPPING_RANK is within the cap.
 
-    The CTE orders by MAPPING_NAME, then MAPPING_ID as a number. A missing name
-    sorts last, as Oracle ORDER BY does. Component-row order does not choose
-    the page. A later id truncates even when its name matches a kept mapping.
-    Callers group after this.
+    The lineage CTE assigns that rank. Names and ids are not ordered here.
+    A missing or non-integer rank fails the request. Callers group after this.
     """
-    pairs: dict = {}
-    for item in items:
-        mapping_id = item.get("MAPPING_ID")
-        if mapping_id in pairs:
-            continue
-        name = item.get("MAPPING_NAME")
-        name_key = (1, "") if name is None else (0, str(name))
-        pairs[mapping_id] = (name_key, _mapping_id_number(mapping_id))
-    ordered = sorted(pairs, key=lambda mapping_id: pairs[mapping_id])
-    if len(ordered) <= cap:
-        return items, False
-    keep = set(ordered[:cap])
-    return [item for item in items if item.get("MAPPING_ID") in keep], True
+    ranks = [_require_mapping_rank(item) for item in items]
+    kept = [item for item, rank in zip(items, ranks) if rank <= cap]
+    return kept, any(rank > cap for rank in ranks)
 
 
 def _group_odi_mapping_lineage_items(items: list) -> list:

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 
@@ -9,7 +10,7 @@ from flask import has_request_context, session
 import ai_egress as requests
 import config
 from ai_egress import local_openai_settings
-from app_helpers import _cap_odi_lineage_rows_by_mapping_id, _group_odi_mapping_lineage_items
+from app_helpers import OdiMappingRankError, _cap_odi_lineage_rows_by_mapping_id, _group_odi_mapping_lineage_items
 from config import ORACLE_DSN
 from db import execute_select
 from health_helpers import _chk_claude, _chk_llm, _chk_local_openai
@@ -155,7 +156,15 @@ def _modeled_tables_answer(message: str | None = None):
     items = json.loads(raw_data)
     if not isinstance(items, list):
         items = []
-    kept, truncated = _cap_odi_lineage_rows_by_mapping_id(items, modeled_cap)
+    try:
+        kept, truncated = _cap_odi_lineage_rows_by_mapping_id(items, modeled_cap)
+    except OdiMappingRankError:
+        logging.getLogger(__name__).error("ODI mapping list failed: %s", OdiMappingRankError.__name__)
+        return {
+            "aciklama": "This request could not list mappings.",
+            "queries": [],
+            "raw": "",
+        }
     grouped = _group_odi_mapping_lineage_items(kept)
     rows = []
     for m in grouped:

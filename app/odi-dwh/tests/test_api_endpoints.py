@@ -2916,6 +2916,7 @@ class TestOdiMappingApi:
             lambda limit=100: json.dumps([
                 {
                     "MAPPING_NAME": "MAP_HR_EMPLOYEES_TO_ODS",
+                    "MAPPING_RANK": 1,
                     "PROJECT_CODE": "ORA_DWH",
                     "PROJECT_NAME": "Oracle DWH",
                     "FOLDER_NAME": "FLD_CORE_MAPPINGS",
@@ -2925,6 +2926,7 @@ class TestOdiMappingApi:
                 },
                 {
                     "MAPPING_NAME": "MAP_HR_EMPLOYEES_TO_ODS",
+                    "MAPPING_RANK": 1,
                     "PROJECT_CODE": "ORA_DWH",
                     "PROJECT_NAME": "Oracle DWH",
                     "FOLDER_NAME": "FLD_CORE_MAPPINGS",

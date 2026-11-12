@@ -73,8 +73,14 @@ def _component_rows_for_mapping_limit(rows: list[dict], limit: int) -> list[dict
             break
         seen.add(name)
         keep.append(name)
-    chosen = set(keep)
-    return [row for row in rows if row["MAPPING_NAME"] in chosen]
+    rank_by_name = {name: index + 1 for index, name in enumerate(keep)}
+    chosen = []
+    for row in rows:
+        rank = rank_by_name.get(row["MAPPING_NAME"])
+        if rank is None:
+            continue
+        chosen.append({**row, "MAPPING_RANK": rank})
+    return chosen
 
 
 def _lineage_function_body() -> str:
@@ -455,6 +461,27 @@ def _rows_inside_cap_with_shared_name() -> list[dict]:
     ]
 
 
+def _page_by_rank_key(rows: list[dict], limit: int, key) -> list[dict]:
+    """First `limit` mappings in `key` order, each component row stamped with that rank."""
+    seen: set[int] = set()
+    order: list[int] = []
+    for row in sorted(rows, key=key):
+        mapping_id = row["MAPPING_ID"]
+        if mapping_id in seen:
+            continue
+        seen.add(mapping_id)
+        order.append(mapping_id)
+    rank_by_id = {mapping_id: index + 1 for index, mapping_id in enumerate(order)}
+    keep = set(order[:limit])
+    kept = [row for row in rows if row["MAPPING_ID"] in keep]
+    page = []
+    for row in kept:
+        item = {column: value for column, value in row.items() if not str(column).startswith("_")}
+        item["MAPPING_RANK"] = rank_by_id[row["MAPPING_ID"]]
+        page.append(item)
+    return page
+
+
 def _sql_mapping_page(rows: list[dict], limit: int) -> list[dict]:
     """CTE keeps the first `limit` ids by name then id; outer orders component rows."""
     seen: set[int] = set()
@@ -465,10 +492,16 @@ def _sql_mapping_page(rows: list[dict], limit: int) -> list[dict]:
             continue
         seen.add(mapping_id)
         order.append(mapping_id)
+    rank_by_id = {mapping_id: index + 1 for index, mapping_id in enumerate(order)}
     keep = set(order[:limit])
     kept = [row for row in rows if row["MAPPING_ID"] in keep]
     kept.sort(key=lambda item: (item["MAPPING_NAME"], item["COMP_TYPE"], item["_comp_id"]))
-    return [{key: value for key, value in row.items() if not str(key).startswith("_")} for row in kept]
+    page = []
+    for row in kept:
+        item = {column: value for column, value in row.items() if not str(column).startswith("_")}
+        item["MAPPING_RANK"] = rank_by_id[row["MAPPING_ID"]]
+        page.append(item)
+    return page
 
 
 def test_lineage_select_adds_mapping_id_and_leaves_the_rest_unchanged():
@@ -644,6 +677,8 @@ def test_mappings_route_grouping_failure_returns_fixed_error(app_client, monkeyp
 
     secret = "MAPPING_ID 999001 HR.SENTINEL_SOURCE"
     rows = _pair_rows("MAP_ERR", 1)
+    for row in rows:
+        row["MAPPING_RANK"] = 1
     rows.append({
         "MAPPING_ID": 999001,
         "MAPPING_NAME": "MAP_SENTINEL",
@@ -654,6 +689,7 @@ def test_mappings_route_grouping_failure_returns_fixed_error(app_client, monkeyp
         "COMP_TYPE": "DATASTORE",
         "TABLE_QUALIFIED_NAME": "HR.SENTINEL_SOURCE",
         "IS_TARGET": "N",
+        "MAPPING_RANK": 2,
     })
 
     def fake_lineage(limit=50):
@@ -682,3 +718,193 @@ def test_mappings_route_grouping_failure_returns_fixed_error(app_client, monkeyp
     logged = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
     assert "Operational read failed: RuntimeError" in logged
     assert all("MAPPING_ID" not in message and "SENTINEL" not in message for message in logged)
+
+
+def test_lineage_cte_returns_its_own_mapping_rank():
+    """The capped CTE's ROW_NUMBER is the only order the page may trust."""
+    body = _lineage_function_body()
+    cte, outer = _cte_and_outer(body)
+    assert "ROW_NUMBER() OVER (ORDER BY m2.NAME, m2.I_MAPPING) AS MAPPING_RANK" in cte
+    assert "ORDER BY m2.NAME, m2.I_MAPPING" in cte
+    assert _FETCH in cte
+    assert "capped.MAPPING_RANK AS MAPPING_RANK" in outer
+    assert outer.count("AS MAPPING_RANK") == 1
+    assert "END AS IS_TARGET" in outer
+
+
+def _oracle_ci_key(row: dict) -> tuple:
+    """Case-insensitive name order. Python code-point order puts MAP_B before MAP_a."""
+    return (str(row["MAPPING_NAME"]).casefold(), row["MAPPING_ID"], row["_comp_id"])
+
+
+def _rows_case_insensitive_boundary(cap: int) -> list[dict]:
+    """Oracle CI keeps MAP_a at the cap. Python's name sort would keep MAP_B instead."""
+    rows: list[dict] = []
+    for index in range(cap - 1):
+        rows.extend(_folder_pair(
+            f"MAP_{index:03d}",
+            index + 1,
+            "F1",
+            f"HR.SRC_{index:03d}",
+            f"DWH.ODS_TGT_{index:03d}",
+            index * 10,
+        ))
+    rows.extend(_folder_pair("MAP_a", 900_001, "F_KEPT", "HR.KEPT_SOURCE", "DWH.ODS_KEPT", 10))
+    rows.extend(_folder_pair("MAP_B", 900_002, "F_EXTRA", "HR.EXTRA_SOURCE", "DWH.ODS_EXTRA", 20))
+    return rows
+
+
+def _install_ranked_lineage(monkeypatch, module, rows: list[dict], key):
+    calls = []
+
+    def fake_lineage(limit=50):
+        calls.append(limit)
+        return json.dumps(_page_by_rank_key(rows, limit, key))
+
+    monkeypatch.setattr(module, "odi_get_mapping_lineage", fake_lineage)
+    return calls
+
+
+@pytest.mark.parametrize("cap", [MAPPINGS_LIST_CAP, 100])
+def test_case_insensitive_collation_follows_mapping_rank(cap, app_client, monkeypatch):
+    """Route 500 and AI 100 keep the CTE rank, whatever the names would sort to in Python."""
+    rows = _rows_case_insensitive_boundary(cap)
+    page = _page_by_rank_key(rows, cap + 1, _oracle_ci_key)
+    ranks = {}
+    for row in page:
+        ranks[row["MAPPING_NAME"]] = row["MAPPING_RANK"]
+    assert ranks["MAP_a"] == cap
+    assert ranks["MAP_B"] == cap + 1
+    python_order = []
+    seen: set[int] = set()
+    for row in sorted(page, key=lambda item: (item["MAPPING_NAME"], item["MAPPING_ID"])):
+        if row["MAPPING_ID"] in seen:
+            continue
+        seen.add(row["MAPPING_ID"])
+        python_order.append(row["MAPPING_NAME"])
+    assert python_order[cap - 1] == "MAP_B"
+    assert "MAP_a" not in python_order[:cap]
+
+    if cap == MAPPINGS_LIST_CAP:
+        import app as app_module
+
+        calls = _install_ranked_lineage(monkeypatch, app_module, rows, _oracle_ci_key)
+        response = app_client.get("/api/odi/mappings")
+        assert response.status_code == 200
+        assert calls == [cap + 1]
+        found = response.get_json()
+        assert len(found) == cap
+        assert found[-1]["MAPPING_NAME"] == "MAP_a"
+        assert found[-1]["SRC_TABLE"] == "HR.KEPT_SOURCE"
+        assert found[-1]["TGT_TABLE"] == "ODS_KEPT"
+        assert "MAP_B" not in {item["MAPPING_NAME"] for item in found}
+        blob = json.dumps(found)
+        assert "HR.EXTRA_SOURCE" not in blob
+        assert "ODS_EXTRA" not in blob
+        assert "F_EXTRA" not in blob
+        assert response.headers.get("X-ODI-Mappings-Truncated") == "1"
+        assert response.headers.get("X-ODI-Mappings-Limit") == str(cap)
+        return
+
+    import ai_helpers
+
+    calls = _install_ranked_lineage(monkeypatch, ai_helpers, rows, _oracle_ci_key)
+    body = ai_helpers._modeled_tables_answer()
+    assert calls == [cap + 1]
+    listed = body["queries"][0]["result"]["rows"]
+    assert len(listed) == cap
+    assert listed[-1]["MAPPING_NAME"] == "MAP_a"
+    assert listed[-1]["SOURCE_TABLES"] == "HR.KEPT_SOURCE"
+    assert listed[-1]["TARGET_TABLE"] == "DWH.ODS_KEPT"
+    blob = json.dumps(body)
+    assert "MAP_B" not in blob
+    assert "HR.EXTRA_SOURCE" not in blob
+    assert "ODS_EXTRA" not in blob
+    assert "F_EXTRA" not in blob
+    base = "Tables modeled in the current ODI mapping inventory are listed below."
+    assert body["aciklama"] == f"{base} This listing summarises the first {cap} mappings."
+
+
+_MISSING_RANK = object()
+
+
+def _rows_with_bad_rank(rank: object) -> list[dict]:
+    rows = _pair_rows("MAP_OK", 1)
+    for row in rows:
+        row["MAPPING_RANK"] = 1
+    bad = {
+        "MAPPING_ID": 999001,
+        "MAPPING_NAME": "MAP_SENTINEL",
+        "PROJECT_CODE": "ORA_DWH",
+        "PROJECT_NAME": "Oracle DWH",
+        "FOLDER_NAME": "F_SENTINEL",
+        "COMP_NAME": "SENTINEL_SRC",
+        "COMP_TYPE": "DATASTORE",
+        "TABLE_QUALIFIED_NAME": "HR.SENTINEL_SOURCE",
+        "IS_TARGET": "N",
+    }
+    if rank is not _MISSING_RANK:
+        bad["MAPPING_RANK"] = rank
+    rows.append(bad)
+    return rows
+
+
+@pytest.mark.parametrize("surface", ["route", "ai"])
+@pytest.mark.parametrize(
+    "rank",
+    [
+        pytest.param(_MISSING_RANK, id="missing"),
+        pytest.param(None, id="null"),
+        pytest.param("1", id="string"),
+        pytest.param(1.5, id="float"),
+        pytest.param(True, id="bool"),
+    ],
+)
+def test_missing_or_non_integer_mapping_rank_fails_closed(surface, rank, app_client, monkeypatch, caplog):
+    """A bad rank fails the request. The route redacts; the helper does not list mappings."""
+    rows = _rows_with_bad_rank(rank)
+    secret = "MAPPING_ID 999001 HR.SENTINEL_SOURCE"
+
+    if surface == "route":
+        import app as app_module
+
+        def fake_lineage(limit=50):
+            return json.dumps(rows)
+
+        monkeypatch.setattr(app_module, "odi_get_mapping_lineage", fake_lineage)
+        with caplog.at_level(logging.ERROR):
+            response = app_client.get("/api/odi/mappings")
+        assert response.status_code == 500
+        assert response.get_json() == {
+            "error": "Operational read failed.",
+            "error_type": "OdiMappingRankError",
+        }
+        body = response.get_data(as_text=True)
+        assert "MAPPING_ID" not in body
+        assert "HR.SENTINEL_SOURCE" not in body
+        assert "MAP_SENTINEL" not in body
+        assert "MAP_OK" not in body
+        assert secret not in body
+        assert secret not in caplog.text
+        logged = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
+        assert "Operational read failed: OdiMappingRankError" in logged
+        assert all("MAPPING_ID" not in message and "SENTINEL" not in message for message in logged)
+        return
+
+    import ai_helpers
+
+    def fake_lineage(limit=50):
+        return json.dumps(rows)
+
+    monkeypatch.setattr(ai_helpers, "odi_get_mapping_lineage", fake_lineage)
+    with caplog.at_level(logging.ERROR):
+        body = ai_helpers._modeled_tables_answer()
+    assert body["aciklama"] == "This request could not list mappings."
+    assert body["queries"] == []
+    blob = json.dumps(body)
+    assert "MAPPING_ID" not in blob
+    assert "HR.SENTINEL_SOURCE" not in blob
+    assert "MAP_SENTINEL" not in blob
+    assert "MAP_OK" not in blob
+    assert secret not in blob
+    assert secret not in caplog.text

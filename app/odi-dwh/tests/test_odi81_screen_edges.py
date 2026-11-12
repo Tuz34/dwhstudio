@@ -195,8 +195,14 @@ def test_mappings_route_uses_the_same_layer_rules(app_client, monkeypatch):
         app_module,
         "odi_get_mapping_lineage",
         lambda limit=100: json.dumps([
-            _component("MAP_ODI81N_F3_UI", "ODI81N_SRC_F3", "ODI81N_SRC_F3", IS_TARGET="N"),
-            _component("MAP_ODI81N_F3_UI", "EDW_ODI81N_F3_UI", "EDW_ODI81N_F3_UI", IS_TARGET="Y"),
+            {
+                **_component("MAP_ODI81N_F3_UI", "ODI81N_SRC_F3", "ODI81N_SRC_F3", IS_TARGET="N"),
+                "MAPPING_RANK": 1,
+            },
+            {
+                **_component("MAP_ODI81N_F3_UI", "EDW_ODI81N_F3_UI", "EDW_ODI81N_F3_UI", IS_TARGET="Y"),
+                "MAPPING_RANK": 1,
+            },
         ]),
     )
     response = app_client.get("/api/odi/mappings")
