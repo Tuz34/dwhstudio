@@ -185,6 +185,7 @@ def _read_session_row(session_number: int, *, include_error_text: bool = False) 
 
 def _collect_run_evidence(remote: dict[str, Any]) -> dict[str, Any]:
     extra: dict[str, Any] = {}
+    error_class = None
     try:
         if not isinstance(remote, dict):
             return extra
@@ -208,8 +209,10 @@ def _collect_run_evidence(remote: dict[str, Any]) -> dict[str, Any]:
         return extra
     except Exception as exc:
         # The remote run has already happened. History, alerts and the response still run.
-        logger.warning("%s", type(exc).__name__)
-        return extra
+        error_class = type(exc).__name__
+    if type(error_class) is str:
+        logger.warning("%s", error_class)
+    return extra
 
 
 def _state_payload(

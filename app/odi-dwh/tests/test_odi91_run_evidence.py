@@ -1082,3 +1082,162 @@ def test_round4_monotonic_clock_starts_before_thread_start(monkeypatch):
     entered = order.index("enter")
     started = order.index("start")
     assert "mono" in order[entered:started]
+
+
+# --- round 5: a failing log sink must not print the handled message ---------
+
+
+class _RaisingEvidenceStream:
+    """Standard StreamHandler sink: write raises, and the handler swallows it."""
+
+    def write(self, _text):
+        raise OSError("evidence log sink failed")
+
+    def flush(self):
+        return None
+
+
+def _attach_raising_sink(logger_name):
+    handler = logging.StreamHandler(_RaisingEvidenceStream())
+    handler.setLevel(logging.WARNING)
+    logging.getLogger(logger_name).addHandler(handler)
+    return handler
+
+
+def _call_within_budget(target):
+    """Run target on a side thread. No sleep; the join is the budget."""
+    import odi_mcp
+
+    caller = threading.Thread(target=target, daemon=True, name="odi-evidence-budget-probe")
+    started = time.monotonic()
+    caller.start()
+    caller.join(odi_mcp.EVIDENCE_READ_BUDGET_S)
+    elapsed = time.monotonic() - started
+    assert not caller.is_alive(), "evidence call exceeded EVIDENCE_READ_BUDGET_S"
+    assert elapsed < odi_mcp.EVIDENCE_READ_BUDGET_S
+    _finish_evidence_workers()
+
+
+def test_round5_failing_sink_on_connect_hides_the_message(monkeypatch, caplog):
+    """Connect ValueError plus a StreamHandler whose write raises OSError."""
+    import odi_mcp
+
+    script = _evidence_script(connect_error=ValueError(_THREAD_MARKER))
+    _install_evidence_driver(monkeypatch, script)
+    seen, stderr = _install_thread_probe(monkeypatch)
+    handler = _attach_raising_sink("odi_mcp")
+    box = {}
+
+    def invoke():
+        box["row"] = odi_mcp.read_session_run_evidence(311, include_error_text=False)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="odi_mcp"):
+            _call_within_budget(invoke)
+    finally:
+        logging.getLogger("odi_mcp").removeHandler(handler)
+    assert box["row"] is None
+    assert script["sql"] == []
+    assert script["closed"] is False
+    assert _odi_mcp_warnings(caplog) == ["ValueError"]
+    _assert_thread_marker_hidden(seen, stderr, caplog)
+    assert _both_evidence_slots_free(odi_mcp)
+
+
+def test_round5_failing_sink_on_close_hides_the_message(monkeypatch, caplog):
+    """Close failure inside finally. The validated row stays. The marker does not."""
+    import odi_mcp
+
+    script = _evidence_script(close_error=OSError(_THREAD_MARKER))
+    _install_evidence_driver(monkeypatch, script)
+    seen, stderr = _install_thread_probe(monkeypatch)
+    handler = _attach_raising_sink("odi_mcp")
+    box = {}
+
+    def invoke():
+        box["row"] = odi_mcp.read_session_run_evidence(311, include_error_text=False)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="odi_mcp"):
+            _call_within_budget(invoke)
+    finally:
+        logging.getLogger("odi_mcp").removeHandler(handler)
+    assert isinstance(box["row"], dict)
+    assert box["row"]["SESS_NO"] == 311
+    assert box["row"]["PROCESSED_ROWS"] == 10
+    assert script["closed"] is True
+    assert _THREAD_MARKER not in json.dumps(box["row"])
+    assert _odi_mcp_warnings(caplog) == ["OSError"]
+    _assert_thread_marker_hidden(seen, stderr, caplog)
+    assert _both_evidence_slots_free(odi_mcp)
+
+
+def test_round5_failing_sink_on_thread_start_hides_the_message(monkeypatch, caplog):
+    import odi_mcp
+
+    real_start = threading.Thread.start
+
+    def boom(self):
+        if self.name == "odi-evidence-read":
+            raise RuntimeError(_THREAD_MARKER)
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    seen, stderr = _install_thread_probe(monkeypatch)
+    handler = _attach_raising_sink("odi_mcp")
+    box = {}
+
+    def invoke():
+        box["row"] = odi_mcp.read_session_run_evidence(311, include_error_text=False)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="odi_mcp"):
+            _call_within_budget(invoke)
+    finally:
+        logging.getLogger("odi_mcp").removeHandler(handler)
+    assert box["row"] is None
+    assert _odi_mcp_warnings(caplog) == ["RuntimeError"]
+    _assert_thread_marker_hidden(seen, stderr, caplog)
+    assert _both_evidence_slots_free(odi_mcp)
+
+
+def test_round5_failing_sink_at_the_service_boundary_hides_the_message(monkeypatch, caplog):
+    import odi_mcp
+
+    monkeypatch.setattr(
+        service,
+        "_read_session_row",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError(_THREAD_MARKER)),
+    )
+    seen, stderr = _install_thread_probe(monkeypatch)
+    handler = _attach_raising_sink("mapping_run_service")
+    try:
+        with caplog.at_level(logging.WARNING, logger="mapping_run_service"):
+            outcome = _run_service_within_budget(monkeypatch, with_session(failed_run()))
+    finally:
+        logging.getLogger("mapping_run_service").removeHandler(handler)
+    assert outcome.status_code == 502
+    assert outcome.payload["status"] == "failed"
+    assert outcome.payload["session_number"] == 311
+    assert "counts" not in outcome.payload
+    assert "session_error_code" not in outcome.payload
+    assert _THREAD_MARKER not in json.dumps(outcome.payload)
+    service_warnings = [
+        record.message for record in caplog.records if record.name == "mapping_run_service"
+    ]
+    assert service_warnings == ["ValueError"]
+    _assert_thread_marker_hidden(seen, stderr, caplog)
+    assert _both_evidence_slots_free(odi_mcp)
+
+
+def test_round5_worker_bytecode_does_not_call_logger():
+    """Source-independent: the worker code object never names a logger."""
+    import odi_mcp
+
+    forbidden = {"logger", "logging", "warning", "exception", "debug", "info", "critical"}
+    codes = [odi_mcp._evidence_worker.__code__]
+    codes.extend(
+        const for const in odi_mcp._evidence_worker.__code__.co_consts if hasattr(const, "co_names")
+    )
+    for code in codes:
+        assert forbidden.isdisjoint(code.co_names)

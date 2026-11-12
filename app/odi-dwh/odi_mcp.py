@@ -143,7 +143,7 @@ def _evidence_worker(
     box: dict,
     done: threading.Event,
 ) -> None:
-    """Own the connection. No Flask context. Log only an exception class name."""
+    """Own the connection. No Flask context. No logger call on this thread."""
     conn = None
     try:
         try:
@@ -164,17 +164,18 @@ def _evidence_worker(
             )
         except (oracledb.Error, OSError) as exc:
             box["result"] = None
-            logger.warning("%s", type(exc).__name__)
+            box["driver_error_class"] = type(exc).__name__
         finally:
             try:
                 if conn is not None:
                     conn.close()
             except (oracledb.Error, OSError) as exc:
-                logger.warning("%s", type(exc).__name__)
+                box["close_error_class"] = type(exc).__name__
     except Exception as exc:
-        # Thread boundary. The default excepthook prints the message.
+        # Thread boundary. A plain assignment cannot raise or print. Logging
+        # here would chain this exception into stderr when the sink fails.
         # A close failure must not discard a row already stored on the box.
-        logger.warning("%s", type(exc).__name__)
+        box["error_class"] = type(exc).__name__
     finally:
         done.set()
         _EVIDENCE_READ_SLOTS.release()
@@ -216,20 +217,31 @@ def read_session_run_evidence(session_no: int, *, include_error_text: bool) -> d
         name="odi-evidence-read",
     )
     started = False
+    start_error = None
+    completed = False
     try:
         try:
             worker.start()
         except RuntimeError as exc:
-            logger.warning("%s", type(exc).__name__)
-            return None
-        started = True
-        if not _wait_evidence(done, EVIDENCE_READ_BUDGET_S, started_at=started_at):
-            return None
-        result = box.get("result")
-        return result if isinstance(result, dict) else None
+            start_error = type(exc).__name__
+        else:
+            started = True
+            completed = _wait_evidence(done, EVIDENCE_READ_BUDGET_S, started_at=started_at)
     finally:
         if not started:
             _EVIDENCE_READ_SLOTS.release()
+    # No exception is being handled. A failing sink has nothing to chain.
+    if start_error is not None:
+        logger.warning("%s", start_error)
+        return None
+    if not completed:
+        return None
+    for key in ("driver_error_class", "close_error_class", "error_class"):
+        name = box.get(key)
+        if type(name) is str:
+            logger.warning("%s", name)
+    result = box.get("result")
+    return result if isinstance(result, dict) else None
 
 
 @mcp.tool()
