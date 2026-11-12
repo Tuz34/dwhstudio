@@ -4,6 +4,14 @@ import re
 
 IKM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ()._-]{0,127}$")
 DEFAULT_CONTROL_APPEND_IKM = "IKM Oracle Insert"
+IKM_PUBLIC_VALIDATION_SENTENCES = (
+    "ikm_name is invalid.",
+    "ikm_name is not in the approved IKM list (ODI_APPROVED_IKMS).",
+    "CONTROL_APPEND needs an insert IKM in the approved IKM list.",
+    "Specify ikm_name: the first IKM priority is not one unambiguous approved name.",
+    "The configured ikm_name is invalid.",
+    "CONTROL_APPEND cannot use a merge or update IKM.",
+)
 
 
 def resolve_approved_ikm(
@@ -15,14 +23,14 @@ def resolve_approved_ikm(
     }
     if requested not in (None, ""):
         if not isinstance(requested, str) or not IKM_NAME_RE.fullmatch(requested.strip()):
-            raise ValueError("ikm_name is invalid.")
+            raise ValueError(IKM_PUBLIC_VALIDATION_SENTENCES[0])
         selected = approved.get(requested.strip().lower())
         if selected is None:
-            raise ValueError("ikm_name is not in the approved IKM list (ODI_APPROVED_IKMS).")
+            raise ValueError(IKM_PUBLIC_VALIDATION_SENTENCES[1])
     elif integration_type == "CONTROL_APPEND":
         selected = approved.get(DEFAULT_CONTROL_APPEND_IKM.lower())
         if selected is None:
-            raise ValueError("CONTROL_APPEND needs an insert IKM in the approved IKM list.")
+            raise ValueError(IKM_PUBLIC_VALIDATION_SENTENCES[2])
     else:
         # Preserve the first configured preference, but resolve it locally and exactly.
         # Availability must never make the repository silently choose a different KM.
@@ -31,12 +39,12 @@ def resolve_approved_ikm(
         selected = approved.get(first)
         if selected is None:
             if len(matches) != 1:
-                raise ValueError("Specify ikm_name: the first IKM priority is not one unambiguous approved name.")
+                raise ValueError(IKM_PUBLIC_VALIDATION_SENTENCES[3])
             selected = matches[0]
     if not IKM_NAME_RE.fullmatch(selected):
-        raise ValueError("The configured ikm_name is invalid.")
+        raise ValueError(IKM_PUBLIC_VALIDATION_SENTENCES[4])
     if integration_type == "CONTROL_APPEND" and is_update_ikm(selected):
-        raise ValueError("CONTROL_APPEND cannot use a merge or update IKM.")
+        raise ValueError(IKM_PUBLIC_VALIDATION_SENTENCES[5])
     return selected
 
 

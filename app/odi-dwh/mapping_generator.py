@@ -35,7 +35,13 @@ from config import (
 )
 from datamart_contract import DATAMART_REQUIRES_TYPE2_CODE, DATAMART_TYPE2_ONLY_WARNING
 from exceptions import MappingGenerationError
-from ikm_policy import is_update_ikm, normalize_repository_preflight, resolve_approved_ikm, verified_source_identity
+from ikm_policy import (
+    IKM_PUBLIC_VALIDATION_SENTENCES,
+    is_update_ikm,
+    normalize_repository_preflight,
+    resolve_approved_ikm,
+    verified_source_identity,
+)
 from mapping_state_manager import redact_sensitive_text
 from skip_sentences import (
     AUDIT_PRESERVATION_DOES_NOT_APPLY,
@@ -1746,12 +1752,18 @@ class MappingGenerator:
             if integration_type != "IU":
                 raise self._public_validation_error("An SKEY lookup mapping needs integration_type IU.")
         raw_ikm = params.get("ikm_name")
-        if raw_ikm not in (None, ""):
-            resolve_approved_ikm(raw_ikm, integration_type, ODI_APPROVED_IKMS, ODI_IKM_PRIORITY)
-        effective = resolve_approved_ikm(
-            SKEY_LOOKUP_IKM if is_skey_lookup else raw_ikm,
-            integration_type, ODI_APPROVED_IKMS, ODI_IKM_PRIORITY,
-        )
+        try:
+            if raw_ikm not in (None, ""):
+                resolve_approved_ikm(raw_ikm, integration_type, ODI_APPROVED_IKMS, ODI_IKM_PRIORITY)
+            effective = resolve_approved_ikm(
+                SKEY_LOOKUP_IKM if is_skey_lookup else raw_ikm,
+                integration_type, ODI_APPROVED_IKMS, ODI_IKM_PRIORITY,
+            )
+        except ValueError as exc:
+            sentence = next((item for item in IKM_PUBLIC_VALIDATION_SENTENCES if item == str(exc)), None)
+            if sentence is not None:
+                raise self._public_validation_error(sentence) from exc
+            raise
         validated["ikm_name"] = effective
         if (
             integration_type == "IU"
