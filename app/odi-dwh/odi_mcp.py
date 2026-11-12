@@ -83,29 +83,78 @@ def odi_get_recent_sessions(limit: int = 20) -> str:
         return safe_error_json("ODI sessions read", e)
 
 
-def read_odi_session(session_no: int) -> dict | None:
-    """One SELECT of the SNP_SESSION row used by odi_get_recent_sessions."""
-    if type(session_no) is not int or isinstance(session_no, bool) or session_no <= 0:
+# oracledb 2.4.1: connect(tcp_connect_timeout) is seconds; Connection.call_timeout is
+# milliseconds for one round-trip. 1s + 2s + 2s covers connect and both statements.
+EVIDENCE_READ_BUDGET_S = 5
+EVIDENCE_CONNECT_TIMEOUT_S = 1.0
+EVIDENCE_CALL_TIMEOUT_MS = 2000
+_EVIDENCE_MESSAGE_CHARS = 4000
+_EVIDENCE_MAX_SAFE_INTEGER = 2**53 - 1
+
+
+def read_session_run_evidence(session_no: int, *, include_error_text: bool) -> dict | None:
+    """Bounded SNP_SESSION read. Counters always; message prefix only when asked."""
+    if (
+        type(session_no) is not int
+        or isinstance(session_no, bool)
+        or session_no <= 0
+        or session_no > _EVIDENCE_MAX_SAFE_INTEGER
+    ):
         return None
-    sql = f"""
-        SELECT
-            SESS_NO AS SESSION_NO,
-            SESS_NAME AS SESSION_NAME,
-            SESS_BEG AS START_TIME,
-            SESS_END AS END_TIME,
-            SESS_STATUS AS STATUS,
-            SESS_MESS AS ERROR_MESSAGE,
-            NB_ROW AS PROCESSED_ROWS,
-            NB_INS AS INSERTED_ROWS,
-            NB_UPD AS UPDATED_ROWS,
-            NB_ERR AS ERROR_ROWS
-        FROM {ODI_REPO_SCHEMA}.SNP_SESSION
-        WHERE SESS_NO = :sess_no
+    schema = ODI_REPO_SCHEMA
+    counter_sql = f"""
+        SELECT SESS_NO,
+               NB_ROW AS PROCESSED_ROWS,
+               NB_INS AS INSERTED_ROWS,
+               NB_UPD AS UPDATED_ROWS,
+               NB_ERR AS ERROR_ROWS
+          FROM {schema}.SNP_SESSION
+         WHERE SESS_NO = :sess_no
+         FETCH FIRST 2 ROWS ONLY
     """
-    rows = execute_odi_lob_query(sql, {"sess_no": session_no})
-    if not rows:
-        return None
-    return rows[0]
+    error_sql = f"""
+        SELECT SESS_NO,
+               SUBSTR(SESS_MESS, 1, {_EVIDENCE_MESSAGE_CHARS}) AS ERROR_MESSAGE
+          FROM {schema}.SNP_SESSION
+         WHERE SESS_NO = :sess_no
+         FETCH FIRST 2 ROWS ONLY
+    """
+    conn = oracledb.connect(
+        user=ODI_REPO_USER,
+        password=ODI_REPO_PASSWORD,
+        dsn=ODI_REPO_DSN or ORACLE_DSN,
+        tcp_connect_timeout=EVIDENCE_CONNECT_TIMEOUT_S,
+        retry_count=0,
+    )
+    try:
+        conn.call_timeout = EVIDENCE_CALL_TIMEOUT_MS
+        cursor = conn.cursor()
+        cursor.prefetchrows = 2
+
+        def one_row(sql: str) -> dict | None:
+            cursor.execute(sql, {"sess_no": session_no})
+            names = [item[0] for item in cursor.description]
+            fetched = cursor.fetchmany(2)
+            if len(fetched) != 1:
+                return None
+            row = {names[index]: fetched[0][index] for index in range(len(names))}
+            found = row.get("SESS_NO")
+            if type(found) is not int or isinstance(found, bool) or found != session_no:
+                return None
+            return row
+
+        counters = one_row(counter_sql)
+        if counters is None:
+            return None
+        if include_error_text:
+            message_row = one_row(error_sql)
+            if message_row is not None:
+                text = message_row.get("ERROR_MESSAGE")
+                if isinstance(text, str) and len(text) <= _EVIDENCE_MESSAGE_CHARS:
+                    counters["ERROR_MESSAGE"] = text
+        return counters
+    finally:
+        conn.close()
 
 
 @mcp.tool()

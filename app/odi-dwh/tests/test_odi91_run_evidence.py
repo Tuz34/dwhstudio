@@ -6,6 +6,7 @@ Offline only. These tests must fail on the pre-change contract and service.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -76,7 +77,10 @@ def _options():
 def _run(monkeypatch, remote, reader=None):
     setup_pipeline(monkeypatch, run=remote)
     if reader is not None:
-        monkeypatch.setattr(service, "_read_session_row", reader)
+        def adapted(session_number, **_kwargs):
+            return reader(session_number)
+
+        monkeypatch.setattr(service, "_read_session_row", adapted)
     return service.execute_mapping_run(Mock(), _options())
 
 
@@ -331,11 +335,322 @@ def test_session_reader_reuses_odi_mcp_select_list():
     if not ODI_MCP.is_file():
         pytest.skip("odi_mcp.py is not in this tree")
     text = ODI_MCP.read_text(encoding="utf-8")
-    assert "def read_odi_session(" in text
-    assert "NB_ROW AS PROCESSED_ROWS" in text
-    assert "NB_INS AS INSERTED_ROWS" in text
-    assert "NB_UPD AS UPDATED_ROWS" in text
-    assert "NB_ERR AS ERROR_ROWS" in text
-    assert "SESS_MESS AS ERROR_MESSAGE" in text
-    assert "WHERE SESS_NO = :sess_no" in text
-    assert "INSERT " not in text.split("def read_odi_session")[1].split("@mcp.tool")[0]
+    assert "def read_session_run_evidence(" in text
+    body = text.split("def read_session_run_evidence", 1)[1].split("\n@", 1)[0]
+    assert "NB_ROW AS PROCESSED_ROWS" in body
+    assert "NB_INS AS INSERTED_ROWS" in body
+    assert "NB_UPD AS UPDATED_ROWS" in body
+    assert "NB_ERR AS ERROR_ROWS" in body
+    assert "SUBSTR(SESS_MESS, 1, {_EVIDENCE_MESSAGE_CHARS})" in body
+    assert "_EVIDENCE_MESSAGE_CHARS = 4000" in text
+    assert "WHERE SESS_NO = :sess_no" in body
+    assert "INSERT " not in body
+    assert "UPDATE " not in body
+    assert "DELETE " not in body
+
+
+# --- round 2: review rulings ------------------------------------------------
+
+_LIST_JSX = ROOT / "frontend" / "src" / "components" / "dataops" / "MappingList.jsx"
+_PANEL_JS = ROOT / "frontend" / "src" / "components" / "dataops" / "mappingRunOutcome.js"
+_ARABIC_CODE = "ORA-\u0660\u0660\u0669\u0663\u0662"
+_UNSAFE_INTEGERS = (2**53, 10**5000)
+_COUNT_COLUMNS = ("PROCESSED_ROWS", "INSERTED_ROWS", "UPDATED_ROWS", "ERROR_ROWS")
+
+
+def _evidence_script(**overrides):
+    script = {
+        "sql": [],
+        "params": [],
+        "events": [],
+        "fetchmany": [],
+        "fetchall": 0,
+        "rows": [(311, 10, 8, 2, 0)],
+        "error_rows": [(311, HOSTILE_ERROR)],
+        "closed": False,
+    }
+    script.update(overrides)
+    return script
+
+
+def _install_evidence_driver(monkeypatch, script):
+    """Fake oracledb connection. Records driver limits and never sleeps."""
+    import odi_mcp
+
+    class Cursor:
+        def __init__(self):
+            self.prefetchrows = None
+            self.last_sql = ""
+
+        def execute(self, sql, params=None):
+            self.last_sql = sql
+            script["sql"].append(sql)
+            script["params"].append(params)
+            script["events"].append("execute")
+            error = script.get("execute_error")
+            if error is not None:
+                raise error
+
+        @property
+        def description(self):
+            if "SUBSTR" in self.last_sql:
+                return [("SESS_NO",), ("ERROR_MESSAGE",)]
+            return [("SESS_NO",), *((name,) for name in _COUNT_COLUMNS)]
+
+        def _payload(self):
+            if "SUBSTR" in self.last_sql:
+                return script["error_rows"]
+            return script["rows"]
+
+        def fetchmany(self, size):
+            script["fetchmany"].append(size)
+            return list(self._payload())[:size]
+
+        def fetchall(self):
+            script["fetchall"] += 1
+            return list(self._payload())
+
+    class Connection:
+        def __init__(self):
+            self._call_timeout = 0
+
+        @property
+        def call_timeout(self):
+            return self._call_timeout
+
+        @call_timeout.setter
+        def call_timeout(self, value):
+            self._call_timeout = value
+            script["call_timeout"] = value
+            script["events"].append("call_timeout")
+
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            script["closed"] = True
+
+    def connect(*_args, **kwargs):
+        script["tcp_connect_timeout"] = kwargs.get("tcp_connect_timeout", "missing")
+        script["events"].append("connect")
+        error = script.get("connect_error")
+        if error is not None:
+            raise error
+        return Connection()
+
+    monkeypatch.setattr(odi_mcp.oracledb, "connect", connect)
+
+
+def _assert_budget(script, *, require_call_timeout):
+    timeout = script.get("tcp_connect_timeout", "missing")
+    assert isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+    assert 0 < timeout <= 5
+    if require_call_timeout:
+        call_ms = script.get("call_timeout", 0)
+        assert isinstance(call_ms, int) and not isinstance(call_ms, bool)
+        assert call_ms > 0
+        assert timeout + 2 * (call_ms / 1000) <= 5
+
+
+def test_round2_done_read_is_bounded_and_skips_the_message(monkeypatch):
+    script = _evidence_script()
+    _install_evidence_driver(monkeypatch, script)
+    outcome = _run(monkeypatch, with_session(done()))
+    _assert_budget(script, require_call_timeout=True)
+    assert script["events"][:3] == ["connect", "call_timeout", "execute"]
+    assert script["closed"] is True
+    assert len(script["sql"]) == 1
+    sql = script["sql"][0]
+    assert "SESS_MESS" not in sql
+    assert "SESS_NAME" not in sql
+    assert "SESS_BEG" not in sql
+    assert "SESS_END" not in sql
+    assert "SESS_STATUS" not in sql
+    for column in ("SESS_NO", "NB_ROW", "NB_INS", "NB_UPD", "NB_ERR"):
+        assert column in sql
+    assert script["fetchmany"] == [2]
+    assert script["fetchall"] == 0
+    assert script["params"] == [{"sess_no": 311}]
+    assert outcome.status_code == 200
+    assert outcome.payload["counts"] == COUNTS
+    assert "session_error_code" not in outcome.payload
+    legacy = ODI_MCP.read_text(encoding="utf-8").split("def execute_odi_lob_query", 1)[1]
+    legacy = legacy.split("def ", 1)[0]
+    assert "tcp_connect_timeout" not in legacy
+    assert "call_timeout" not in legacy
+
+
+def test_round2_failed_read_cuts_the_message_in_sql(monkeypatch):
+    script = _evidence_script()
+    _install_evidence_driver(monkeypatch, script)
+    outcome = _run(monkeypatch, with_session(failed_run()))
+    _assert_budget(script, require_call_timeout=True)
+    assert len(script["sql"]) == 2
+    assert "SESS_MESS" not in script["sql"][0]
+    error_sql = script["sql"][1]
+    assert "SUBSTR(SESS_MESS, 1, 4000)" in error_sql
+    assert "SESS_NO" in error_sql
+    assert "NB_ROW" not in error_sql
+    assert script["fetchmany"] == [2, 2]
+    assert outcome.status_code == 502
+    assert outcome.payload["session_error_code"] == "ORA-00932"
+    assert outcome.payload["counts"] == COUNTS
+    assert HOSTILE_ERROR not in json.dumps(outcome.payload)
+
+
+def test_round2_stalled_connect_is_evidence_absent(monkeypatch):
+    script = _evidence_script(connect_error=TimeoutError("stalled connect"))
+    _install_evidence_driver(monkeypatch, script)
+    outcome = _run(monkeypatch, with_session(done()))
+    _assert_budget(script, require_call_timeout=False)
+    assert script["sql"] == []
+    assert script.get("call_timeout") is None
+    assert outcome.status_code == 200
+    assert outcome.payload["status"] == "SUCCESS"
+    assert outcome.payload["session_number"] == 311
+    assert "counts" not in outcome.payload
+    assert "session_error_code" not in outcome.payload
+
+
+def test_round2_stalled_execute_is_evidence_absent(monkeypatch):
+    script = _evidence_script(execute_error=TimeoutError("stalled execute"))
+    _install_evidence_driver(monkeypatch, script)
+    outcome = _run(monkeypatch, with_session(failed_run()))
+    _assert_budget(script, require_call_timeout=True)
+    assert script["closed"] is True
+    assert outcome.status_code == 502
+    assert outcome.payload["status"] == "failed"
+    assert outcome.payload["remote"]["error_code"] == "ScenarioRunFailed"
+    assert outcome.payload["session_number"] == 311
+    assert "counts" not in outcome.payload
+    assert "session_error_code" not in outcome.payload
+
+
+@pytest.mark.parametrize("rows", [
+    [],
+    [(311, 1, 0, 0, 0), (311, 99, 0, 0, 0)],
+    [(999, 10, 8, 2, 0)],
+    [("311", 10, 8, 2, 0)],
+])
+def test_round2_row_must_be_exactly_one_matching_session(monkeypatch, rows):
+    script = _evidence_script(rows=rows)
+    _install_evidence_driver(monkeypatch, script)
+    outcome = _run(monkeypatch, with_session(done()))
+    assert outcome.status_code == 200
+    assert outcome.payload["session_number"] == 311
+    assert "counts" not in outcome.payload
+    assert script["fetchmany"] == [2]
+    assert script["fetchall"] == 0
+
+
+def test_round2_mismatched_error_row_omits_only_the_code(monkeypatch):
+    script = _evidence_script(error_rows=[(999, HOSTILE_ERROR)])
+    _install_evidence_driver(monkeypatch, script)
+    outcome = _run(monkeypatch, with_session(failed_run()))
+    assert len(script["sql"]) == 2
+    assert outcome.status_code == 502
+    assert outcome.payload["counts"] == COUNTS
+    assert "session_error_code" not in outcome.payload
+    assert HOSTILE_ERROR not in json.dumps(outcome.payload)
+
+
+@pytest.mark.parametrize("where,exc_type", [
+    ("counts", LookupError),
+    ("reader", Exception),
+])
+def test_round2_collector_exceptions_still_persist_and_alert(monkeypatch, caplog, where, exc_type):
+    events = setup_pipeline(monkeypatch, run=with_session(failed_run()))
+    monkeypatch.setattr(service, "_read_session_row", lambda *_a, **_k: dict(READER_ROW))
+    if where == "counts":
+        monkeypatch.setattr(
+            service, "_counts_from_row", lambda _row: (_ for _ in ()).throw(exc_type("LEAKED-TOKEN")),
+        )
+    else:
+        monkeypatch.setattr(
+            service, "_read_session_row", lambda *_a, **_k: (_ for _ in ()).throw(exc_type("LEAKED-TOKEN")),
+        )
+    with caplog.at_level(logging.WARNING, logger="mapping_run_service"):
+        outcome = service.execute_mapping_run(Mock(), _options())
+    assert events == ["health", "options", "generate", "run", "persist", "alert"]
+    assert outcome.status_code == 502
+    assert outcome.payload["status"] == "failed"
+    assert outcome.payload["remote"]["error_code"] == "ScenarioRunFailed"
+    assert outcome.payload["session_number"] == 311
+    assert "counts" not in outcome.payload
+    assert "session_error_code" not in outcome.payload
+    assert [record.message for record in caplog.records] == [exc_type.__name__]
+    assert "LEAKED-TOKEN" not in caplog.text
+
+
+def test_round2_error_code_rejects_non_ascii_digits():
+    assert service.extract_session_error_code(f"failed {_ARABIC_CODE} after") is None
+    persisted = state_module._persistable_state({**PRE_CHANGE_STATE, "session_error_code": _ARABIC_CODE})
+    assert "session_error_code" not in persisted
+    shape = "ORA-[0-9]{5}|ODI-[0-9]{4,5}"
+    service_src = (ROOT / "mapping_run_service.py").read_text(encoding="utf-8")
+    state_src = (ROOT / "mapping_state_manager.py").read_text(encoding="utf-8")
+    panel_src = _PANEL_JS.read_text(encoding="utf-8")
+    assert shape in service_src
+    assert shape in state_src
+    assert shape in panel_src
+
+
+def test_round2_unsafe_integers_are_rejected_at_each_layer(monkeypatch):
+    calls = []
+    monkeypatch.setattr(service, "_read_session_row", lambda *args, **_kwargs: calls.append(args) or dict(READER_ROW))
+    for number in _UNSAFE_INTEGERS:
+        parsed = contract.parse(with_session(done(), number), "run")
+        assert parsed["status"] == "unknown"
+        assert parsed["error_code"] == "RemoteOutputInvalid"
+        assert parsed.get("session_number") is None
+        calls.clear()
+        assert service._collect_run_evidence({"session_number": number}) == {}
+        assert calls == []
+        for column in _COUNT_COLUMNS:
+            row = dict(READER_ROW)
+            row[column] = number
+            assert service._counts_from_row(row) is None
+        for key in ("processed", "inserted", "updated", "errors"):
+            counts = dict(COUNTS)
+            counts[key] = number
+            persisted = state_module._persistable_state({
+                **PRE_CHANGE_STATE, "session_number": number, "counts": counts,
+            })
+            assert "session_number" not in persisted
+            assert "counts" not in persisted
+    parsed_raw = contract.parse(json.dumps(with_session(done(), 2**53)), "run")
+    assert parsed_raw["status"] == "unknown"
+    assert parsed_raw["error_code"] == "RemoteOutputInvalid"
+    accepted = contract.parse(with_session(done(), 2**53 - 1), "run")
+    assert accepted["status"] == "passed"
+    assert accepted["session_number"] == 2**53 - 1
+    max_row = dict(READER_ROW)
+    max_row["PROCESSED_ROWS"] = 2**53 - 1
+    assert service._counts_from_row(max_row)["processed"] == 2**53 - 1
+    kept = state_module._persistable_state({
+        **PRE_CHANGE_STATE,
+        "session_number": 2**53 - 1,
+        "counts": {**COUNTS, "processed": 2**53 - 1},
+    })
+    assert kept["session_number"] == 2**53 - 1
+    assert kept["counts"]["processed"] == 2**53 - 1
+
+
+def test_round2_refresh_shows_loading_and_clears_a_missing_selection():
+    """Source contract: MappingList.jsx is not mounted in these tests."""
+    content = _LIST_JSX.read_text(encoding="utf-8")
+    assert "setLoading(true)" not in content
+    assert "const [loading, setLoading] = useState(true);" in content
+    assert "setRefreshing(true)" in content
+    assert "Refreshing..." in content
+    assert "aria-busy={refreshing}" in content
+    placeholder, layout = content.split("{loading ?", 1)[1].split(") : (", 1)
+    assert "Loading..." in placeholder
+    assert "overflow-y-auto" not in placeholder
+    assert "flex-1 overflow-y-auto custom-scrollbar space-y-6" in layout
+    start = content.index("const loadMappings = useCallback")
+    body = content[start:content.index("}, [loadDetail, showToast]);", start)]
+    assert "selectedNameRef.current" in body
+    assert "setDetail(null)" in body
+    assert "setRunDialog" in body
+    assert "setLoading(true)" not in body

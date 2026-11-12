@@ -13,6 +13,7 @@ ERRORS = frozenset({
     "RemoteProcessFailed", "RemoteTimeout",
 })
 STAGES = frozenset({"approval", "validation", "configuration", "health", "ownership", "run", "completed"})
+_MAX_SAFE_INTEGER = 2**53 - 1
 
 
 def result(action: str, *, status: str = "blocked", stage: str = "configuration",
@@ -86,7 +87,9 @@ def parse(value: object, action: str) -> dict:
         return invalid
     if "session_number" in payload:
         number = payload["session_number"]
-        if number is not None and (type(number) is not int or isinstance(number, bool) or number <= 0):
+        if number is not None and (
+            type(number) is not int or isinstance(number, bool) or number <= 0 or number > _MAX_SAFE_INTEGER
+        ):
             return invalid
     started = payload["run_may_have_started"]
     if payload["side_effects"] != started or (started and not payload["agent_contact_attempted"]):

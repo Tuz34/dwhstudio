@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ import oracledb
 
 import remote_run_contract
 import repository_write_contract
+
+logger = logging.getLogger(__name__)
 
 
 class MappingRunSuccess(TypedDict):
@@ -140,7 +143,8 @@ def _scenario_ready(value: object, name: str, version: str) -> bool:
             and all(isinstance(check, dict) and check.get("status") == "pass" for check in checks))
 
 
-_SESSION_ERROR_CODE_RE = re.compile(r"\b(?:ORA-\d{5}|ODI-\d{4,5})\b")
+_MAX_SAFE_INTEGER = 2**53 - 1
+_SESSION_ERROR_CODE_RE = re.compile(r"\b(?:ORA-[0-9]{5}|ODI-[0-9]{4,5})\b")
 _COUNT_COLUMNS = (
     ("processed", "PROCESSED_ROWS"),
     ("inserted", "INSERTED_ROWS"),
@@ -163,40 +167,49 @@ def _counts_from_row(row: dict[str, Any]) -> dict[str, int] | None:
         value = row.get(column)
         if value is None:
             value = row.get(column.lower())
-        if type(value) is not int or isinstance(value, bool) or value < 0:
+        if type(value) is not int or isinstance(value, bool) or value < 0 or value > _MAX_SAFE_INTEGER:
             return None
         counts[name] = value
     return counts
 
 
-def _read_session_row(session_number: int) -> dict[str, Any] | None:
-    from odi_mcp import read_odi_session
+def _usable_session_number(value: object) -> bool:
+    return type(value) is int and not isinstance(value, bool) and 0 < value <= _MAX_SAFE_INTEGER
 
-    return read_odi_session(session_number)
+
+def _read_session_row(session_number: int, *, include_error_text: bool = False) -> dict[str, Any] | None:
+    from odi_mcp import read_session_run_evidence
+
+    return read_session_run_evidence(session_number, include_error_text=include_error_text)
 
 
 def _collect_run_evidence(remote: dict[str, Any]) -> dict[str, Any]:
     extra: dict[str, Any] = {}
-    if not isinstance(remote, dict):
-        return extra
-    session_number = remote.get("session_number")
-    if type(session_number) is not int or isinstance(session_number, bool) or session_number <= 0:
-        return extra
-    extra["session_number"] = session_number
     try:
-        row = _read_session_row(session_number)
-    except (oracledb.Error, OSError, TypeError, ValueError, KeyError, AttributeError, RuntimeError, ImportError):
+        if not isinstance(remote, dict):
+            return extra
+        session_number = remote.get("session_number")
+        if not _usable_session_number(session_number):
+            return extra
+        extra["session_number"] = session_number
+        row = _read_session_row(
+            session_number,
+            include_error_text=remote.get("error_code") == "ScenarioRunFailed",
+        )
+        if not isinstance(row, dict):
+            return extra
+        counts = _counts_from_row(row)
+        if counts is not None:
+            extra["counts"] = counts
+        if remote.get("error_code") == "ScenarioRunFailed":
+            code = extract_session_error_code(row.get("ERROR_MESSAGE") or row.get("error_message"))
+            if code is not None:
+                extra["session_error_code"] = code
         return extra
-    if not isinstance(row, dict):
+    except Exception as exc:
+        # The remote run has already happened. History, alerts and the response still run.
+        logger.warning("%s", type(exc).__name__)
         return extra
-    counts = _counts_from_row(row)
-    if counts is not None:
-        extra["counts"] = counts
-    if remote.get("error_code") == "ScenarioRunFailed":
-        code = extract_session_error_code(row.get("ERROR_MESSAGE") or row.get("error_message"))
-        if code is not None:
-            extra["session_error_code"] = code
-    return extra
 
 
 def _state_payload(

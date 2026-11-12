@@ -33,8 +33,9 @@ _SENSITIVE_PATTERNS = [
     re.compile(r"(?i)jdbc:oracle:thin:@[^\s,;]+"),
 ]
 
+_MAX_SAFE_INTEGER = 2**53 - 1
 _EVIDENCE_FIELDS = frozenset({"session_number", "counts", "session_error_code"})
-_SESSION_ERROR_CODE_RE = re.compile(r"^(?:ORA-\d{5}|ODI-\d{4,5})$")
+_SESSION_ERROR_CODE_RE = re.compile(r"^(?:ORA-[0-9]{5}|ODI-[0-9]{4,5})$")
 PERSISTED_STATE_FIELDS = frozenset({
     "batch_id",
     "mapping_name",
@@ -100,7 +101,7 @@ def _persistable_counts(value: Any) -> dict[str, int] | None:
     counts: dict[str, int] = {}
     for key in ("processed", "inserted", "updated", "errors"):
         number = value.get(key)
-        if type(number) is not int or isinstance(number, bool) or number < 0:
+        if type(number) is not int or isinstance(number, bool) or number < 0 or number > _MAX_SAFE_INTEGER:
             return None
         counts[key] = number
     if set(value) != set(counts):
@@ -115,7 +116,11 @@ def _persistable_state(state: dict[str, Any]) -> dict[str, Any]:
         if key in state:
             persisted[key] = _metadata_scalar(state.get(key))
     session_number = state.get("session_number")
-    if type(session_number) is int and not isinstance(session_number, bool) and session_number > 0:
+    if (
+        type(session_number) is int
+        and not isinstance(session_number, bool)
+        and 0 < session_number <= _MAX_SAFE_INTEGER
+    ):
         persisted["session_number"] = session_number
     counts = _persistable_counts(state.get("counts"))
     if counts is not None:

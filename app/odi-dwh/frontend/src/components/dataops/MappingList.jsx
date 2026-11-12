@@ -110,6 +110,7 @@ export function MappingList() {
   const dispatch = useDispatch();
   const [mappings, setMappings] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
   const [detail, setDetail] = useState(null);
   const [runStatus, setRunStatus] = useState({});
@@ -164,6 +165,17 @@ export function MappingList() {
       });
       setMappings(unique);
       setLastRuns((prev) => reconcileLastRuns(prev, unique.map((row) => row.MAPPING_NAME)));
+      const selected = selectedNameRef.current;
+      if (selected && !unique.some((row) => row.MAPPING_NAME === selected)) {
+        setDetail(null);
+        setRunDialog((current) => (current?.mappingName === selected ? null : current));
+        setRunStatus((prev) => {
+          if (!Object.prototype.hasOwnProperty.call(prev, selected)) return prev;
+          const next = { ...prev };
+          delete next[selected];
+          return next;
+        });
+      }
       if (!selectedNameRef.current && !autoSelectedRef.current && unique.length > 0) {
         autoSelectedRef.current = true;
         setTimeout(() => loadDetail(unique[0].MAPPING_NAME), 0);
@@ -172,8 +184,14 @@ export function MappingList() {
       showToast('Failed to load: ' + e.message, 'error');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [loadDetail, showToast]);
+
+  const refreshMappings = useCallback(() => {
+    setRefreshing(true);
+    return loadMappings();
+  }, [loadMappings]);
 
   useEffect(() => {
     const id = setTimeout(loadMappings, 0);
@@ -401,13 +419,15 @@ export function MappingList() {
           </div>
           <button
             type="button"
-            onClick={loadMappings}
+            onClick={refreshMappings}
             title="Refresh mappings"
             aria-label="Refresh mappings"
-            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs font-bold text-violet-600 transition-colors hover:bg-violet-50 hover:text-violet-700"
+            aria-busy={refreshing}
+            disabled={refreshing}
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs font-bold text-violet-600 transition-colors hover:bg-violet-50 hover:text-violet-700 disabled:opacity-70"
           >
-            <i className="fa-solid fa-arrows-rotate text-[11px]"></i>
-            Refresh
+            <i className={refreshing ? "fa-solid fa-spinner fa-spin text-[11px]" : "fa-solid fa-arrows-rotate text-[11px]"}></i>
+            {refreshing ? "Refreshing..." : "Refresh"}
           </button>
         </div>
       </div>

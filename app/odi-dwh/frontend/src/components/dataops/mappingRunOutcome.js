@@ -388,7 +388,7 @@ function projectBatch(value) {
 }
 
 const COUNT_KEYS = ['processed', 'inserted', 'updated', 'errors'];
-const SESSION_ERROR_CODE = /^(?:ORA-\d{5}|ODI-\d{4,5})$/;
+const SESSION_ERROR_CODE = /^(?:ORA-[0-9]{5}|ODI-[0-9]{4,5})$/;
 
 function projectSessionNumber(payload) {
   const places = [payload, remoteOf(payload)].filter(Boolean);
@@ -442,6 +442,7 @@ function projectSessionErrorCode(payload) {
 
 function projectResolvedSessionError(payload, outcomeClass) {
   if (outcomeClass !== 'failed' || !payload) return null;
+  if (!plainObject(payload.remote) || payload.remote.error_code !== 'ScenarioRunFailed') return null;
   const session = projectSessionNumber(payload);
   const code = projectSessionErrorCode(payload);
   if (!session && !code) return null;
