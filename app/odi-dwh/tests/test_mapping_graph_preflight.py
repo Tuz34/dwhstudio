@@ -7,7 +7,9 @@ from mapping_generator import MappingGenerator, RepositoryPreflightBlockedError
 
 
 def _state() -> dict:
-    return {"validated_params": {"src_model": "ORACLE_DWH", "src_owner": "DWH", "src_table": "ODS_X"},
+    return {"validated_params": {"src_model": "ORACLE_DWH", "src_owner": "DWH", "src_table": "ODS_X",
+                                 "tgt_owner": "DWH", "tgt_table": "ODS_Y", "integration_type": "IU",
+                                 "update_key_columns": []},
             "batch_id": "t1", "completed_steps": [], "log": []}
 
 
