@@ -69,6 +69,122 @@ class MappingValidationFailed extends RuntimeException {
     }
 }
 
+// The class name is the only value Python accepts when a rebuild cannot keep the old text.
+class audit_expression_not_restored extends RuntimeException {
+    audit_expression_not_restored() {
+        super("audit_expression_not_restored")
+    }
+}
+
+// Read every target expression before a filter rebuild removes the component.
+// Null text is a captured absence. A failed read does not continue.
+def captureTargetExpressions = { component ->
+    if (component == null) {
+        throw new audit_expression_not_restored()
+    }
+    Map saved = new LinkedHashMap()
+    def attributes
+    try {
+        attributes = component.getAttributes()
+    } catch (Throwable ignored) {
+        throw new audit_expression_not_restored()
+    }
+    if (attributes == null) {
+        throw new audit_expression_not_restored()
+    }
+    attributes.each { attr ->
+        if (attr == null) {
+            throw new audit_expression_not_restored()
+        }
+        String key
+        String text
+        try {
+            String name = attr.getName()
+            if (name == null || name.trim().length() == 0) {
+                throw new audit_expression_not_restored()
+            }
+            key = name.toUpperCase(Locale.ROOT)
+            def expression = attr.getExpression()
+            text = expression == null ? null : expression.getText()
+        } catch (audit_expression_not_restored denied) {
+            throw denied
+        } catch (Throwable ignored) {
+            throw new audit_expression_not_restored()
+        }
+        if (saved.containsKey(key)) {
+            throw new audit_expression_not_restored()
+        }
+        saved.put(key, text)
+    }
+    return saved
+}
+
+// Put the captured text back. A missing, duplicate, or unverified value fails closed.
+def restoreTargetExpressions = { component, Map saved ->
+    if (component == null || saved == null) {
+        throw new audit_expression_not_restored()
+    }
+    def attributes
+    try {
+        attributes = component.getAttributes()
+    } catch (Throwable ignored) {
+        throw new audit_expression_not_restored()
+    }
+    if (attributes == null) {
+        throw new audit_expression_not_restored()
+    }
+    Set seen = new LinkedHashSet()
+    attributes.each { attr ->
+        if (attr == null) {
+            throw new audit_expression_not_restored()
+        }
+        String key
+        try {
+            String name = attr.getName()
+            if (name == null || name.trim().length() == 0) {
+                throw new audit_expression_not_restored()
+            }
+            key = name.toUpperCase(Locale.ROOT)
+        } catch (audit_expression_not_restored denied) {
+            throw denied
+        } catch (Throwable ignored) {
+            throw new audit_expression_not_restored()
+        }
+        if (!saved.containsKey(key) || !seen.add(key)) {
+            throw new audit_expression_not_restored()
+        }
+        def text = saved.get(key)
+        if (text == null) {
+            String current
+            try {
+                def expression = attr.getExpression()
+                current = expression == null ? null : expression.getText()
+            } catch (Throwable ignored) {
+                throw new audit_expression_not_restored()
+            }
+            if (current != null && current.trim().length() > 0) {
+                throw new audit_expression_not_restored()
+            }
+        } else {
+            try {
+                attr.setExpressionText(text)
+                def expression = attr.getExpression()
+                String written = expression == null ? null : expression.getText()
+                if (written != text) {
+                    throw new audit_expression_not_restored()
+                }
+            } catch (audit_expression_not_restored denied) {
+                throw denied
+            } catch (Throwable ignored) {
+                throw new audit_expression_not_restored()
+            }
+        }
+    }
+    if (seen.size() != saved.size()) {
+        throw new audit_expression_not_restored()
+    }
+}
+
 // ── CONNECTION ──────────────────────────────────────────────────────────────
 def odi = null
 boolean standaloneMode = false
@@ -232,6 +348,7 @@ try {
         String filterAction    = System.getProperty("odi.filter_action") ?: "add"
         String filterCondition = System.getProperty("odi.filter_condition")
         String filterName      = System.getProperty("odi.filter_name")
+        Map savedExpressions = null
 
         switch (filterAction.toLowerCase()) {
 
@@ -268,7 +385,9 @@ try {
                     srcComp.connectTo(filterComp)
                     filterComp.connectTo(downstream)
                 } catch (Exception connEx) {
-                    // Method 2: disconnect the current downstream and insert the filter
+                    // Method 2: disconnect the current downstream and insert the filter.
+                    // Capture stays outside the rebuild try so a read failure is not wrapped.
+                    savedExpressions = captureTargetExpressions(downstream)
                     try {
                         mapping.removeComponent(downstream)
                         srcComp.connectTo(filterComp)
@@ -276,19 +395,10 @@ try {
                         def dsStore = (downstream instanceof DatastoreComponent) ? ((DatastoreComponent)downstream).getBoundDataStore() : tgtComp?.getBoundDataStore()
                         DatastoreComponent newDown = new DatastoreComponent(mapping, dsStore)
                         filterComp.connectTo(newDown)
-                        // Rebuild attribute expressions (auto-map by name)
-                        newDown.getAttributes().each { tAttr ->
-                            def sAttr = srcComp.getAttributes().find { it.getName().equalsIgnoreCase(tAttr.getName()) }
-                            if (sAttr != null) {
-                                tAttr.setExpressionText(srcComp.getName() + "." + sAttr.getName())
-                            } else {
-                                String n = tAttr.getName().toUpperCase()
-                                if (n == "INSERT_DATE" || n == "UPDATE_DATE") tAttr.setExpressionText("CURRENT_TIMESTAMP")
-                                else if (n == "SOURCE_SYSTEM") tAttr.setExpressionText("'" + System.getProperty("odi.source_system", "ORACLE_SAMPLE_SCHEMAS") + "'")
-                                else if (n == "ETL_BATCH_ID") tAttr.setExpressionText("0")
-                            }
-                        }
+                        restoreTargetExpressions(newDown, savedExpressions)
                         println "FILTER ADDED (flow rebuilt): ${fltName}"
+                    } catch (audit_expression_not_restored denied) {
+                        throw denied
                     } catch (Exception rebuildEx) {
                         throw new Exception("Filter insertion failed. Flow rebuild error: ${rebuildEx.message}. Use create_mapping.groovy with odi.filter parameter instead.")
                     }
@@ -388,25 +498,17 @@ try {
                     println "RECONNECTED: ${removeSrc.getName()} → ${removeTgt.getName()}"
                 } catch (Exception connEx) {
                     // connectTo failed — the target connector state may be corrupt (after a flow rebuild)
-                    // Fix: remove the target, create it again, and auto-map the expressions
+                    // Capture stays outside the rebuild try so a read failure is not wrapped.
                     println "WARNING: Direct reconnect failed (${connEx.getClass().getSimpleName()}), rebuilding target..."
+                    savedExpressions = captureTargetExpressions(removeTgt)
                     try {
                         mapping.removeComponent(removeTgt)
                         DatastoreComponent newTgt = new DatastoreComponent(mapping, tgtDataStore)
                         removeSrc.connectTo(newTgt)
-                        // Rebuild attribute expressions (auto-map by name)
-                        newTgt.getAttributes().each { tAttr ->
-                            def sAttr = removeSrc.getAttributes().find { it.getName().equalsIgnoreCase(tAttr.getName()) }
-                            if (sAttr != null) {
-                                tAttr.setExpressionText(removeSrc.getName() + "." + sAttr.getName())
-                            } else {
-                                String n = tAttr.getName().toUpperCase()
-                                if (n == "INSERT_DATE" || n == "UPDATE_DATE") tAttr.setExpressionText("CURRENT_TIMESTAMP")
-                                else if (n == "SOURCE_SYSTEM") tAttr.setExpressionText("'" + System.getProperty("odi.source_system", "ORACLE_SAMPLE_SCHEMAS") + "'")
-                                else if (n == "ETL_BATCH_ID") tAttr.setExpressionText("0")
-                            }
-                        }
+                        restoreTargetExpressions(newTgt, savedExpressions)
                         println "RECONNECTED (target rebuilt): ${removeSrc.getName()} → ${newTgt.getName()}"
+                    } catch (audit_expression_not_restored denied) {
+                        throw denied
                     } catch (Exception rebuildEx) {
                         println "ERROR: Target rebuild failed (${rebuildEx.getClass().getSimpleName()}). Use create_mapping.groovy to restore."
                         throw new Exception("Filter removed but reconnection failed. Restore mapping with create_mapping.groovy. Error: ${rebuildEx.message}")

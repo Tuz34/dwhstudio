@@ -14,6 +14,19 @@ _AUDIT_PRESERVATION_SENTENCE = (
 )
 
 
+def fixed_error_sentence(code: object) -> str | None:
+    """Return the public sentence for an allowlisted failure code."""
+    if code == _AUDIT_PRESERVATION_REJECTED:
+        return _AUDIT_PRESERVATION_SENTENCE
+    if code == DATAMART_REQUIRES_TYPE2_CODE:
+        return DATAMART_TYPE2_ONLY_WARNING
+    if code == "audit_type_unknown":
+        return "The ETL_BATCH_ID datatype is unknown. Nothing was written."
+    if code == "audit_expression_not_restored":
+        return "The existing target expression could not be kept. Nothing was committed."
+    return None
+
+
 def redacted_error(action: str, exc: BaseException, *, status: int = 500):
     error_type = type(exc).__name__
     current_app.logger.error("%s failed: %s", action, error_type)
@@ -43,10 +56,7 @@ def redacted_operation_result(value, action: str):
     failed = status in _FAILURE_STATUSES
     had_error = any(str(key).lower() in {"error", "error_message"} and item for key, item in value.items())
     code = value.get("error_code")
-    fixed_error = (
-        _AUDIT_PRESERVATION_SENTENCE if code == _AUDIT_PRESERVATION_REJECTED else
-        DATAMART_TYPE2_ONLY_WARNING if code == DATAMART_REQUIRES_TYPE2_CODE else None
-    )
+    fixed_error = fixed_error_sentence(code)
     cleaned = {}
     for key, item in value.items():
         normalized_key = str(key).lower()

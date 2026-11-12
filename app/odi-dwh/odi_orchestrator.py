@@ -166,6 +166,8 @@ _CREATE_MAPPING_ERROR_KEYS = frozenset(
         "physical_design",
     }
 )
+_UPDATE_MAPPING_FIXED_ERROR_TYPES = frozenset({"audit_expression_not_restored"})
+_UPDATE_MAPPING_ERROR_KEYS = frozenset({"status", "action", "error_type"})
 _STRICT_STRUCTURED_ERROR_CONTRACTS = {
     "generate_scenario_metadata.groovy": {
         "tool": "odi.generate_scenario_metadata",
@@ -396,6 +398,26 @@ def _create_mapping_failure_envelope(stdout: object) -> str | None:
     }
     marker = f"Hata: ODI Groovy action failed. error_type={payload['error_type']}"
     return "\n".join((marker, json.dumps(envelope)))
+
+
+def _update_mapping_fixed_failure(stdout: object) -> str | None:
+    """Return only the fixed update_mapping failure line, or None for every other shape."""
+    lines = str(stdout or "").strip().splitlines()
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except (TypeError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _UPDATE_MAPPING_ERROR_KEYS
+        or payload.get("status") != "error"
+        or payload.get("action") != "update_mapping"
+        or payload.get("error_type") not in _UPDATE_MAPPING_FIXED_ERROR_TYPES
+    ):
+        return None
+    return f"Hata: ODI Groovy action failed. error_type={payload['error_type']}"
 
 
 def groovy_sync_failure_reason(output: str) -> str | None:
@@ -657,6 +679,12 @@ class OdiOrchestrator:
                 if envelope is not None:
                     logger.error("ODI Groovy returned reviewed structured error: action=%s", script_name)
                     return envelope
+
+            if script_name == "update_mapping.groovy" and result.returncode == 1:
+                fixed_failure = _update_mapping_fixed_failure(result.stdout)
+                if fixed_failure is not None:
+                    logger.error("ODI Groovy returned reviewed structured error: action=%s", script_name)
+                    return fixed_failure
 
             if result.returncode != 0:
                 logger.error(
