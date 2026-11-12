@@ -53,6 +53,7 @@ def test_graph_node_failure_producer_and_route(app_client, monkeypatch, node, me
     state = {"user_prompt": "please map", "raw_params": {"mapping_name": "MAP_X"},
              "validated_params": {"mapping_name": "MAP_X"}, "batch_id": "test", "log": []}
     producer = lambda: getattr(mapping_graph, node)(state)
+    body = _graph_route(app_client, monkeypatch, producer)
     direct = producer()
     if node == "node_create_skey":
         assert direct["skey_result"]["error"] == sentence
@@ -63,7 +64,6 @@ def test_graph_node_failure_producer_and_route(app_client, monkeypatch, node, me
         assert direct["log"][-1]["status"] == "FAILED"
     assert direct["log"][-1]["step"] == step
     assert direct["log"][-1]["detail"] == sentence
-    body = _graph_route(app_client, monkeypatch, producer)
     assert body["current_step"] == step
     assert body["log"][-1]["step"] == step
     if node == "node_create_skey":
@@ -101,12 +101,12 @@ def test_graph_post_step_exception_producer_and_route(app_client, monkeypatch, m
 
     monkeypatch.setattr(mapping_generator, "MappingGenerator", FakeGenerator)
     producer = lambda: mapping_graph.node_post_steps({"validated_params": {}, "batch_id": "test", "log": []})
+    body = _graph_route(app_client, monkeypatch, producer, path="/api/mapping/generate")
     direct = producer()
     assert direct[key]["error"] == sentence
     item = next(item for item in direct["log"] if item["step"] == step)
     assert item["status"] == "WARNING"
     assert item["detail"] == sentence
-    body = _graph_route(app_client, monkeypatch, producer, path="/api/mapping/generate")
     item = next(item for item in body["log"] if item["step"] == step)
     assert item["status"] == "WARNING"
     assert item["detail"] == sentence
@@ -168,12 +168,12 @@ def test_generator_nested_failure_reaches_graph_route(app_client, monkeypatch, m
     params = {"mapping_name": "MAP_X", "src_model": "ORACLE_SOURCE", "src_table": "SRC_X",
               "tgt_model": "ORACLE_ODS", "tgt_table": "ODS_X", "tgt_owner": "DWH", "needs_skey": False}
     producer = lambda: mapping_graph.node_post_steps({"validated_params": params, "batch_id": "test", "log": []})
+    body = _graph_route(app_client, monkeypatch, producer)
     direct = producer()
     nested = direct[key]
     if method == "_populate_lineage":
         nested = nested["lineage_result"]
     assert nested["error"] == sentence
-    body = _graph_route(app_client, monkeypatch, producer)
     assert next(item for item in body["log"] if item["step"] == step)["status"] == "SUCCESS"
 
 
@@ -200,12 +200,12 @@ def test_datastore_warning_string_and_graph_detail(app_client, monkeypatch, side
     params = {"src_model": "ORACLE_SOURCE", "src_table": "SRC_X", "tgt_model": "ORACLE_ODS",
               "tgt_table": "ODS_X", "tgt_owner": "DWH"}
     producer = lambda: mapping_graph.node_register_datastores({"validated_params": params, "batch_id": "test", "log": []})
+    body = _graph_route(app_client, monkeypatch, producer)
     direct = producer()
     field = "src_result" if side == "source" else "tgt_result"
     assert direct["datastore_result"][field] == f"WARNING: {'Source' if side == 'source' else 'Target'} datastore registration failed."
     assert direct["log"][-1]["status"] == "WARNING"
     assert direct["log"][-1]["detail"] == "ODI datastore registration warning."
-    body = _graph_route(app_client, monkeypatch, producer)
     assert body["datastore_result"][field] == direct["datastore_result"][field]
     assert body["log"][-1]["detail"] == "ODI datastore registration warning."
     default_body = _graph_route(app_client, monkeypatch, producer, path="/api/mapping/generate")
@@ -264,13 +264,13 @@ def test_analyze_prompt_parse_exception_route(app_client, monkeypatch):
         raise ValueError(MARKER)
 
     monkeypatch.setattr(mapping_generator.MappingGenerator, "parse_prompt", fail)
-    direct = mapping_generator.MappingGenerator().analyze_prompt("map X")
-    assert direct["validation"]["error"] == "Prompt parsing failed."
     response = app_client.post("/api/mapping/analyze-prompt", json={"prompt": "map X"})
     assert response.status_code == 200
     body = _body(response)
     assert body["validation"]["status"] == "INVALID"
     assert body["validation"]["error"] == "mapping prompt analysis failed."
+    direct = mapping_generator.MappingGenerator().analyze_prompt("map X")
+    assert direct["validation"]["error"] == "Prompt parsing failed."
 
 
 def test_analyze_prompt_incomplete_model_output_is_not_copied(app_client, monkeypatch):
@@ -279,11 +279,11 @@ def test_analyze_prompt_incomplete_model_output_is_not_copied(app_client, monkey
 
     monkeypatch.setattr(ai_agent, "call_llm", lambda *_args: MARKER)
     monkeypatch.setattr(ai_agent, "extract_json", lambda *_args: {"mapping_name": "MAP_X"})
-    direct = mapping_generator.MappingGenerator().analyze_prompt("map X")
-    assert direct["validation"]["error"] == "Prompt parsing failed."
     response = app_client.post("/api/mapping/analyze-prompt", json={"prompt": "map X"})
     assert response.status_code == 200
     assert _body(response)["validation"]["status"] == "INVALID"
+    direct = mapping_generator.MappingGenerator().analyze_prompt("map X")
+    assert direct["validation"]["error"] == "Prompt parsing failed."
 
 
 def test_analyze_prompt_keeps_application_validation_sentence(app_client, monkeypatch):
@@ -310,11 +310,11 @@ def test_analyze_prompt_untrusted_validation_exception_is_fixed(app_client, monk
         raise ValueError(MARKER)
 
     monkeypatch.setattr(mapping_generator.MappingGenerator, "validate_params", fail)
-    direct = mapping_generator.MappingGenerator().analyze_prompt("map X")
-    assert direct["validation"]["error"] == "Parameter validation failed."
     response = app_client.post("/api/mapping/analyze-prompt", json={"prompt": "map X"})
     assert response.status_code == 200
     assert _body(response)["validation"]["error"] == "mapping prompt analysis failed."
+    direct = mapping_generator.MappingGenerator().analyze_prompt("map X")
+    assert direct["validation"]["error"] == "Parameter validation failed."
 
 
 @pytest.mark.parametrize("phase", ["expression", "connection"])
