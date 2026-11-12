@@ -687,9 +687,13 @@ class DataQualityManager:
                     if "ORA-00955" in str(e):
                         result["skipped"].append(tname)
                     else:
-                        result["errors"].append({"table": tname, "error": str(e)})
+                        result["errors"].append({"table": tname,
+                                                 "error": "Quality error table creation failed.",
+                                                 "error_type": type(e).__name__})
                 except Exception as e:
-                    result["errors"].append({"table": tname, "error": str(e)})
+                    result["errors"].append({"table": tname,
+                                             "error": "Quality error table creation failed.",
+                                             "error_type": type(e).__name__})
 
         finally:
             cursor.close()
