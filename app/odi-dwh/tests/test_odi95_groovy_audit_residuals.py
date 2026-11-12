@@ -9,6 +9,7 @@ allowlist and the restore read-back run on fake attributes, not on ODI.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -92,8 +93,11 @@ def test_both_filter_rebuilds_capture_and_restore_the_previous_expression():
         source.index("def captureTargetExpressions"):source.index("def restoreTargetExpressions")
     ]
     restore_helper = source[source.index("def restoreTargetExpressions"):source.index("def odi = null")]
-    assert "throw new audit_expression_not_restored()" in capture_helper
-    assert "throw new audit_expression_not_restored()" in restore_helper
+    assert 'throw new audit_expression_not_restored("read_failed")' in capture_helper
+    assert 'throw new audit_expression_not_restored("readback_mismatch")' in restore_helper
+    assert "throw new audit_expression_not_restored()" not in source
+    assert "written != text" in restore_helper
+    assert "setExpressionText" not in capture_helper
     assert 'setExpressionText("0")' not in capture_helper + restore_helper
     assert "saved.put(key, text)" in capture_helper
     assert "setExpressionText(text)" in restore_helper
@@ -179,13 +183,17 @@ def test_create_route_maps_unknown_batch_type_to_a_fixed_sentence(app_client, mo
     _assert_fixed(response.get_json(), response.get_data(as_text=True), code, sentence)
 
 
-def test_update_route_maps_unrestored_expression_to_a_fixed_sentence(app_client, monkeypatch):
+def test_update_route_maps_unrestored_expression_to_a_fixed_sentence(app_client, monkeypatch, caplog):
     import mapping_generator
 
-    line = (
-        '{"status":"error","action":"update_mapping","error_type":"'
-        + EXPRESSION_NOT_RESTORED
-        + '"}'
+    caplog.set_level(logging.ERROR, logger="odi_orchestrator")
+    line = json.dumps(
+        {
+            "status": "error",
+            "action": "update_mapping",
+            "error_type": EXPRESSION_NOT_RESTORED,
+            "reason": "readback_mismatch",
+        }
     )
     _fake_process(monkeypatch, MARKER + " expression text\n" + line + "\n")
     generator = mapping_generator.MappingGenerator
@@ -202,24 +210,31 @@ def test_update_route_maps_unrestored_expression_to_a_fixed_sentence(app_client,
         },
     )
     assert response.status_code == 200
-    _assert_fixed(
-        response.get_json(),
-        response.get_data(as_text=True),
-        EXPRESSION_NOT_RESTORED,
-        EXPRESSION_NOT_RESTORED_SENTENCE,
-    )
+    body = response.get_json()
+    rendered = response.get_data(as_text=True)
+    _assert_fixed(body, rendered, EXPRESSION_NOT_RESTORED, EXPRESSION_NOT_RESTORED_SENTENCE)
+    assert body["error_reason"] == "readback_mismatch"
+    assert "reason=readback_mismatch" in caplog.text
+    assert f"class={EXPRESSION_NOT_RESTORED}" in caplog.text
+    assert MARKER not in caplog.text
 
 
 def test_update_runner_keeps_only_the_fixed_code(monkeypatch):
-    line = (
-        '{"status":"error","action":"update_mapping","error_type":"'
-        + EXPRESSION_NOT_RESTORED
-        + '"}'
+    line = json.dumps(
+        {
+            "status": "error",
+            "action": "update_mapping",
+            "error_type": EXPRESSION_NOT_RESTORED,
+            "reason": "readback_mismatch",
+        }
     )
     _fake_process(monkeypatch, "progress " + MARKER + "\n" + line + "\n")
     with odi_orchestrator.groovy_approval_context(True):
         output = OdiOrchestrator().run_groovy("update_mapping.groovy", {})
-    assert output == f"Hata: ODI Groovy action failed. error_type={EXPRESSION_NOT_RESTORED}"
+    assert output == (
+        "Hata: ODI Groovy action failed. "
+        f"error_type={EXPRESSION_NOT_RESTORED} error_reason=readback_mismatch"
+    )
     assert MARKER not in output
 
 
@@ -387,11 +402,13 @@ def droppedSaved = new LinkedHashMap()
 droppedSaved.put("ETL_BATCH_ID", kept)
 boolean droppedRejected = false
 String droppedClass = ""
+String droppedReason = ""
 try {
     restoreTargetExpressions(new ProbeComp(attributes: [dropped]), droppedSaved)
 } catch (Throwable raised) {
     droppedRejected = true
     droppedClass = raised.getClass().getSimpleName()
+    if (raised instanceof audit_expression_not_restored) droppedReason = raised.reason
 }
 println JsonOutput.toJson([
     kept: kept,
@@ -400,6 +417,7 @@ println JsonOutput.toJson([
     sticky_text: sticky.expression?.text,
     dropped_rejected: droppedRejected,
     dropped_class: droppedClass,
+    dropped_reason: droppedReason,
     dropped_sets: dropped.sets,
     dropped_text: dropped.expression?.text,
 ])
@@ -415,3 +433,4 @@ def test_restore_readback_rejects_when_set_expression_text_does_not_stick(tmp_pa
     assert report["dropped_text"] == "0"
     assert report["dropped_rejected"] is True
     assert report["dropped_class"] == "audit_expression_not_restored"
+    assert report["dropped_reason"] == "readback_mismatch"

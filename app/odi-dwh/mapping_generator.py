@@ -596,6 +596,11 @@ def build_same_schema_audit_expressions(
     public["lookup_alias"] = alias
     return public
 _ERROR_TYPE_ASSIGN_RE = re.compile(r"\berror_type=([A-Za-z][A-Za-z0-9_$]{0,127})\b")
+_RESTORE_REASON_TOKEN_RE = re.compile(
+    r"missing_attribute|duplicate_attribute|null_attribute|read_failed|"
+    r"write_failed|readback_mismatch|count_mismatch"
+)
+_ERROR_REASON_ASSIGN_RE = re.compile(rf"\berror_reason=({_RESTORE_REASON_TOKEN_RE.pattern})\b")
 
 
 def _error_type_class(value: object) -> str | None:
@@ -2495,6 +2500,9 @@ class MappingGenerator:
             code = getattr(e, "error_code", None)
             if isinstance(code, str) and code:
                 result["error_code"] = code
+            reason = getattr(e, "error_reason", None)
+            if isinstance(reason, str) and _RESTORE_REASON_TOKEN_RE.fullmatch(reason):
+                result["error_reason"] = reason
             self._add_log("update_pipeline", "FAILED", str(e))
         except Exception as e:
             result["overall_status"] = "FAILED"
@@ -2590,6 +2598,9 @@ class MappingGenerator:
                 self._add_log("update_mapping", "FAILED", sentence)
                 failure = RuntimeError(sentence)
                 failure.error_code = code
+                reason_match = _ERROR_REASON_ASSIGN_RE.search(result)
+                if reason_match is not None:
+                    failure.error_reason = reason_match.group(1)
                 raise failure
             self._add_log("update_mapping", "FAILED", result)
             raise RuntimeError(f"ODI mapping update failed: {result}")

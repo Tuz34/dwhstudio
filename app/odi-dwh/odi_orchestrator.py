@@ -167,7 +167,18 @@ _CREATE_MAPPING_ERROR_KEYS = frozenset(
     }
 )
 _UPDATE_MAPPING_FIXED_ERROR_TYPES = frozenset({"audit_expression_not_restored"})
-_UPDATE_MAPPING_ERROR_KEYS = frozenset({"status", "action", "error_type"})
+_UPDATE_MAPPING_RESTORE_REASONS = frozenset(
+    {
+        "missing_attribute",
+        "duplicate_attribute",
+        "null_attribute",
+        "read_failed",
+        "write_failed",
+        "readback_mismatch",
+        "count_mismatch",
+    }
+)
+_UPDATE_MAPPING_ERROR_KEYS = frozenset({"status", "action", "error_type", "reason"})
 _STRICT_STRUCTURED_ERROR_CONTRACTS = {
     "generate_scenario_metadata.groovy": {
         "tool": "odi.generate_scenario_metadata",
@@ -400,8 +411,12 @@ def _create_mapping_failure_envelope(stdout: object) -> str | None:
     return "\n".join((marker, json.dumps(envelope)))
 
 
-def _update_mapping_fixed_failure(stdout: object) -> str | None:
-    """Return only the fixed update_mapping failure line, or None for every other shape."""
+def _update_mapping_fixed_failure(stdout: object) -> tuple[str, str] | None:
+    """Return the fixed update_mapping failure and its allowlisted reason, or None.
+
+    The last line must be exactly the reviewed keys. ``reason`` is accepted only from
+    the closed set. Expression text, attribute names, and ODI messages are not read.
+    """
     lines = str(stdout or "").strip().splitlines()
     if not lines:
         return None
@@ -409,15 +424,21 @@ def _update_mapping_fixed_failure(stdout: object) -> str | None:
         payload = json.loads(lines[-1])
     except (TypeError, ValueError):
         return None
+    reason = payload.get("reason") if isinstance(payload, dict) else None
     if (
         not isinstance(payload, dict)
         or set(payload) != _UPDATE_MAPPING_ERROR_KEYS
         or payload.get("status") != "error"
         or payload.get("action") != "update_mapping"
         or payload.get("error_type") not in _UPDATE_MAPPING_FIXED_ERROR_TYPES
+        or reason not in _UPDATE_MAPPING_RESTORE_REASONS
     ):
         return None
-    return f"Hata: ODI Groovy action failed. error_type={payload['error_type']}"
+    message = (
+        "Hata: ODI Groovy action failed. "
+        f"error_type={payload['error_type']} error_reason={reason}"
+    )
+    return message, reason
 
 
 def groovy_sync_failure_reason(output: str) -> str | None:
@@ -683,8 +704,14 @@ class OdiOrchestrator:
             if script_name == "update_mapping.groovy" and result.returncode == 1:
                 fixed_failure = _update_mapping_fixed_failure(result.stdout)
                 if fixed_failure is not None:
-                    logger.error("ODI Groovy returned reviewed structured error: action=%s", script_name)
-                    return fixed_failure
+                    message, reason = fixed_failure
+                    logger.error(
+                        "ODI Groovy returned reviewed structured error: action=%s class=%s reason=%s",
+                        script_name,
+                        "audit_expression_not_restored",
+                        reason,
+                    )
+                    return message
 
             if result.returncode != 0:
                 logger.error(
