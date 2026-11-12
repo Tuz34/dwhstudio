@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import json
+import re
 import subprocess
 
 import pytest
@@ -161,11 +162,23 @@ def test_sync_datastore_column_supports_type_and_rename_metadata_sync():
     assert "ALTER TABLE" not in content.upper()
 
 
-def test_update_mapping_uses_wrapper_properties_path():
+def test_update_mapping_uses_wrapper_properties_path_and_groovy_sources_have_no_drive_paths():
     content = (PROJECT_ROOT / "odi_automation" / "update_mapping.groovy").read_text(encoding="utf-8")
 
     assert 'args?.length ? args[0] : "odi_connection.properties"' in content
-    assert "c:/oracle_ai_app" not in content.lower()
+    groovy_dir = PROJECT_ROOT / "odi_automation"
+    scripts = sorted(groovy_dir.rglob("*.groovy"))
+    assert scripts
+    drive_path = re.compile(r"(?i)\b[a-z]:[\\/]")
+    assert drive_path.search("Z:/other")
+    assert drive_path.search(r"d:\other")
+    offenders = [
+        f"{script.relative_to(groovy_dir)}:{line_number}"
+        for script in scripts
+        for line_number, line in enumerate(script.read_text(encoding="utf-8").splitlines(), 1)
+        if drive_path.search(line)
+    ]
+    assert not offenders, f"Absolute drive paths in Groovy source: {offenders}"
 
 
 def test_diagnose_ikm_uses_wrapper_properties_path_and_exits_nonzero():
