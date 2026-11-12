@@ -936,6 +936,7 @@ class OdiOrchestrator:
         import re as _re
         simple_ref_re = _re.compile(r'^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$')
         errors = {}
+        error_types = {}
         try:
             from db import get_connection
             conn = get_connection()
@@ -948,16 +949,16 @@ class OdiOrchestrator:
                     test_sql = f"EXPLAIN PLAN FOR SELECT {expr} AS X FROM {target_owner}.{target_table} WHERE 1=0"
                     cur.execute(test_sql)
                 except Exception as e:
-                    err_msg = str(e).split("\n")[0]
-                    errors[col_name] = err_msg
-                    logger.warning("Expression validation failed for %s: %s", col_name, err_msg)
+                    errors[col_name] = "Expression validation failed."
+                    error_types[col_name] = type(e).__name__
+                    logger.warning("Expression validation failed for %s: %s", col_name, type(e).__name__)
             cur.close()
         except Exception as e:
-            logger.error("validate_expression DB connection failed: %s", str(e))
-            return {"valid": True, "warning": f"DB validation skipped: {str(e)}"}
+            logger.error("validate_expression DB connection failed: %s", type(e).__name__)
+            return {"valid": True, "warning": "DB validation skipped.", "error_type": type(e).__name__}
 
         if errors:
-            return {"valid": False, "errors": errors}
+            return {"valid": False, "errors": errors, "error_types": error_types}
         return {"valid": True}
 
     def delete_mapping(self, mapping_name: str) -> str:
@@ -1088,6 +1089,15 @@ class OdiOrchestrator:
             if start > 0:
                 output = output[start:]
             parsed = json.loads(output)
+            if isinstance(parsed, dict) and "error_detail" in parsed:
+                parsed["error_detail"] = "ODI scenario probe failed."
+            if isinstance(parsed, dict) and parsed.get("status") == "error":
+                raw_type = parsed.get("error_type") or parsed.get("error")
+                if isinstance(raw_type, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", raw_type):
+                    parsed["error_type"] = raw_type
+                else:
+                    parsed.pop("error_type", None)
+                parsed["error"] = "ODI scenario probe failed."
             parsed.setdefault("side_effects", False)
             parsed.setdefault("repository_connection_attempted", True)
             return parsed

@@ -151,7 +151,7 @@ def _repository_step_status(result: dict) -> tuple[str, str]:
     lowered = combined.lower()
 
     if "warning:" in lowered or "hata:" in lowered:
-        return "WARNING", combined[:240]
+        return "WARNING", "ODI datastore registration warning."
     return "SUCCESS", combined[:240] or "ODI datastores checked"
 
 
@@ -333,8 +333,9 @@ def node_parse_prompt(state: MappingState) -> dict:
         return {
             "current_step": "parse_prompt",
             "overall_status": "failed",
-            "error": f"Prompt parsing failed: {e}",
-            "log": _add_log(state, "parse_prompt", "FAILED", str(e)),
+            "error": "Prompt parsing failed.",
+            "error_type": type(e).__name__,
+            "log": _add_log(state, "parse_prompt", "FAILED", "Prompt parsing failed."),
         }
 
 
@@ -368,8 +369,9 @@ def node_validate(state: MappingState) -> dict:
         failure = {
             "current_step": "validate",
             "overall_status": "failed",
-            "error": f"Validation failed: {e}",
-            "log": _add_log(state, "validate", "FAILED", str(e)),
+            "error": "Validation failed.",
+            "error_type": type(e).__name__,
+            "log": _add_log(state, "validate", "FAILED", "Validation failed."),
         }
         if isinstance(e, DatamartRequiresType2Error):
             failure["error_code"] = e.error_code
@@ -443,8 +445,9 @@ def node_create_table(state: MappingState) -> dict:
         failure = {
             "current_step": "create_table",
             "overall_status": "failed",
-            "error": f"Table creation failed: {e}",
-            "log": _add_log(state, "create_table", "FAILED", str(e)),
+            "error": "Table creation failed.",
+            "error_type": type(e).__name__,
+            "log": _add_log(state, "create_table", "FAILED", "Table creation failed."),
         }
         if getattr(e, "error_code", None):
             failure["error_code"] = e.error_code
@@ -477,8 +480,9 @@ def node_register_datastores(state: MappingState) -> dict:
         failure = {
             "current_step": "register_datastores",
             "overall_status": "failed",
-            "error": f"Datastore registration failed: {e}",
-            "log": _add_log(state, "register_datastores", "FAILED", str(e)),
+            "error": "Datastore registration failed.",
+            "error_type": type(e).__name__,
+            "log": _add_log(state, "register_datastores", "FAILED", "Datastore registration failed."),
         }
         if getattr(e, "error_code", None):
             failure["error_code"] = e.error_code
@@ -510,8 +514,9 @@ def node_create_mapping(state: MappingState) -> dict:
         failure = {
             "current_step": "create_mapping",
             "overall_status": "failed",
-            "error": f"Mapping creation failed: {e}",
-            "log": _add_log(state, "create_mapping", "FAILED", str(e)),
+            "error": "Mapping creation failed.",
+            "error_type": type(e).__name__,
+            "log": _add_log(state, "create_mapping", "FAILED", "Mapping creation failed."),
         }
         if getattr(e, "error_code", None):
             failure["error_code"] = e.error_code
@@ -540,8 +545,8 @@ def node_create_skey(state: MappingState) -> dict:
         # SKEY failure is noncritical
         return {
             "current_step": "create_skey",
-            "skey_result": {"error": str(e)},
-            "log": _add_log(state, "create_skey", "WARNING", str(e)),
+            "skey_result": {"error": "SKEY creation failed.", "error_type": type(e).__name__},
+            "log": _add_log(state, "create_skey", "WARNING", "SKEY creation failed."),
             "completed_steps": list(state.get("completed_steps", [])) + ["create_skey"],
         }
 
@@ -580,8 +585,8 @@ def node_post_steps(state: MappingState) -> dict:
                      "timestamp": datetime.now().isoformat()})
         completed.append("lineage")
     except Exception as e:
-        results["lineage_result"] = {"error": str(e)}
-        logs.append({"step": "lineage", "status": "WARNING", "detail": str(e),
+        results["lineage_result"] = {"error": "Lineage population failed.", "error_type": type(e).__name__}
+        logs.append({"step": "lineage", "status": "WARNING", "detail": "Lineage population failed.",
                      "timestamp": datetime.now().isoformat()})
 
     # DQ Tests
@@ -593,8 +598,8 @@ def node_post_steps(state: MappingState) -> dict:
                      "timestamp": datetime.now().isoformat()})
         completed.append("tests")
     except Exception as e:
-        results["test_result"] = {"error": str(e)}
-        logs.append({"step": "tests", "status": "WARNING", "detail": str(e),
+        results["test_result"] = {"error": "DQ test generation failed.", "error_type": type(e).__name__}
+        logs.append({"step": "tests", "status": "WARNING", "detail": "DQ test generation failed.",
                      "timestamp": datetime.now().isoformat()})
 
     # Snapshot
@@ -606,8 +611,8 @@ def node_post_steps(state: MappingState) -> dict:
                      "timestamp": datetime.now().isoformat()})
         completed.append("snapshot")
     except Exception as e:
-        results["snapshot_result"] = {"error": str(e)}
-        logs.append({"step": "snapshot", "status": "WARNING", "detail": str(e),
+        results["snapshot_result"] = {"error": "Mapping snapshot failed.", "error_type": type(e).__name__}
+        logs.append({"step": "snapshot", "status": "WARNING", "detail": "Mapping snapshot failed.",
                      "timestamp": datetime.now().isoformat()})
 
     results["current_step"] = "post_steps"

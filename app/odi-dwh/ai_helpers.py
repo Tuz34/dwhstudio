@@ -567,7 +567,7 @@ def _modeled_target_lookup() -> dict:
     return lookup
 
 
-def _table_availability_answer(table_ref: str, modeled_row: dict | None, error_msg: str):
+def _table_availability_answer(table_ref: str, modeled_row: dict | None, error_type: str):
     source_tables = modeled_row.get("SOURCE_TABLES", "?") if modeled_row else "?"
     mapping_name = modeled_row.get("MAPPING_NAME", "?") if modeled_row else "?"
     rows = [{
@@ -594,7 +594,8 @@ def _table_availability_answer(table_ref: str, modeled_row: dict | None, error_m
                 "rows": rows,
             },
             "auto_executed": True,
-            "error": error_msg,
+            "error": "Modeled target table is not available.",
+            "error_type": error_type,
         }],
         "raw": "",
     }
@@ -632,7 +633,7 @@ def _table_data_answer(message: str, history: list):
     except Exception as e:
         error_msg = str(e)
         if "ORA-00942" in error_msg and modeled_row:
-            return _table_availability_answer(table_ref, modeled_row, error_msg)
+            return _table_availability_answer(table_ref, modeled_row, type(e).__name__)
         return None
 
 

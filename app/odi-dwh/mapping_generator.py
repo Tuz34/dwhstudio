@@ -814,6 +814,11 @@ class MappingGenerator:
         log_fn = logger.info if status == "SUCCESS" else logger.warning
         log_fn("MappingGenerator [%s] %s: %s %s", self._batch_id, step, status, detail)
 
+    def _public_validation_error(self, sentence: str) -> ValueError:
+        """Keep an application-built validation sentence outside the exception object."""
+        self._public_validation_sentence = sentence
+        return ValueError(sentence)
+
     def _validate_identifier(self, value: str, field_name: str) -> str:
         """Validate SQL/ODI identifiers. Reject invalid characters.
 
@@ -828,10 +833,10 @@ class MappingGenerator:
             ValueError: If the value is empty or contains invalid characters.
         """
         if not value or not value.strip():
-            raise ValueError(f"{field_name} cannot be empty.")
+            raise self._public_validation_error(f"{field_name} cannot be empty.")
         clean = value.strip().upper()
         if not re.match(r'^[A-Z][A-Z0-9_]{0,127}$', clean):
-            raise ValueError(
+            raise self._public_validation_error(
                 f"{field_name} is invalid: '{clean}'. "
                 "Letters, digits, and underscores only; must start with a letter; max 128 characters."
             )
@@ -1574,7 +1579,7 @@ class MappingGenerator:
         required = ["mapping_name", "src_table", "tgt_table", "src_model", "tgt_model"]
         missing = [f for f in required if not parsed.get(f)]
         if missing:
-            raise ValueError(f"AI omitted required fields: {', '.join(missing)}. Raw output: {raw[:200]}")
+            raise ValueError("AI omitted required fields.")
 
         self._add_log("prompt_parse", "SUCCESS", f"mapping={parsed.get('mapping_name')}")
         return parsed
@@ -1589,7 +1594,7 @@ class MappingGenerator:
         """
         if params is None:
             logger.error("validate_params received None!")
-            raise ValueError("Parameters cannot be empty (None).")
+            raise self._public_validation_error("Parameters cannot be empty (None).")
 
         validated = {}
 
@@ -1607,7 +1612,7 @@ class MappingGenerator:
             raw_src_value = f"{src_schema}.{raw_src_value}"
         raw_src = raw_src_value.upper()
         if not raw_src:
-            raise ValueError("src_table cannot be empty.")
+            raise self._public_validation_error("src_table cannot be empty.")
             
         # AI sometimes returns table names as DWH.ODS_; omit the schema name:
         src_table_no_schema = raw_src.split('.')[-1]
@@ -1626,7 +1631,7 @@ class MappingGenerator:
             "MDL_SRC_ORACLE_SH", "MDL_TGT_ORACLE_DWH",
         } | source_schema_models
         if validated["src_model"] not in allowed_src_models:
-            raise ValueError(
+            raise self._public_validation_error(
                 f"Invalid src_model: {validated['src_model']}. "
                 f"Allowed values: {sorted(allowed_src_models)}"
             )
@@ -1641,13 +1646,13 @@ class MappingGenerator:
             owner_parts = raw_src.split(".")
             src_owner = owner_parts[-2] if len(owner_parts) > 1 else DEFAULT_INTERNAL_SOURCE_OWNER
             if src_owner not in ALLOWED_INTERNAL_OWNERS:
-                raise ValueError(
+                raise self._public_validation_error(
                     f"Invalid src_owner: {src_owner}. Allowed values: {sorted(ALLOWED_INTERNAL_OWNERS)}"
                 )
             validated["src_owner"] = src_owner
         if not _internal_oracle:
             if not re.match(r'^[A-Z][A-Z0-9_]*(\.[A-Z][A-Z0-9_]*)?$', raw_src):
-                raise ValueError(
+                raise self._public_validation_error(
                     f"Invalid src_table: '{raw_src}'. "
                     "Format: TABLE or SCHEMA.TABLE (letters, digits, underscores)."
                 )
@@ -1665,7 +1670,7 @@ class MappingGenerator:
 
         allowed_tgt_models = {"DWH", "ORACLE_ODS", "ORACLE_DWH", "ODS", "TGT_DWH", "MDL_TGT_ORACLE_DWH"}
         if validated["tgt_model"] not in allowed_tgt_models:
-            raise ValueError(
+            raise self._public_validation_error(
                 f"Invalid tgt_model: {validated['tgt_model']}. "
                 f"Allowed values: {sorted(allowed_tgt_models)}"
             )
@@ -1676,13 +1681,14 @@ class MappingGenerator:
             
         validated["tgt_table"] = self._validate_identifier(tgt_table_no_schema, "tgt_table")
         if validated["tgt_table"].startswith("DM_"):
+            self._public_validation_sentence = DATAMART_TYPE2_ONLY_WARNING
             raise DatamartRequiresType2Error()
         validated["tgt_owner"] = params.get("tgt_owner", "DWH").strip().upper()
 
         # Check owner allowlist
         allowed = {"DWH", "ODS", "AUDIT_USER", "DWH_FLAT"}
         if validated["tgt_owner"] not in allowed:
-            raise ValueError(f"Invalid tgt_owner: {validated['tgt_owner']}. Allowed values: {allowed}")
+            raise self._public_validation_error(f"Invalid tgt_owner: {validated['tgt_owner']}. Allowed values: {allowed}")
 
         validated["needs_skey"] = params.get("needs_skey") is True
         validated["skey_natural_key"] = params.get("skey_natural_key") or None
@@ -1691,7 +1697,7 @@ class MappingGenerator:
         self._validate_load_options(params, validated)
 
         if validated["needs_skey"] and not validated["skey_natural_key"]:
-            raise ValueError("SKEY was requested but skey_natural_key was not specified.")
+            raise self._public_validation_error("SKEY was requested but skey_natural_key was not specified.")
 
         self._add_log("validate_params", "SUCCESS",
                        f"{validated['src_table']} -> {validated['tgt_table']}")
@@ -1707,26 +1713,26 @@ class MappingGenerator:
         elif isinstance(raw_keys, (list, tuple)):
             items = list(raw_keys)
         else:
-            raise ValueError("update_key_columns must be a list of column names.")
+            raise self._public_validation_error("update_key_columns must be a list of column names.")
         key_columns: list[str] = []
         for item in items:
             if not isinstance(item, str):
-                raise ValueError("update_key_columns must contain column names.")
+                raise self._public_validation_error("update_key_columns must contain column names.")
             name = self._validate_identifier(item, "update_key_columns")
             if name not in key_columns:
                 key_columns.append(name)
         if len(key_columns) > MAX_UPDATE_KEY_COLUMNS:
-            raise ValueError(f"update_key_columns allows at most {MAX_UPDATE_KEY_COLUMNS} columns.")
+            raise self._public_validation_error(f"update_key_columns allows at most {MAX_UPDATE_KEY_COLUMNS} columns.")
         validated["update_key_columns"] = key_columns
 
         kind = str(params.get("update_key_kind") or "unique").strip().lower()
         if kind not in ("unique", "primary"):
-            raise ValueError("update_key_kind must be 'unique' or 'primary'.")
+            raise self._public_validation_error("update_key_kind must be 'unique' or 'primary'.")
         validated["update_key_kind"] = kind
 
         integration_type = str(params.get("integration_type") or "IU").strip().upper()
         if integration_type not in INTEGRATION_TYPES:
-            raise ValueError(f"integration_type must be one of {sorted(INTEGRATION_TYPES)}.")
+            raise self._public_validation_error(f"integration_type must be one of {sorted(INTEGRATION_TYPES)}.")
         validated["integration_type"] = integration_type
 
         # Derive the key requirement from the KM that will really run, before any DDL.
@@ -1738,7 +1744,7 @@ class MappingGenerator:
         if is_skey_lookup:
             # SKEY lookup mappings are always forced onto the merge KM with an update key.
             if integration_type != "IU":
-                raise ValueError("An SKEY lookup mapping needs integration_type IU.")
+                raise self._public_validation_error("An SKEY lookup mapping needs integration_type IU.")
         raw_ikm = params.get("ikm_name")
         if raw_ikm not in (None, ""):
             resolve_approved_ikm(raw_ikm, integration_type, ODI_APPROVED_IKMS, ODI_IKM_PRIORITY)
@@ -1752,6 +1758,10 @@ class MappingGenerator:
             and is_update_ikm(effective)
             and not key_columns
         ):
+            self._public_validation_sentence = (
+                "update_key_required: the effective IKM requires an update key; pass update_key_columns "
+                "(for an SKEY lookup target, the natural key column)."
+            )
             raise UpdateKeyRequiredError(
                 "the effective IKM requires an update key; pass update_key_columns "
                 "(for an SKEY lookup target, the natural key column)."
@@ -1827,8 +1837,9 @@ class MappingGenerator:
                     self._add_log("register_datastores", "SUCCESS",
                                    f"Source: {odi_src_model_code}.{src_ds_name}")
         except Exception as e:
-            logger.warning("Source datastore registration failed (continuing): %s", e)
-            results["src_result"] = f"WARNING: {e}"
+            logger.warning("Source datastore registration failed (continuing): %s", type(e).__name__)
+            results["src_result"] = "WARNING: Source datastore registration failed."
+            results["src_error_type"] = type(e).__name__
 
         # ── Target datastore registration ──
         tgt_model = params["tgt_model"]
@@ -1900,8 +1911,9 @@ class MappingGenerator:
                     self._add_log("register_datastores", "SUCCESS",
                                    f"Target: {odi_tgt_model_code}.{tgt_ds_name}")
         except Exception as e:
-            logger.warning("Target datastore registration failed (continuing): %s", e)
-            results["tgt_result"] = f"WARNING: {e}"
+            logger.warning("Target datastore registration failed (continuing): %s", type(e).__name__)
+            results["tgt_result"] = "WARNING: Target datastore registration failed."
+            results["tgt_error_type"] = type(e).__name__
             if key_kwargs:
                 key_failure = "ODI update key registration failed for the target datastore."
 
@@ -2070,7 +2082,7 @@ class MappingGenerator:
 
         if skey_result.get("errors"):
             self._add_log("create_skey", "PARTIAL",
-                           f"Errors: {skey_result['errors']}")
+                           "SKEY object creation partially failed.")
         else:
             self._add_log("create_skey", "SUCCESS",
                            f"Created: {skey_result.get('created', [])}, "
@@ -2102,8 +2114,9 @@ class MappingGenerator:
                 return {"lineage_result": lineage_result}
             except Exception as e:
                 # Lineage population failure is noncritical; continue
-                self._add_log("populate_lineage", "SKIPPED", str(e))
-                return {"lineage_result": {"error": str(e), "inserted": 0}}
+                self._add_log("populate_lineage", "SKIPPED", "Lineage population failed.")
+                return {"lineage_result": {"error": "Lineage population failed.",
+                                           "error_type": type(e).__name__, "inserted": 0}}
 
     # ── DQ Test Generation ────────────────────────────────────────────────────────
 
@@ -2128,8 +2141,8 @@ class MappingGenerator:
             return {"tests": tests}
         except Exception as e:
             # Test generation is noncritical
-            self._add_log("generate_tests", "SKIPPED", str(e))
-            return {"tests": [], "error": str(e)}
+            self._add_log("generate_tests", "SKIPPED", "DQ test generation failed.")
+            return {"tests": [], "error": "DQ test generation failed.", "error_type": type(e).__name__}
         finally:
             tg.close()
 
@@ -2171,8 +2184,8 @@ class MappingGenerator:
                 self._add_log("take_snapshot", "SUCCESS", f"snap_id={snap_id}")
                 return {"snap_id": snap_id}
         except Exception as e:
-            self._add_log("take_snapshot", "SKIPPED", str(e))
-            return {"snap_id": None, "error": str(e)}
+            self._add_log("take_snapshot", "SKIPPED", "Mapping snapshot failed.")
+            return {"snap_id": None, "error": "Mapping snapshot failed.", "error_type": type(e).__name__}
 
     # ── MAPPING_LOG Record ──────────────────────────────────────────────────────
 
@@ -2672,8 +2685,14 @@ class MappingGenerator:
 
         try:
             params = self.parse_prompt(user_prompt)
-            result["params"] = params
+        except (ValueError, RuntimeError) as e:
+            result["validation"] = {"status": "INVALID", "error": "Prompt parsing failed.",
+                                    "error_type": type(e).__name__}
+            return result
 
+        result["params"] = params
+        self._public_validation_sentence = None
+        try:
             validated = self.validate_params(params)
             result["validation"] = {"status": "VALID", "params": validated}
 
@@ -2704,6 +2723,13 @@ class MappingGenerator:
             result["preview"] = preview
 
         except (ValueError, RuntimeError) as e:
-            result["validation"] = {"status": "INVALID", "error": str(e)}
+            public_sentence = self._public_validation_sentence
+            result["validation"] = {
+                "status": "INVALID",
+                "error": public_sentence or "Parameter validation failed.",
+                "error_type": type(e).__name__,
+            }
+            if public_sentence:
+                result["_public_validation"] = True
 
         return result

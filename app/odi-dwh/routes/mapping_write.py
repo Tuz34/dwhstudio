@@ -56,7 +56,12 @@ def api_mapping_analyze_prompt():
     try:
         with app_module.MappingGenerator() as mg:
             result = mg.analyze_prompt(prompt)
-            return jsonify(result)
+            cleaned = redacted_operation_result(result, "mapping prompt analysis")
+            if cleaned.pop("_public_validation", False):
+                # The producer built this sentence from validated application inputs before raising.
+                cleaned["validation"]["error"] = result["validation"]["error"]
+                cleaned["validation"]["error_type"] = result["validation"]["error_type"]
+            return jsonify(cleaned)
     except Exception as exc:
         return redacted_write_error("mapping prompt analysis", exc)
 
@@ -275,7 +280,7 @@ def api_mapping_generate_graph():
             except (TypeError, ValueError):
                 clean_result[key] = str(value)
 
-        return jsonify(clean_result)
+        return jsonify(redacted_operation_result(clean_result, "mapping graph generation"))
     except Exception as exc:
         app_module.logger.error("LangGraph pipeline failed: %s", type(exc).__name__)
         return redacted_write_error("mapping graph generation", exc)

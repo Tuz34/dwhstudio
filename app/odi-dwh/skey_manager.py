@@ -162,7 +162,9 @@ END""".strip()
                 # Check the grant even if the table already exists.
                 self._auto_grant(conn, owner, f"SKEY_MAP_{table}", "TABLE")
             else:
-                result["errors"].append({"object": f"SKEY_MAP_{table}", "error": str(e)})
+                result["errors"].append({"object": f"SKEY_MAP_{table}",
+                                         "error": "SKEY object creation failed.",
+                                         "error_type": type(e).__name__})
                 self._log_operation(conn, batch_id, "CREATE_TABLE", owner,
                                     f"SKEY_MAP_{table}", skey_ddl, "FAILED", str(e))
 
@@ -182,7 +184,9 @@ END""".strip()
                 result["skipped"].append(f"SEQ_{table}")
                 self._auto_grant(conn, owner, f"SEQ_{table}", "SEQUENCE")
             else:
-                result["errors"].append({"object": f"SEQ_{table}", "error": str(e)})
+                result["errors"].append({"object": f"SEQ_{table}",
+                                         "error": "SKEY object creation failed.",
+                                         "error_type": type(e).__name__})
                 self._log_operation(conn, batch_id, "CREATE_SEQUENCE", owner,
                                     f"SEQ_{table}", seq_ddl, "FAILED", str(e))
 
