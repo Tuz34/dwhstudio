@@ -444,13 +444,17 @@ def api_odi_mappings():
     app_module = get_app_module()
     raw_data = "[]"
     try:
-        raw_data = app_module.odi_get_mapping_lineage(limit=ODI_MAPPINGS_LIST_CAP)
+        # One mapping past the cap: a full page is not truncation.
+        raw_data = app_module.odi_get_mapping_lineage(limit=ODI_MAPPINGS_LIST_CAP + 1)
         items = json.loads(raw_data)
         if not isinstance(items, list):
             return current_app.response_class(response=raw_data, status=200, mimetype="application/json")
         grouped = _group_odi_mapping_lineage_items(items)
+        truncated = len(grouped) > ODI_MAPPINGS_LIST_CAP
+        if truncated:
+            grouped = grouped[:ODI_MAPPINGS_LIST_CAP]
         response = jsonify(grouped)
-        if len(grouped) >= ODI_MAPPINGS_LIST_CAP:
+        if truncated:
             response.headers["X-ODI-Mappings-Truncated"] = "1"
             response.headers["X-ODI-Mappings-Limit"] = str(ODI_MAPPINGS_LIST_CAP)
         return response
@@ -463,7 +467,7 @@ def api_odi_mappings():
 def api_odi_lineage():
     app_module = get_app_module()
     try:
-        data_str = app_module.odi_get_mapping_lineage()
+        data_str = app_module.odi_get_mapping_lineage(limit=50)
         return current_app.response_class(response=data_str, status=200, mimetype="application/json")
     except Exception as exc:
         return redacted_error("Operational read", exc)

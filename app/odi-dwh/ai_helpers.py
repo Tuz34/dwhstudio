@@ -150,12 +150,17 @@ def _modeled_tables_answer(message: str | None = None):
         }
 
     modeled_cap = 100
-    raw_data = odi_get_mapping_lineage(limit=modeled_cap)
+    # One mapping past the cap: a full page is not truncation.
+    raw_data = odi_get_mapping_lineage(limit=modeled_cap + 1)
     items = json.loads(raw_data)
     if not isinstance(items, list):
         items = []
+    grouped = _group_odi_mapping_lineage_items(items)
+    truncated = len(grouped) > modeled_cap
+    if truncated:
+        grouped = grouped[:modeled_cap]
     rows = []
-    for m in _group_odi_mapping_lineage_items(items):
+    for m in grouped:
         target = "?"
         if m.get("TGT_TABLE") not in (None, "?"):
             target = f"{m.get('TGT_OWNER', 'DWH')}.{m.get('TGT_TABLE')}"
@@ -167,7 +172,7 @@ def _modeled_tables_answer(message: str | None = None):
             "DESCRIPTION": m.get("DESC"),
         })
     aciklama = "Tables modeled in the current ODI mapping inventory are listed below."
-    if len(rows) >= modeled_cap:
+    if truncated:
         aciklama = (
             f"{aciklama} This listing summarises the first {modeled_cap} mappings."
         )
