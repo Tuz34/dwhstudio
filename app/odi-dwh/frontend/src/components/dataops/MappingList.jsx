@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { getOdiMappings, getOdiMappingDetail, runMapping, getMappingState, deleteMapping } from '../../services/api';
 import { useDispatch } from '../../store/AppContext';
 import clsx from 'clsx';
+import { mappingsCapNotice } from './mappingListCap';
 import { buildRunMappingRequest, openRunDialogState, runModeWarning, selectRunMode } from './mappingRunDialog';
 import { applyDetailResponse, applyListResponse, beginDetailRequest } from './mappingSelection';
 import {
@@ -110,6 +111,7 @@ function mappingContext(mapping = {}) {
 export function MappingList() {
   const dispatch = useDispatch();
   const [mappings, setMappings] = useState([]);
+  const [capNotice, setCapNotice] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
@@ -196,6 +198,7 @@ export function MappingList() {
   const loadMappings = useCallback(async () => {
     try {
       const data = await getOdiMappings();
+      setCapNotice(mappingsCapNotice(data));
       const unique = [];
       const seen = new Set();
       (Array.isArray(data) ? data : []).forEach(m => {
@@ -235,6 +238,7 @@ export function MappingList() {
         setTimeout(() => loadDetail(unique[0].MAPPING_NAME), 0);
       }
     } catch (e) {
+      setCapNotice('');
       showToast('Failed to load: ' + e.message, 'error');
     } finally {
       setLoading(false);
@@ -467,6 +471,9 @@ export function MappingList() {
         <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2 shrink-0">
           <i className="fa-solid fa-diagram-project text-violet-500"></i>
           ODI Mappings
+          {capNotice ? (
+            <span className="text-xs font-medium text-slate-500">{capNotice}</span>
+          ) : null}
         </h3>
         <div className="flex gap-2 flex-1 max-w-sm">
           <div className="relative flex-1">

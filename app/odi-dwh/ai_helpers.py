@@ -149,7 +149,8 @@ def _modeled_tables_answer(message: str | None = None):
             "raw": "",
         }
 
-    raw_data = odi_get_mapping_lineage(limit=100)
+    modeled_cap = 100
+    raw_data = odi_get_mapping_lineage(limit=modeled_cap)
     items = json.loads(raw_data)
     if not isinstance(items, list):
         items = []
@@ -165,8 +166,13 @@ def _modeled_tables_answer(message: str | None = None):
             "LAYER": m.get("LAYER"),
             "DESCRIPTION": m.get("DESC"),
         })
+    aciklama = "Tables modeled in the current ODI mapping inventory are listed below."
+    if len(rows) >= modeled_cap:
+        aciklama = (
+            f"{aciklama} This listing summarises the first {modeled_cap} mappings."
+        )
     return {
-        "aciklama": "Tables modeled in the current ODI mapping inventory are listed below.",
+        "aciklama": aciklama,
         "queries": [{
             "action": "select",
             "label": "Modeled Tables",

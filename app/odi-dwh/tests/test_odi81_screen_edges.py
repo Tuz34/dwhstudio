@@ -508,8 +508,11 @@ def test_lineage_query_adds_is_target_from_the_details_expression_joins():
         "r.QUALIFIED_NAME as TABLE_QUALIFIED_NAME",
     ):
         assert column in body
-    assert "ORDER BY m.NAME, c.TYPE_NAME" in body
-    assert "FETCH FIRST {limit} ROWS ONLY" in body
+    assert "ORDER BY m2.NAME, m2.I_MAPPING" in body
+    assert "ORDER BY m.NAME, c.TYPE_NAME, c.I_MAP_COMP" in body
+    assert "FETCH FIRST :lmt ROWS ONLY" in body
+    assert "FETCH FIRST {limit}" not in body
+    assert "params={\"lmt\": int(limit)}" in body or "params={'lmt': int(limit)}" in body
     assert "FROM {ODI_REPO_SCHEMA}.SNP_MAPPING m" in body
     assert "LEFT JOIN {ODI_REPO_SCHEMA}.SNP_PROJECT p ON p.I_PROJECT = m.I_PROJECT" in body
     assert "LEFT JOIN {ODI_REPO_SCHEMA}.SNP_FOLDER f ON f.I_FOLDER = m.I_FOLDER" in body

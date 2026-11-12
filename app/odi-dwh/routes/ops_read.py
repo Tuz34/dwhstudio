@@ -10,6 +10,7 @@ from routes.error_responses import redacted_error, redacted_operation_result
 
 
 bp = Blueprint("ops_read", __name__)
+ODI_MAPPINGS_LIST_CAP = 500
 
 
 @bp.route("/api/monitoring/freshness")
@@ -443,11 +444,16 @@ def api_odi_mappings():
     app_module = get_app_module()
     raw_data = "[]"
     try:
-        raw_data = app_module.odi_get_mapping_lineage(limit=100)
+        raw_data = app_module.odi_get_mapping_lineage(limit=ODI_MAPPINGS_LIST_CAP)
         items = json.loads(raw_data)
         if not isinstance(items, list):
             return current_app.response_class(response=raw_data, status=200, mimetype="application/json")
-        return jsonify(_group_odi_mapping_lineage_items(items))
+        grouped = _group_odi_mapping_lineage_items(items)
+        response = jsonify(grouped)
+        if len(grouped) >= ODI_MAPPINGS_LIST_CAP:
+            response.headers["X-ODI-Mappings-Truncated"] = "1"
+            response.headers["X-ODI-Mappings-Limit"] = str(ODI_MAPPINGS_LIST_CAP)
+        return response
     except Exception as exc:
         app_module.logger.error("Critical mappings error: %s", type(exc).__name__)
         return current_app.response_class(response=raw_data, status=200, mimetype="application/json")
