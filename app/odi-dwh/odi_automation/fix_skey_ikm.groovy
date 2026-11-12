@@ -18,7 +18,7 @@ import oracle.odi.core.persistence.transaction.*
 
 def odi = null
 try {
-    String propsPath = "c:/oracle_ai_app/scratch/odi_automation/odi_connection.properties"
+    String propsPath = args?.length ? args[0] : "odi_connection.properties"
     Properties props = new Properties()
     new FileInputStream(propsPath).withStream { props.load(it) }
     PoolingAttributes poolAttrs = new PoolingAttributes()
