@@ -5,8 +5,11 @@ Offline only. These tests must fail on the pre-change contract and service.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import threading
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -387,17 +390,28 @@ def _install_evidence_driver(monkeypatch, script):
             script["sql"].append(sql)
             script["params"].append(params)
             script["events"].append("execute")
+            gate = script.get("block_execute")
+            if gate is not None:
+                entered = script.get("execute_entered")
+                if entered is not None:
+                    entered.set()
+                gate.wait()
             error = script.get("execute_error")
             if error is not None:
                 raise error
 
         @property
         def description(self):
+            if "SUBSTR" in self.last_sql and "NB_ROW" in self.last_sql:
+                return [("SESS_NO",), *((name,) for name in _COUNT_COLUMNS), ("ERROR_MESSAGE",)]
             if "SUBSTR" in self.last_sql:
                 return [("SESS_NO",), ("ERROR_MESSAGE",)]
             return [("SESS_NO",), *((name,) for name in _COUNT_COLUMNS)]
 
         def _payload(self):
+            if "SUBSTR" in self.last_sql and "NB_ROW" in self.last_sql:
+                message = script["error_rows"][0][1] if script.get("error_rows") else None
+                return [tuple(row) + (message,) for row in script["rows"]]
             if "SUBSTR" in self.last_sql:
                 return script["error_rows"]
             return script["rows"]
@@ -429,6 +443,9 @@ def _install_evidence_driver(monkeypatch, script):
 
         def close(self):
             script["closed"] = True
+            closed_event = script.get("closed_event")
+            if closed_event is not None:
+                closed_event.set()
 
     def connect(*_args, **kwargs):
         script["tcp_connect_timeout"] = kwargs.get("tcp_connect_timeout", "missing")
@@ -485,13 +502,13 @@ def test_round2_failed_read_cuts_the_message_in_sql(monkeypatch):
     _install_evidence_driver(monkeypatch, script)
     outcome = _run(monkeypatch, with_session(failed_run()))
     _assert_budget(script, require_call_timeout=True)
-    assert len(script["sql"]) == 2
-    assert "SESS_MESS" not in script["sql"][0]
-    error_sql = script["sql"][1]
+    assert len(script["sql"]) == 1
+    error_sql = script["sql"][0]
     assert "SUBSTR(SESS_MESS, 1, 4000)" in error_sql
     assert "SESS_NO" in error_sql
-    assert "NB_ROW" not in error_sql
-    assert script["fetchmany"] == [2, 2]
+    for column in ("NB_ROW", "NB_INS", "NB_UPD", "NB_ERR"):
+        assert column in error_sql
+    assert script["fetchmany"] == [2]
     assert outcome.status_code == 502
     assert outcome.payload["session_error_code"] == "ORA-00932"
     assert outcome.payload["counts"] == COUNTS
@@ -544,10 +561,11 @@ def test_round2_row_must_be_exactly_one_matching_session(monkeypatch, rows):
 
 
 def test_round2_mismatched_error_row_omits_only_the_code(monkeypatch):
-    script = _evidence_script(error_rows=[(999, HOSTILE_ERROR)])
+    """One statement: a matching session with a non-text message keeps counts only."""
+    script = _evidence_script(error_rows=[(311, 12345)])
     _install_evidence_driver(monkeypatch, script)
     outcome = _run(monkeypatch, with_session(failed_run()))
-    assert len(script["sql"]) == 2
+    assert len(script["sql"]) == 1
     assert outcome.status_code == 502
     assert outcome.payload["counts"] == COUNTS
     assert "session_error_code" not in outcome.payload
@@ -654,3 +672,240 @@ def test_round2_refresh_shows_loading_and_clears_a_missing_selection():
     assert "setDetail(null)" in body
     assert "setRunDialog" in body
     assert "setLoading(true)" not in body
+
+
+# --- round 3: one total deadline, and in-flight detail reconciliation -------
+
+def _shape(payload):
+    body = json.loads(json.dumps(payload))
+    body.pop("batch_id", None)
+    return body
+
+
+def _finish_evidence_workers():
+    """Release helper for daemon readers. Bounded joins, no time.sleep."""
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        alive = [
+            item for item in threading.enumerate()
+            if item.name == "odi-evidence-read" and item.is_alive()
+        ]
+        if not alive:
+            return
+        alive[0].join(0.1)
+
+
+def test_round3_budget_bounds_the_service_and_drops_a_late_row(monkeypatch):
+    """A blocked read returns inside the injected budget; a late row changes nothing."""
+    import odi_mcp
+
+    assert odi_mcp.EVIDENCE_READ_BUDGET_S == 5
+    monkeypatch.setattr(odi_mcp, "EVIDENCE_READ_BUDGET_S", 0)
+    mono = {"n": 0}
+    wall = {"hit": False}
+    real_mono = time.monotonic
+
+    def counting():
+        mono["n"] += 1
+        return real_mono()
+
+    def wall_clock():
+        wall["hit"] = True
+        return real_mono()
+
+    if hasattr(odi_mcp, "time"):
+        monkeypatch.setattr(odi_mcp.time, "monotonic", counting)
+        monkeypatch.setattr(odi_mcp.time, "time", wall_clock)
+    seen = []
+    real_wait = threading.Event.wait
+
+    def spy(self, timeout=None):
+        seen.append(timeout)
+        return real_wait(self, timeout)
+
+    monkeypatch.setattr(threading.Event, "wait", spy)
+    original_reader = service._read_session_row
+    cases = (
+        (with_session(done()), 200, ["health", "options", "generate", "run", "persist"]),
+        (with_session(failed_run()), 502, ["health", "options", "generate", "run", "persist", "alert"]),
+    )
+    for remote, status_code, expected_events in cases:
+        baseline_events = setup_pipeline(monkeypatch, run=remote)
+        monkeypatch.setattr(service, "_read_session_row", lambda *_a, **_k: None)
+        baseline = service.execute_mapping_run(Mock(), _options())
+        assert list(baseline_events) == expected_events
+        assert baseline.status_code == status_code
+        monkeypatch.setattr(service, "_read_session_row", original_reader)
+
+        release = threading.Event()
+        entered = threading.Event()
+        closed_event = threading.Event()
+        script = _evidence_script(
+            block_execute=release, execute_entered=entered, closed_event=closed_event,
+        )
+        _install_evidence_driver(monkeypatch, script)
+        events = setup_pipeline(monkeypatch, run=remote)
+        box = {}
+
+        def invoke(box=box, events=events):
+            try:
+                box["outcome"] = service.execute_mapping_run(Mock(), _options())
+            except Exception as exc:  # noqa: BLE001 - the test records a failed call
+                box["error"] = exc
+
+        caller = threading.Thread(target=invoke, daemon=True)
+        seen.clear()
+        mono["n"] = 0
+        try:
+            caller.start()
+            caller.join(1)
+            assert not caller.is_alive(), "evidence read ignored EVIDENCE_READ_BUDGET_S"
+            assert "error" not in box
+            outcome = box["outcome"]
+            waits = [item for item in seen if isinstance(item, (int, float)) and not isinstance(item, bool)]
+            assert waits and min(waits) <= 0.05
+            assert hasattr(odi_mcp, "time")
+            assert mono["n"] >= 1
+            assert wall["hit"] is False
+            assert entered.wait(1)
+            assert script["closed"] is False
+            frozen = copy.deepcopy(outcome.payload)
+            frozen_events = list(events)
+            release.set()
+            assert closed_event.wait(1)
+            _finish_evidence_workers()
+            assert outcome.payload == frozen
+            assert events == frozen_events
+            assert _shape(outcome.payload) == _shape(baseline.payload)
+            assert outcome.payload["session_number"] == 311
+            assert "counts" not in outcome.payload
+            assert "session_error_code" not in outcome.payload
+            assert HOSTILE_ERROR not in json.dumps(outcome.payload)
+            assert list(events) == expected_events
+        finally:
+            release.set()
+            caller.join(2)
+            _finish_evidence_workers()
+
+
+def test_round3_busy_slots_are_evidence_absent_immediately(monkeypatch):
+    import odi_mcp
+
+    release = threading.Event()
+    entered = threading.Event()
+    state = {"connects": 0, "closes": 0}
+    lock = threading.Lock()
+
+    class Cursor:
+        description = [
+            ("SESS_NO",), ("PROCESSED_ROWS",), ("INSERTED_ROWS",),
+            ("UPDATED_ROWS",), ("ERROR_ROWS",),
+        ]
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchmany(self, _size):
+            return [(311, 1, 0, 0, 0)]
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            with lock:
+                state["closes"] += 1
+
+    def connect(*_args, **_kwargs):
+        with lock:
+            state["connects"] += 1
+            if state["connects"] >= 2:
+                entered.set()
+        release.wait()
+        return Connection()
+
+    monkeypatch.setattr(odi_mcp.oracledb, "connect", connect)
+    monkeypatch.setattr(odi_mcp, "EVIDENCE_READ_BUDGET_S", 0)
+    threads = [
+        threading.Thread(
+            target=lambda: odi_mcp.read_session_run_evidence(311, include_error_text=False),
+            daemon=True,
+        )
+        for _ in range(2)
+    ]
+    box = {}
+
+    def third_read():
+        box["row"] = odi_mcp.read_session_run_evidence(311, include_error_text=False)
+
+    third = threading.Thread(target=third_read, daemon=True)
+    try:
+        for thread in threads:
+            thread.start()
+        assert entered.wait(1)
+        monkeypatch.setattr(odi_mcp, "EVIDENCE_READ_BUDGET_S", 5)
+        third.start()
+        third.join(0.3)
+        assert not third.is_alive()
+        assert box["row"] is None
+        assert state["connects"] == 2
+        release.set()
+        for thread in threads:
+            thread.join(2)
+        _finish_evidence_workers()
+        assert state["closes"] == 2
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(2)
+        third.join(2)
+        _finish_evidence_workers()
+
+
+def test_round3_one_statement_per_outcome_and_the_worker_closes(monkeypatch):
+    import odi_mcp
+
+    assert odi_mcp.EVIDENCE_READ_BUDGET_S == 5
+    done_script = _evidence_script()
+    _install_evidence_driver(monkeypatch, done_script)
+    done_outcome = _run(monkeypatch, with_session(done()))
+    _assert_budget(done_script, require_call_timeout=True)
+    assert done_script["closed"] is True
+    assert len(done_script["sql"]) == 1
+    assert "SESS_MESS" not in done_script["sql"][0]
+    assert done_script["fetchmany"] == [2]
+    assert done_outcome.status_code == 200
+    assert done_outcome.payload["counts"] == COUNTS
+    assert "session_error_code" not in done_outcome.payload
+
+    error_script = _evidence_script()
+    _install_evidence_driver(monkeypatch, error_script)
+    error_outcome = _run(monkeypatch, with_session(failed_run()))
+    assert error_script["closed"] is True
+    assert len(error_script["sql"]) == 1
+    sql = error_script["sql"][0]
+    assert "SUBSTR(SESS_MESS, 1, 4000)" in sql
+    for column in ("SESS_NO", "NB_ROW", "NB_INS", "NB_UPD", "NB_ERR"):
+        assert column in sql
+    assert error_script["fetchmany"] == [2]
+    assert error_script["params"] == [{"sess_no": 311}]
+    assert error_outcome.status_code == 502
+    assert error_outcome.payload["counts"] == COUNTS
+    assert error_outcome.payload["session_error_code"] == "ORA-00932"
+    assert HOSTILE_ERROR not in json.dumps(error_outcome.payload)
+
+
+def test_round3_driver_error_closes_and_logs_only_the_class(monkeypatch, caplog):
+    script = _evidence_script(execute_error=TimeoutError("SECRET-SESS_MESS"))
+    script["closed_event"] = threading.Event()
+    _install_evidence_driver(monkeypatch, script)
+    with caplog.at_level(logging.WARNING, logger="odi_mcp"):
+        outcome = _run(monkeypatch, with_session(done()))
+    assert script["closed"] is True
+    assert outcome.status_code == 200
+    assert outcome.payload["status"] == "SUCCESS"
+    assert outcome.payload["session_number"] == 311
+    assert "counts" not in outcome.payload
+    assert "SECRET" not in caplog.text
+    assert "SECRET" not in json.dumps(outcome.payload)
+    assert [record.message for record in caplog.records if record.name == "odi_mcp"] == ["TimeoutError"]
