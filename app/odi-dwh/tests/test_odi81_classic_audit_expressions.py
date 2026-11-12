@@ -423,6 +423,11 @@ def _run_mapping_assignment(tmp_path: Path, spec: dict) -> dict:
             properties.append(f'System.clearProperty("{key}")')
         else:
             properties.append(f'System.setProperty("{key}", {_groovy_literal(value)})')
+    class_marker = "class audit_type_unknown extends "
+    prelude = ""
+    if class_marker in source:
+        class_at = source.index(class_marker)
+        prelude = source[class_at:source.index("\n}", class_at) + 2]
     source_attributes = ", ".join(
         _attr_call(name) for name in spec.get("source_attributes", ("ENTITY_ID", "ATTR_TEXT"))
     )
@@ -484,6 +489,7 @@ def integrationTypeParam = "{spec["integration"]}"
 def ukColNames = [{keys}] as Set
 def sourceSystemName = "ORACLE_SAMPLE_SCHEMAS"
 {chr(10).join(properties)}
+{prelude}
 boolean rejected = false
 String errorClass = ""
 String errorText = ""
@@ -1400,10 +1406,17 @@ def test_graph_fallback_casts_a_number_session_batch(tmp_path):
     assert floating["assigned"]["ETL_BATCH_ID"] == f"CAST(TO_NUMBER({_QUOTED_BATCH}) AS BINARY_DOUBLE)"
 
 
-def test_graph_fallback_keeps_the_quoted_session_literal_without_a_datatype(tmp_path):
+def test_graph_fallback_rejects_an_unknown_session_batch_datatype(tmp_path):
     report = _run_mapping_assignment(tmp_path, _fallback_spec("ETL_BATCH_ID"))
-    assert report["rejected"] is False, report["error_text"]
-    assert report["assigned"]["ETL_BATCH_ID"] == _QUOTED_BATCH
+    assert report["rejected"] is True
+    assert report["error_class"] == "audit_type_unknown"
+    assert report["assigned"]["ETL_BATCH_ID"] is None
+    assert _QUOTED_BATCH not in report["operator_output"]
+    known = _run_mapping_assignment(tmp_path, _fallback_spec(
+        {"name": "ETL_BATCH_ID", "code": "VARCHAR2"},
+    ))
+    assert known["rejected"] is False, known["error_text"]
+    assert known["assigned"]["ETL_BATCH_ID"] == _QUOTED_BATCH
     dated = _run_mapping_assignment(tmp_path, _fallback_spec("INSERT_DATE"))
     assert dated["assigned"]["INSERT_DATE"] == "CURRENT_TIMESTAMP"
 

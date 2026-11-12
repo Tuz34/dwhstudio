@@ -511,15 +511,23 @@ def node_create_mapping(state: MappingState) -> dict:
             "completed_steps": list(state.get("completed_steps", [])) + ["create_mapping"],
         }
     except Exception as e:
+        code = getattr(e, "error_code", None)
+        detail = "Mapping creation failed."
+        if code:
+            from routes.error_responses import fixed_error_sentence
+
+            sentence = fixed_error_sentence(code)
+            if sentence is not None:
+                detail = sentence
         failure = {
             "current_step": "create_mapping",
             "overall_status": "failed",
-            "error": "Mapping creation failed.",
+            "error": detail,
             "error_type": type(e).__name__,
-            "log": _add_log(state, "create_mapping", "FAILED", "Mapping creation failed."),
+            "log": _add_log(state, "create_mapping", "FAILED", detail),
         }
-        if getattr(e, "error_code", None):
-            failure["error_code"] = e.error_code
+        if code:
+            failure["error_code"] = code
         return failure
 
 

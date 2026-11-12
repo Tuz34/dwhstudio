@@ -2048,11 +2048,17 @@ class MappingGenerator:
         state = mapping_replace_state_from_output(result)
         if create_mapping_output_failed(result):
             failure_class = state["error_type"] or "MappingCreationFailure"
-            self._add_log("create_mapping", "FAILED", failure_class)
-            raise MappingCreationFailure(
-                f"Could not create ODI mapping. error_type={failure_class}",
+            from routes.error_responses import fixed_error_sentence
+
+            sentence = fixed_error_sentence(failure_class)
+            self._add_log("create_mapping", "FAILED", sentence or failure_class)
+            failure = MappingCreationFailure(
+                sentence or f"Could not create ODI mapping. error_type={failure_class}",
                 state,
             )
+            if sentence is not None:
+                failure.error_code = failure_class
+            raise failure
 
         self._add_log("create_mapping", "SUCCESS", result[:100])
         return {
@@ -2486,6 +2492,9 @@ class MappingGenerator:
         except (ValueError, RuntimeError) as e:
             result["overall_status"] = "FAILED"
             result["error"] = str(e)
+            code = getattr(e, "error_code", None)
+            if isinstance(code, str) and code:
+                result["error_code"] = code
             self._add_log("update_pipeline", "FAILED", str(e))
         except Exception as e:
             result["overall_status"] = "FAILED"
@@ -2572,6 +2581,16 @@ class MappingGenerator:
         )
 
         if "Hata:" in result or "FATAL ERROR" in result:
+            from routes.error_responses import fixed_error_sentence
+
+            match = _ERROR_TYPE_ASSIGN_RE.search(result)
+            code = match.group(1) if match else None
+            sentence = fixed_error_sentence(code)
+            if sentence is not None:
+                self._add_log("update_mapping", "FAILED", sentence)
+                failure = RuntimeError(sentence)
+                failure.error_code = code
+                raise failure
             self._add_log("update_mapping", "FAILED", result)
             raise RuntimeError(f"ODI mapping update failed: {result}")
 

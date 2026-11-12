@@ -149,6 +149,11 @@ def temporaryReplacementName = { String finalName ->
     return candidate
 }
 
+// The class name is the only value Python accepts for this failure.
+class audit_type_unknown extends IllegalStateException {
+    audit_type_unknown() { super("audit_type_unknown") }
+}
+
 ITransactionManager txnMgr = odi.getTransactionManager()
 ITransactionStatus txnStatus = txnMgr.getTransaction(new oracle.odi.core.persistence.transaction.support.DefaultTransactionDefinition())
 boolean preserveExistingOnFailure = false
@@ -529,8 +534,8 @@ try {
         println "CUSTOM EXPRESSIONS: count=${customExpressions.size()}"
     }
 
-    // Quoted session text is CHAR. A NUMBER column needs TO_NUMBER. When the
-    // attribute type cannot be read, keep the historical quoted literal.
+    // Quoted session text is only for a known character code. NUMBER, FLOAT, and
+    // the binary floats keep their numeric branches. Any other code fails closed.
     String sessionBatchLiteral = "'<%=odiRef.getSession(\"SESS_NO\")%>'"
     def typedSessionBatch = { attribute ->
         String quoted = sessionBatchLiteral
@@ -546,7 +551,7 @@ try {
             typeCode = null
         }
         if (typeCode == null || typeCode.length() == 0) {
-            return quoted
+            throw new audit_type_unknown()
         }
         try {
             def rawLength = attribute.getLength()
@@ -570,7 +575,34 @@ try {
         if (typeCode == "BINARY_DOUBLE" || typeCode == "BINARY_FLOAT") {
             return "CAST(" + numeric + " AS " + typeCode + ")"
         }
-        return quoted
+        if (typeCode in ["VARCHAR2", "VARCHAR", "CHAR", "NVARCHAR2", "NCHAR", "CLOB", "NCLOB", "LONG"]) {
+            return quoted
+        }
+        throw new audit_type_unknown()
+    }
+
+    // Fail before the assignment loop. A custom or name-matched column never reaches this.
+    def needsSessionBatch = { tAttr ->
+        String attrName = tAttr.getName().toUpperCase()
+        if (attrName != "ETL_BATCH_ID" || customExpressions.containsKey(attrName)) {
+            return false
+        }
+        boolean onSource = srcComp.getAttributes().any {
+            it.getName().equalsIgnoreCase(tAttr.getName())
+        }
+        if (onSource) { return false }
+        if (joinSrcComp != null) {
+            boolean onJoin = joinSrcComp.getAttributes().any {
+                it.getName().equalsIgnoreCase(tAttr.getName())
+            }
+            if (onJoin) { return false }
+        }
+        return true
+    }
+    tgtComp.getAttributes().each { tAttr ->
+        if (needsSessionBatch(tAttr)) {
+            typedSessionBatch(tAttr)
+        }
     }
 
     tgtComp.getAttributes().each { tAttr ->
