@@ -70,38 +70,51 @@ class MappingValidationFailed extends RuntimeException {
 }
 
 // The class name is the only value Python accepts when a rebuild cannot keep the old text.
+// reason is a closed code. It is never expression text, an attribute name, or an ODI message.
 class audit_expression_not_restored extends RuntimeException {
-    audit_expression_not_restored() {
+    final String reason
+    audit_expression_not_restored(String reason) {
         super("audit_expression_not_restored")
+        this.reason = reason
     }
 }
+
+final Set RESTORE_FAILURE_REASONS = [
+    "missing_attribute",
+    "duplicate_attribute",
+    "null_attribute",
+    "read_failed",
+    "write_failed",
+    "readback_mismatch",
+    "count_mismatch",
+] as Set
 
 // Read every target expression before a filter rebuild removes the component.
 // Null text is a captured absence. A failed read does not continue.
 def captureTargetExpressions = { component ->
     if (component == null) {
-        throw new audit_expression_not_restored()
+        throw new audit_expression_not_restored("read_failed")
     }
     Map saved = new LinkedHashMap()
     def attributes
     try {
         attributes = component.getAttributes()
     } catch (Throwable ignored) {
-        throw new audit_expression_not_restored()
+        throw new audit_expression_not_restored("read_failed")
     }
     if (attributes == null) {
-        throw new audit_expression_not_restored()
+        throw new audit_expression_not_restored("read_failed")
     }
     attributes.each { attr ->
         if (attr == null) {
-            throw new audit_expression_not_restored()
+            throw new audit_expression_not_restored("null_attribute")
         }
         String key
         String text
         try {
             String name = attr.getName()
             if (name == null || name.trim().length() == 0) {
-                throw new audit_expression_not_restored()
+                throw new audit_expression_not_restored("null_attribute")
             }
             key = name.toUpperCase(Locale.ROOT)
             def expression = attr.getExpression()
@@ -109,10 +122,10 @@ def captureTargetExpressions = { component ->
         } catch (audit_expression_not_restored denied) {
             throw denied
         } catch (Throwable ignored) {
-            throw new audit_expression_not_restored()
+            throw new audit_expression_not_restored("read_failed")
         }
         if (saved.containsKey(key)) {
-            throw new audit_expression_not_restored()
+            throw new audit_expression_not_restored("duplicate_attribute")
         }
         saved.put(key, text)
     }
@@ -120,38 +133,42 @@ def captureTargetExpressions = { component ->
 }
 
 // Put the captured text back. A missing, duplicate, or unverified value fails closed.
+// getText() is compared to the captured text. A different read-back does not commit.
 def restoreTargetExpressions = { component, Map saved ->
     if (component == null || saved == null) {
-        throw new audit_expression_not_restored()
+        throw new audit_expression_not_restored("read_failed")
     }
     def attributes
     try {
         attributes = component.getAttributes()
     } catch (Throwable ignored) {
-        throw new audit_expression_not_restored()
+        throw new audit_expression_not_restored("read_failed")
     }
     if (attributes == null) {
-        throw new audit_expression_not_restored()
+        throw new audit_expression_not_restored("read_failed")
     }
     Set seen = new LinkedHashSet()
     attributes.each { attr ->
         if (attr == null) {
-            throw new audit_expression_not_restored()
+            throw new audit_expression_not_restored("null_attribute")
         }
         String key
         try {
             String name = attr.getName()
             if (name == null || name.trim().length() == 0) {
-                throw new audit_expression_not_restored()
+                throw new audit_expression_not_restored("null_attribute")
             }
             key = name.toUpperCase(Locale.ROOT)
         } catch (audit_expression_not_restored denied) {
             throw denied
         } catch (Throwable ignored) {
-            throw new audit_expression_not_restored()
+            throw new audit_expression_not_restored("read_failed")
         }
-        if (!saved.containsKey(key) || !seen.add(key)) {
-            throw new audit_expression_not_restored()
+        if (!saved.containsKey(key)) {
+            throw new audit_expression_not_restored("count_mismatch")
+        }
+        if (!seen.add(key)) {
+            throw new audit_expression_not_restored("duplicate_attribute")
         }
         def text = saved.get(key)
         if (text == null) {
@@ -160,10 +177,10 @@ def restoreTargetExpressions = { component, Map saved ->
                 def expression = attr.getExpression()
                 current = expression == null ? null : expression.getText()
             } catch (Throwable ignored) {
-                throw new audit_expression_not_restored()
+                throw new audit_expression_not_restored("read_failed")
             }
             if (current != null && current.trim().length() > 0) {
-                throw new audit_expression_not_restored()
+                throw new audit_expression_not_restored("readback_mismatch")
             }
         } else {
             try {
@@ -171,17 +188,17 @@ def restoreTargetExpressions = { component, Map saved ->
                 def expression = attr.getExpression()
                 String written = expression == null ? null : expression.getText()
                 if (written != text) {
-                    throw new audit_expression_not_restored()
+                    throw new audit_expression_not_restored("readback_mismatch")
                 }
             } catch (audit_expression_not_restored denied) {
                 throw denied
             } catch (Throwable ignored) {
-                throw new audit_expression_not_restored()
+                throw new audit_expression_not_restored("write_failed")
             }
         }
     }
     if (seen.size() != saved.size()) {
-        throw new audit_expression_not_restored()
+        throw new audit_expression_not_restored("missing_attribute")
     }
 }
 
@@ -790,7 +807,15 @@ try {
     println '{"status":"ikm_option_unsupported","action":"update_mapping","option":"' + unsupported.optionName + '"}'
 } catch (Exception e) {
     if (txnStatus != null && !txnStatus.isCompleted()) try { txnMgr.rollback(txnStatus) } catch (ig) {}
-    println '{"status":"error","action":"update_mapping","error_type":"' + e.getClass().getSimpleName() + '"}'
+    String restoreReason = null
+    if (e instanceof audit_expression_not_restored) {
+        restoreReason = ((audit_expression_not_restored) e).reason
+    }
+    if (restoreReason != null && RESTORE_FAILURE_REASONS.contains(restoreReason)) {
+        println '{"status":"error","action":"update_mapping","error_type":"audit_expression_not_restored","reason":"' + restoreReason + '"}'
+    } else {
+        println '{"status":"error","action":"update_mapping","error_type":"' + e.getClass().getSimpleName() + '"}'
+    }
     System.exit(1)
 } finally {
     if (standaloneMode && odi != null) odi.close()
