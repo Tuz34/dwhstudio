@@ -534,8 +534,8 @@ try {
         println "CUSTOM EXPRESSIONS: count=${customExpressions.size()}"
     }
 
-    // Quoted session text is CHAR. A NUMBER column needs TO_NUMBER. An unreadable
-    // attribute datatype fails closed before any expression is assigned.
+    // Quoted session text is only for a known character code. NUMBER, FLOAT, and
+    // the binary floats keep their numeric branches. Any other code fails closed.
     String sessionBatchLiteral = "'<%=odiRef.getSession(\"SESS_NO\")%>'"
     def typedSessionBatch = { attribute ->
         String quoted = sessionBatchLiteral
@@ -575,7 +575,10 @@ try {
         if (typeCode == "BINARY_DOUBLE" || typeCode == "BINARY_FLOAT") {
             return "CAST(" + numeric + " AS " + typeCode + ")"
         }
-        return quoted
+        if (typeCode in ["VARCHAR2", "VARCHAR", "CHAR", "NVARCHAR2", "NCHAR", "CLOB", "NCLOB", "LONG"]) {
+            return quoted
+        }
+        throw new audit_type_unknown()
     }
 
     // Fail before the assignment loop. A custom or name-matched column never reaches this.
