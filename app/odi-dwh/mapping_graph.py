@@ -83,6 +83,7 @@ class MappingState(TypedDict, total=False):
     batch_id: str                  # Operation batch ID
     current_step: str              # Active step name
     validated_params: dict         # Validated parameters
+    audit_handover: dict | None     # JSON-safe, request-scoped audit decision for resumed nodes
 
     # ── Step results ──
     parse_result: dict             # Prompt parsing result
@@ -154,6 +155,143 @@ def _repository_step_status(result: dict) -> tuple[str, str]:
     return "SUCCESS", combined[:240] or "ODI datastores checked"
 
 
+class GraphAuditStateMissing(ValueError):
+    """A resumed graph cannot safely reconstruct its pre-write audit decision."""
+
+    error_code = "graph_audit_state_missing"
+
+
+def _snapshot_data(snapshot) -> dict | None:
+    if snapshot is None:
+        return None
+    return {
+        "exists": snapshot.exists,
+        "reuse": snapshot.reuse,
+        "audit_columns": list(snapshot.audit_columns),
+        "declared_types": dict(snapshot.declared_types),
+        "owner": snapshot.owner,
+        "table": snapshot.table,
+    }
+
+
+def _snapshot_from_data(data: object, params: dict):
+    from target_table_service import TargetAuditSnapshot
+
+    if data is None:
+        return None
+    required = {"exists", "reuse", "audit_columns", "declared_types", "owner", "table"}
+    if not isinstance(data, dict) or set(data) != required:
+        raise GraphAuditStateMissing("Graph audit state is incomplete.")
+    columns, declared = data["audit_columns"], data["declared_types"]
+    if (
+        type(data["exists"]) is not bool or type(data["reuse"]) is not bool
+        or not isinstance(columns, list) or not all(isinstance(item, str) for item in columns)
+        or not isinstance(declared, dict)
+        or not all(isinstance(key, str) and isinstance(value, str) for key, value in declared.items())
+        or not isinstance(data["owner"], str) or not isinstance(data["table"], str)
+        or data["owner"] != params.get("tgt_owner") or data["table"] != params.get("tgt_table")
+        or (data["reuse"] and not data["exists"])
+        or (data["reuse"] and any(column not in declared for column in columns))
+    ):
+        raise GraphAuditStateMissing("Graph audit state is incomplete.")
+    return TargetAuditSnapshot(
+        exists=data["exists"], reuse=data["reuse"], audit_columns=tuple(columns),
+        declared_types=dict(declared), owner=data["owner"], table=data["table"],
+    )
+
+
+def _handover_from_target(generator, params: dict, target_result: dict) -> dict:
+    """Keep only the prepared CASE profile and target snapshots, never the generator/plan."""
+    from target_table_service import TargetAuditSnapshot, declared_type_map, read_table_schema
+
+    snapshot = generator._target_audit_snapshot
+    post_target = snapshot
+    if snapshot is not None and target_result.get("status") == "CREATED":
+        # The pre-DDL snapshot must remain intact for parity. A second, post-DDL
+        # expectation protects the window before ODI datastore/mapping writes.
+        declared = declared_type_map(read_table_schema(snapshot.owner, snapshot.table))
+        if any(column not in declared or not declared[column] for column in snapshot.audit_columns):
+            raise GraphAuditStateMissing("Graph audit state is incomplete.")
+        post_target = TargetAuditSnapshot(
+            exists=True, reuse=True, audit_columns=snapshot.audit_columns,
+            declared_types={column: declared[column] for column in snapshot.audit_columns},
+            owner=snapshot.owner, table=snapshot.table,
+        )
+    elif snapshot is not None and target_result.get("status") != "ALREADY_IN_SYNC":
+        raise GraphAuditStateMissing("Graph audit state is incomplete.")
+    return {
+        "version": 1,
+        "target": [params["tgt_owner"], params["tgt_table"]],
+        "integration_type": params["integration_type"],
+        "update_key_columns": list(params.get("update_key_columns") or []),
+        "expressions": dict(generator._audit_preservation_expressions),
+        "lookup_alias": generator._audit_lookup_alias,
+        "public": dict(generator._audit_preservation_public),
+        "types_decided": generator._audit_types_decided,
+        "snapshot": _snapshot_data(snapshot),
+        "post_target_snapshot": _snapshot_data(post_target),
+    }
+
+
+def _restore_audit_handover(generator, state: MappingState) -> object:
+    """Reject old or partial checkpoints before any ODI repository write."""
+    params = state.get("validated_params") or {}
+    data = state.get("audit_handover")
+    required = {
+        "version", "target", "integration_type", "update_key_columns", "expressions",
+        "lookup_alias", "public", "types_decided", "snapshot", "post_target_snapshot",
+    }
+    if not isinstance(data, dict) or set(data) != required or type(data["version"]) is not int or data["version"] != 1:
+        raise GraphAuditStateMissing("Graph audit state is incomplete.")
+    expressions, public = data["expressions"], data["public"]
+    if (
+        data["target"] != [params.get("tgt_owner"), params.get("tgt_table")]
+        or data["integration_type"] != params.get("integration_type")
+        or data["update_key_columns"] != list(params.get("update_key_columns") or [])
+        or not isinstance(expressions, dict)
+        or not all(isinstance(key, str) and isinstance(value, str) for key, value in expressions.items())
+        or not isinstance(public, dict)
+        or set(public) != {"qualified", "expression_count", "business_column_count", "key_count"}
+        or type(public["qualified"]) is not bool
+        or any(type(public[key]) is not int for key in ("expression_count", "business_column_count", "key_count"))
+        or public["expression_count"] != len(expressions)
+        or data["lookup_alias"] is not None and not isinstance(data["lookup_alias"], str)
+        or type(data["types_decided"]) is not bool
+    ):
+        raise GraphAuditStateMissing("Graph audit state is incomplete.")
+    snapshot = _snapshot_from_data(data["snapshot"], params)
+    post_target = _snapshot_from_data(data["post_target_snapshot"], params)
+    if (snapshot is None) != (post_target is None) or (expressions and snapshot is None):
+        raise GraphAuditStateMissing("Graph audit state is incomplete.")
+    generator._audit_preservation_expressions = dict(expressions)
+    generator._audit_lookup_alias = data["lookup_alias"]
+    generator._audit_preservation_public = dict(public)
+    generator._audit_types_decided = data["types_decided"]
+    generator._target_audit_snapshot = snapshot
+    return post_target
+
+
+def _guard_post_target(snapshot, params: dict) -> None:
+    if snapshot is None:
+        return
+    from exceptions import MappingGenerationError
+    from target_table_service import (
+        TargetChangedDuringGeneration,
+        TargetTableContext,
+        _assert_target_snapshot,
+        _target_exists,
+    )
+
+    context = TargetTableContext(params["tgt_owner"], params["tgt_table"], False, "APP_USER")
+    try:
+        exists = _target_exists(context)
+        _assert_target_snapshot(context, exists, snapshot)
+    except TargetChangedDuringGeneration:
+        raise
+    except MappingGenerationError as exc:
+        raise TargetChangedDuringGeneration("Target changed during generation.") from exc
+
+
 def node_init(state: MappingState) -> dict:
     """Start the pipeline and assign batch_id."""
     batch_id = state.get("batch_id") or str(uuid.uuid4())[:8]
@@ -162,6 +300,7 @@ def node_init(state: MappingState) -> dict:
         "batch_id": batch_id,
         "current_step": "init",
         "overall_status": "running",
+        "audit_handover": None,
         "completed_steps": [],
         "log": _add_log(state, "init", "SUCCESS", f"batch_id={batch_id}"),
     }
@@ -271,6 +410,8 @@ def node_create_table(state: MappingState) -> dict:
     try:
         mg = MappingGenerator()
         mg._batch_id = state.get("batch_id", "unknown")
+        # Classic fixes the typed CASE and target snapshot before repository preflight.
+        mg._decide_effective_audit(params)
         # Read-only repository preflight, as in the classic engine: it pins the approved IKM id
         # and, for internal ODS/DWH sources, the verified source identity that the datastore
         # registration and mapping creation steps require. It runs before any DDL.
@@ -287,22 +428,27 @@ def node_create_table(state: MappingState) -> dict:
                 "log": _add_log(state, "repository_preflight", "FAILED", str(code or "blocked")),
             }
         result = mg._create_target_table(params)
+        handover = _handover_from_target(mg, params, result)
         return {
             "current_step": "create_table",
             "target_table_result": result,
             # If create_table updates src_table (full_src_name detection)
             "validated_params": params,
+            "audit_handover": handover,
             "log": _add_log(state, "create_table", result.get("status", "SUCCESS"),
                            _target_table_detail(result)),
             "completed_steps": list(state.get("completed_steps", [])) + ["create_table"],
         }
     except Exception as e:
-        return {
+        failure = {
             "current_step": "create_table",
             "overall_status": "failed",
             "error": f"Table creation failed: {e}",
             "log": _add_log(state, "create_table", "FAILED", str(e)),
         }
+        if getattr(e, "error_code", None):
+            failure["error_code"] = e.error_code
+        return failure
 
 
 def node_register_datastores(state: MappingState) -> dict:
@@ -316,21 +462,27 @@ def node_register_datastores(state: MappingState) -> dict:
     try:
         mg = MappingGenerator()
         mg._batch_id = state.get("batch_id", "unknown")
+        post_target = _restore_audit_handover(mg, state)
+        _guard_post_target(post_target, params)
         result = mg._register_odi_datastores(params)
         repo_status, repo_detail = _repository_step_status(result)
         return {
             "current_step": "register_datastores",
             "datastore_result": result,
+            "validated_params": params,
             "log": _add_log(state, "register_datastores", repo_status, repo_detail),
             "completed_steps": list(state.get("completed_steps", [])) + ["register_datastores"],
         }
     except Exception as e:
-        return {
+        failure = {
             "current_step": "register_datastores",
             "overall_status": "failed",
             "error": f"Datastore registration failed: {e}",
             "log": _add_log(state, "register_datastores", "FAILED", str(e)),
         }
+        if getattr(e, "error_code", None):
+            failure["error_code"] = e.error_code
+        return failure
 
 
 def node_create_mapping(state: MappingState) -> dict:
@@ -344,6 +496,8 @@ def node_create_mapping(state: MappingState) -> dict:
     try:
         mg = MappingGenerator()
         mg._batch_id = state.get("batch_id", "unknown")
+        post_target = _restore_audit_handover(mg, state)
+        _guard_post_target(post_target, params)
         result = mg._create_odi_mapping(params)
         return {
             "current_step": "create_mapping",
@@ -353,12 +507,15 @@ def node_create_mapping(state: MappingState) -> dict:
             "completed_steps": list(state.get("completed_steps", [])) + ["create_mapping"],
         }
     except Exception as e:
-        return {
+        failure = {
             "current_step": "create_mapping",
             "overall_status": "failed",
             "error": f"Mapping creation failed: {e}",
             "log": _add_log(state, "create_mapping", "FAILED", str(e)),
         }
+        if getattr(e, "error_code", None):
+            failure["error_code"] = e.error_code
+        return failure
 
 
 def node_create_skey(state: MappingState) -> dict:
@@ -682,7 +839,9 @@ def run_mapping_graph(
         last_node = list(final_state.keys())[0]
         result = graph.get_state(config).values
         _persist_graph_state(graph, config, resolved_thread_id)
-        return dict(result)
+        public_result = dict(result)
+        public_result.pop("audit_handover", None)  # CASE text belongs only in the checkpoint.
+        return public_result
 
     return {"overall_status": "failed", "error": "Graph did not run"}
 
