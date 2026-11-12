@@ -59,7 +59,12 @@ def parse(value: object, action: str) -> dict:
     except (TypeError, ValueError):
         return invalid
     expected = result(action)
-    if not isinstance(payload, dict) or set(payload) != set(expected):
+    if not isinstance(payload, dict):
+        return invalid
+    keys = set(payload)
+    expected_keys = set(expected)
+    optional = {"session_number"} if action == "run" else set()
+    if not expected_keys <= keys or not keys <= expected_keys | optional:
         return invalid
     if payload["tool"] != expected["tool"]:
         return invalid
@@ -79,6 +84,10 @@ def parse(value: object, action: str) -> dict:
     session = payload["session_status"]
     if session is not None and (not isinstance(session, str) or session not in {"DONE", "ERROR"}):
         return invalid
+    if "session_number" in payload:
+        number = payload["session_number"]
+        if number is not None and (type(number) is not int or isinstance(number, bool) or number <= 0):
+            return invalid
     started = payload["run_may_have_started"]
     if payload["side_effects"] != started or (started and not payload["agent_contact_attempted"]):
         return invalid

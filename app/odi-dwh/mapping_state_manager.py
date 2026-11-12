@@ -33,6 +33,8 @@ _SENSITIVE_PATTERNS = [
     re.compile(r"(?i)jdbc:oracle:thin:@[^\s,;]+"),
 ]
 
+_EVIDENCE_FIELDS = frozenset({"session_number", "counts", "session_error_code"})
+_SESSION_ERROR_CODE_RE = re.compile(r"^(?:ORA-\d{5}|ODI-\d{4,5})$")
 PERSISTED_STATE_FIELDS = frozenset({
     "batch_id",
     "mapping_name",
@@ -45,7 +47,7 @@ PERSISTED_STATE_FIELDS = frozenset({
     "completed_steps",
     "validated_params",
     "error",
-})
+}) | _EVIDENCE_FIELDS
 _PERSISTED_PARAM_FIELDS = (
     "mapping_name",
     "src_schema",
@@ -92,11 +94,35 @@ def _metadata_scalar(value: Any) -> Any:
     return redact_sensitive_text(value, max_len=256)
 
 
+def _persistable_counts(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    counts: dict[str, int] = {}
+    for key in ("processed", "inserted", "updated", "errors"):
+        number = value.get(key)
+        if type(number) is not int or isinstance(number, bool) or number < 0:
+            return None
+        counts[key] = number
+    if set(value) != set(counts):
+        return None
+    return counts
+
+
 def _persistable_state(state: dict[str, Any]) -> dict[str, Any]:
     persisted: dict[str, Any] = {}
-    for key in PERSISTED_STATE_FIELDS - {"validated_params", "completed_steps", "error"}:
+    skip = {"validated_params", "completed_steps", "error"} | _EVIDENCE_FIELDS
+    for key in PERSISTED_STATE_FIELDS - skip:
         if key in state:
             persisted[key] = _metadata_scalar(state.get(key))
+    session_number = state.get("session_number")
+    if type(session_number) is int and not isinstance(session_number, bool) and session_number > 0:
+        persisted["session_number"] = session_number
+    counts = _persistable_counts(state.get("counts"))
+    if counts is not None:
+        persisted["counts"] = counts
+    code = state.get("session_error_code")
+    if isinstance(code, str) and _SESSION_ERROR_CODE_RE.fullmatch(code):
+        persisted["session_error_code"] = code
 
     completed_steps = state.get("completed_steps")
     if isinstance(completed_steps, (list, tuple)):

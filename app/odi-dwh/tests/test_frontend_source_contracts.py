@@ -151,6 +151,22 @@ def test_mapping_list_search_keeps_detail_synced_with_filtered_mapping():
     assert "loadDetail(filteredFirstName)" in content
 
 
+def test_mapping_list_refresh_does_not_unmount_the_selected_detail_panel():
+    content = (PROJECT_ROOT / "frontend" / "src" / "components" / "dataops" / "MappingList.jsx").read_text(encoding="utf-8")
+
+    assert "[detail, loadDetail, showToast]" not in content
+    assert "setLoading(true)" not in content
+
+
+def test_run_dialog_reserves_space_for_the_truncate_warning():
+    content = (PROJECT_ROOT / "frontend" / "src" / "components" / "dataops" / "MappingList.jsx").read_text(encoding="utf-8")
+
+    warning_at = content.index("runModeWarning(runDialog)")
+    run_at = content.index("Run Scenario", warning_at)
+    snippet = content[warning_at - 120:run_at]
+    assert "min-h-" in snippet
+
+
 def test_surgeon_edit_expression_updates_are_changed_row_only():
     content = (PROJECT_ROOT / "frontend" / "src" / "components" / "modals" / "SurgeonEdit.jsx").read_text(encoding="utf-8")
 

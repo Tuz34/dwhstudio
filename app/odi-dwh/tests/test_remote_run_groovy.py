@@ -106,8 +106,10 @@ def test_config_guards_identical_and_no_legacy_or_raw_output():
     assert health[health.index("def validateAgent ="):health.index("Map payload =")].strip() == runner[
         runner.index("def validateAgent ="):runner.index("def requireOwnership =")].strip()
     for text in (health, runner):
-        for forbidden in ("getMessage(", "printStackTrace", "getSessionId", "Class.forName", ".commit("):
+        for forbidden in ("getMessage(", "printStackTrace", "Class.forName", ".commit(", "getStatusMessage"):
             assert forbidden not in text
+    assert "getSessionId" not in health
+    assert "getSessionId()" in runner
     assert "invokeStartScenario" not in health and "OdiInstance" not in health
     assert "findByTag(new Tag(spec.name, spec.version))" in runner
     assert runner.index("checkOwnership(request, props)") < runner.index("invoker.invokeStartScenario")

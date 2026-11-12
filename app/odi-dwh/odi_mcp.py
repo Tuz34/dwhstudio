@@ -82,6 +82,32 @@ def odi_get_recent_sessions(limit: int = 20) -> str:
     except Exception as e:
         return safe_error_json("ODI sessions read", e)
 
+
+def read_odi_session(session_no: int) -> dict | None:
+    """One SELECT of the SNP_SESSION row used by odi_get_recent_sessions."""
+    if type(session_no) is not int or isinstance(session_no, bool) or session_no <= 0:
+        return None
+    sql = f"""
+        SELECT
+            SESS_NO AS SESSION_NO,
+            SESS_NAME AS SESSION_NAME,
+            SESS_BEG AS START_TIME,
+            SESS_END AS END_TIME,
+            SESS_STATUS AS STATUS,
+            SESS_MESS AS ERROR_MESSAGE,
+            NB_ROW AS PROCESSED_ROWS,
+            NB_INS AS INSERTED_ROWS,
+            NB_UPD AS UPDATED_ROWS,
+            NB_ERR AS ERROR_ROWS
+        FROM {ODI_REPO_SCHEMA}.SNP_SESSION
+        WHERE SESS_NO = :sess_no
+    """
+    rows = execute_odi_lob_query(sql, {"sess_no": session_no})
+    if not rows:
+        return None
+    return rows[0]
+
+
 @mcp.tool()
 def odi_get_scenario_list() -> str:
     """List available scenarios (Execution Packages) in ODI."""

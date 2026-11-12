@@ -69,6 +69,16 @@ def executeRemote = { Map payload, Map request, Properties props, Closure makeIn
             payload.session_status = 'ERROR'
             payload.outcome_unknown = false
         }
+        try {
+            def rawId = info?.getSessionId()
+            if (rawId instanceof Number) {
+                long sessionNumber = rawId.longValue()
+                if (sessionNumber > 0L) {
+                    payload.session_number = sessionNumber
+                }
+            }
+        } catch (Exception ignored) {
+        }
     } catch (Exception ignored) {
         // After invokeStartScenario may have been called, errors are unknown outcomes.
     }
@@ -78,7 +88,7 @@ def executeRemote = { Map payload, Map request, Properties props, Closure makeIn
 Map payload = [tool: 'odi.remote_scenario_run', status: 'blocked', stage: 'validation',
     error_code: 'InvalidRunIdentity', agent_contact_attempted: false,
     repository_connection_attempted: false, run_may_have_started: false, side_effects: false,
-    outcome_unknown: false, session_status: null,
+    outcome_unknown: false, session_status: null, session_number: null,
     raw_rows_included: false, pk_values_included: false, secret_printed: false]
 try {
     Map request = [name: System.getProperty('odi.scenario.name'), version: System.getProperty('odi.scenario.version'),

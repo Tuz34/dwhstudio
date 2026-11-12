@@ -119,7 +119,12 @@ export function MappingList() {
   const [runDialog, setRunDialog] = useState(null);
   const [lastRuns, setLastRuns] = useState({});
   const autoSelectedRef = useRef(false);
+  const selectedNameRef = useRef(null);
   const runSeq = useRef(0);
+
+  useEffect(() => {
+    selectedNameRef.current = detail?.MAPPING_NAME || null;
+  }, [detail]);
 
   const showToast = useCallback((message, type = 'success') => {
     setToast({ message, type });
@@ -147,7 +152,6 @@ export function MappingList() {
 
   const loadMappings = useCallback(async () => {
     try {
-      setLoading(true);
       const data = await getOdiMappings();
       const unique = [];
       const seen = new Set();
@@ -160,7 +164,7 @@ export function MappingList() {
       });
       setMappings(unique);
       setLastRuns((prev) => reconcileLastRuns(prev, unique.map((row) => row.MAPPING_NAME)));
-      if (!detail && !autoSelectedRef.current && unique.length > 0) {
+      if (!selectedNameRef.current && !autoSelectedRef.current && unique.length > 0) {
         autoSelectedRef.current = true;
         setTimeout(() => loadDetail(unique[0].MAPPING_NAME), 0);
       }
@@ -169,7 +173,7 @@ export function MappingList() {
     } finally {
       setLoading(false);
     }
-  }, [detail, loadDetail, showToast]);
+  }, [loadDetail, showToast]);
 
   useEffect(() => {
     const id = setTimeout(loadMappings, 0);
@@ -352,11 +356,13 @@ export function MappingList() {
                   <span className="block text-xs leading-5 text-slate-500">Keeps existing target rows and appends new rows.</span>
                 </span>
               </label>
-              {runModeWarning(runDialog) && (
-                <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
-                  {runModeWarning(runDialog)}
-                </p>
-              )}
+              <div className="min-h-[3.25rem]">
+                {runModeWarning(runDialog) ? (
+                  <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+                    {runModeWarning(runDialog)}
+                  </p>
+                ) : null}
+              </div>
             </div>
             <div className="flex justify-end gap-2 border-t border-slate-100 px-5 py-4">
               <button
