@@ -114,10 +114,10 @@ def test_redactor_keeps_expected_skips_and_neutralizes_exception_skips():
     assert details["create_skey"] == _SKEY_SKIP
     assert details["register_datastores"] == _SOURCE_DATASTORE_SKIP
     assert details["populate_lineage"] == STEP_SKIPPED
-    assert cleaned["steps"]["populate_lineage"]["reason"] == STEP_SKIPPED
-    rendered = json.dumps(cleaned)
-    assert "secret table" not in rendered
-    assert "mapping generation failed." not in rendered
+    # No status here, only skipped=true. The base leaves that reason alone.
+    assert cleaned["steps"]["populate_lineage"]["reason"] == "ORA-00942: secret table missing"
+    assert "secret table" not in json.dumps(cleaned["log"])
+    assert "mapping generation failed." not in json.dumps(cleaned)
     assert cleaned["overall_status"] == "SUCCESS"
 
 
@@ -234,7 +234,6 @@ def test_external_preflight_repository_failure_keeps_class_name_only(monkeypatch
 _MARKER = "synthetic-exception-marker"
 _ROW_PROBE_MARKER = "synthetic-row-probe-marker"
 _RULED_FIELDS = ("LAYER", "TGT_TABLE", "TGT_OWNER", "SRC_TABLE")
-_AUDIT_KEEP = "Audit preservation does not apply to this load."
 
 
 def _lineage_row(mapping, comp, qualified, comp_type="DATASTORE", **extra):
@@ -569,246 +568,369 @@ def test_row_probe_http_200_hides_the_exception_text(app_client, monkeypatch):
     assert "secret" not in rendered
 
 
-def test_skipped_overall_status_redacts_message():
-    cleaned = redacted_operation_result(
-        {"overall_status": "SKIPPED", "message": _MARKER},
-        "mapping generation",
+# Oracle: redacted_operation_result from c9febe9, verbatim, plus the constants it closes over.
+_BASE_REDACTOR_SOURCE = '''
+from datamart_contract import DATAMART_REQUIRES_TYPE2_CODE, DATAMART_TYPE2_ONLY_WARNING
+
+_FAILURE_STATUSES = {"BLOCKED", "ERROR", "FAILED", "FAILURE", "INVALID", "SKIPPED"}
+_AUDIT_PRESERVATION_REJECTED = "audit_preservation_rejected"
+_AUDIT_PRESERVATION_SENTENCE = (
+    "The target table's audit column types are not supported for audit preservation. "
+    "Nothing was created."
+)
+
+
+def redacted_operation_result(value, action: str):
+    """Remove diagnostic exception text from otherwise successful JSON responses."""
+
+    if isinstance(value, list):
+        return [redacted_operation_result(item, action) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    status = str(value.get("status") or value.get("overall_status") or "").upper()
+    failed = status in _FAILURE_STATUSES
+    had_error = any(str(key).lower() in {"error", "error_message"} and item for key, item in value.items())
+    code = value.get("error_code")
+    fixed_error = (
+        _AUDIT_PRESERVATION_SENTENCE if code == _AUDIT_PRESERVATION_REJECTED else
+        DATAMART_TYPE2_ONLY_WARNING if code == DATAMART_REQUIRES_TYPE2_CODE else None
     )
-    assert cleaned["message"] == STEP_SKIPPED
-    assert cleaned["overall_status"] == "SKIPPED"
-    assert _MARKER not in json.dumps(cleaned)
+    cleaned = {}
+    for key, item in value.items():
+        normalized_key = str(key).lower()
+        if normalized_key in {"error", "error_message"} and item:
+            cleaned[key] = fixed_error if fixed_error is not None else f"{action} failed."
+        elif normalized_key == "reason" and failed and item:
+            cleaned[key] = f"{action} failed."
+        elif normalized_key == "detail" and failed and item:
+            cleaned[key] = f"{action} failed."
+        else:
+            cleaned[key] = redacted_operation_result(item, action)
+    if had_error:
+        cleaned["error_type"] = "OperationError"
+    return cleaned
+'''
+_base_namespace = {}
+exec(_BASE_REDACTOR_SOURCE, _base_namespace)
+_BASE_ORACLE = _base_namespace["redacted_operation_result"]
+
+_REQUIRED_SHAPES = {
+    "top_level_skipped",
+    "nested_skipped",
+    "overall_status_only",
+    "status_success_overall_skipped",
+    "message_key",
+    "list_of_results",
+    "list_of_lists",
+    "tuple_under_data",
+    "tuple_under_message",
+    "mixed_case_status_key",
+    "mixed_case_status_value",
+    "skipped_flag",
+    "own_failed_under_message",
+    "own_failed_under_detail",
+    "non_string_detail",
+    "empty_values",
+    "allowlisted_with_whitespace",
+    "deep_nesting",
+    "genuine_failure",
+}
 
 
-def test_skipped_nested_message_and_detail_are_neutral():
-    cleaned = redacted_operation_result(
+def _buried(leaf, depth=80):
+    node = leaf
+    for _index in range(depth):
+        node = {"level": node}
+    return node
+
+
+def _redactor_corpus():
+    """Shapes from the three reviews, plus real failure results."""
+    marker = _MARKER
+    audit = _AUDIT_SKIP
+    cases = []
+
+    def add(name, action, value):
+        cases.append((name, action, value))
+
+    add("top_level_skipped", "mapping generation", {
+        "status": "SKIPPED",
+        "detail": marker,
+        "reason": audit,
+        "message": marker,
+    })
+    add("nested_skipped", "mapping generation", {
+        "overall_status": "SUCCESS",
+        "log": [{
+            "step": "populate_lineage",
+            "status": "SKIPPED",
+            "detail": marker,
+            "message": marker,
+            "timestamp": "2026-11-12T00:00:00",
+        }],
+    })
+    add("overall_status_only", "mapping update", {
+        "overall_status": "SKIPPED",
+        "detail": marker,
+        "reason": _SKEY_SKIP,
+        "message": marker,
+    })
+    add("status_success_overall_skipped", "mapping generation", {
+        "status": "SUCCESS",
+        "overall_status": "SKIPPED",
+        "message": marker,
+        "detail": marker,
+        "reason": marker,
+    })
+    add("message_key", "mapping generation", {
+        "status": "SKIPPED",
+        "message": [marker, {"note": marker}, _SKEY_SKIP],
+    })
+    add("list_of_results", "mapping delete", [
+        {"status": "SKIPPED", "detail": marker, "reason": audit},
+        {"status": "FAILED", "detail": marker, "message": marker},
+        {"status": "SUCCESS", "detail": marker, "reason": marker},
+    ])
+    add("list_of_lists", "mapping generation", {
+        "overall_status": "SKIPPED",
+        "data": [[
+            {"message": marker},
+            {"detail": marker},
+            {"status": "SKIPPED", "detail": marker, "reason": [_SKEY_SKIP, marker]},
+            {"status": "SUCCESS", "message": marker, "detail": marker},
+            {"status": "FAILED", "detail": marker},
+        ]],
+    })
+    add("tuple_under_data", "mapping generation", {
+        "overall_status": "SKIPPED",
+        "data": ({"message": marker},),
+    })
+    add("tuple_under_message", "mapping generation", {
+        "status": "SKIPPED",
+        "message": ({"detail": marker},),
+    })
+    add("mixed_case_status_key", "mapping generation", [
+        {"Status": "Skipped", "detail": marker, "message": marker},
+        {"OVERALL_STATUS": "SKIPPED", "reason": marker, "message": [marker, _SKEY_SKIP]},
+        {"Skipped": True, "detail": {"leak": marker, "kept": audit, "n": 1}},
+    ])
+    add("mixed_case_status_value", "mapping rollback", [
+        {"status": "Skipped", "detail": marker, "reason": audit},
+        {"status": "failed", "detail": marker, "reason": marker, "message": marker},
+        {"overall_status": "Skipped", "detail": f"  {audit}  ", "message": marker},
+        {"status": " SKIPPED", "detail": marker},
+    ])
+    add("skipped_flag", "mapping update", [
+        {"skipped": True, "detail": marker, "message": marker, "reason": audit},
+        {"skipped": False, "detail": marker, "reason": marker},
+        {"Skipped": True, "reason": marker, "detail": audit},
+    ])
+    add("own_failed_under_message", "mapping generation", {
+        "overall_status": "SKIPPED",
+        "message": {"status": "FAILED", "detail": marker, "message": marker, "reason": marker},
+    })
+    add("own_failed_under_detail", "mapping generation", {
+        "overall_status": "SKIPPED",
+        "detail": {"status": "FAILED", "detail": marker, "message": marker},
+    })
+    add("own_failed_under_reason", "mapping generation", {
+        "overall_status": "SKIPPED",
+        "reason": {"status": "FAILED", "reason": marker, "detail": marker},
+    })
+    add("own_success_under_text_key", "mapping generation", {
+        "overall_status": "SKIPPED",
+        "message": {"status": "SUCCESS", "detail": marker, "message": marker},
+        "detail": {"status": "SUCCESS", "detail": marker},
+        "data": {"status": "SUCCESS", "detail": marker, "message": marker},
+    })
+    add("non_string_detail", "mapping generation", [
         {
             "status": "SKIPPED",
-            "message": [_MARKER, {"note": _MARKER}],
-            "detail": {"kept": _AUDIT_KEEP, "leak": _MARKER, "n": 3},
-            "reason": _MARKER,
+            "detail": {"leak": marker, "kept": audit, "n": 3},
+            "reason": [marker, audit],
         },
-        "mapping generation",
-    )
-    assert cleaned["message"] == [STEP_SKIPPED, {"note": STEP_SKIPPED}]
-    assert cleaned["detail"] == {"kept": _AUDIT_KEEP, "leak": STEP_SKIPPED, "n": 3}
-    assert cleaned["reason"] == STEP_SKIPPED
-    assert _MARKER not in json.dumps(cleaned)
-
-
-def test_success_plus_skipped_overall_is_a_skip():
-    cleaned = redacted_operation_result(
-        {
-            "status": "SUCCESS",
-            "overall_status": "SKIPPED",
-            "message": _MARKER,
-            "detail": _MARKER,
-        },
-        "mapping generation",
-    )
-    assert cleaned["status"] == "SUCCESS"
-    assert cleaned["overall_status"] == "SKIPPED"
-    assert cleaned["message"] == STEP_SKIPPED
-    assert cleaned["detail"] == STEP_SKIPPED
-    assert _MARKER not in json.dumps(cleaned)
-
-
-def test_mixed_case_skip_redacts_nested_strings():
-    cleaned = redacted_operation_result(
-        {
-            "status": "Skipped",
-            "overall_status": "ok",
-            "detail": [f"  {_MARKER}  ", _SKEY_SKIP],
-            "message": {"inner": {"text": _MARKER}},
-        },
-        "mapping update",
-    )
-    assert cleaned["detail"] == [STEP_SKIPPED, _SKEY_SKIP]
-    assert cleaned["message"] == {"inner": {"text": STEP_SKIPPED}}
-    other = redacted_operation_result(
-        {
-            "status": "success",
-            "overall_status": "Skipped",
-            "message": [_MARKER],
-            "reason": {"why": _AUDIT_KEEP},
-        },
-        "mapping rollback",
-    )
-    assert other["message"] == [STEP_SKIPPED]
-    assert other["reason"] == {"why": _AUDIT_KEEP}
-    assert _MARKER not in json.dumps(cleaned)
-    assert _MARKER not in json.dumps(other)
-
-
-def test_failure_in_either_status_keeps_failure_treatment():
-    cleaned = redacted_operation_result(
-        {
-            "status": "skipped",
-            "overall_status": "FAILED",
-            "detail": _MARKER,
-            "message": _MARKER,
-            "reason": _AUDIT_KEEP,
-        },
-        "mapping generation",
-    )
-    assert cleaned["detail"] == "mapping generation failed."
-    assert cleaned["reason"] == "mapping generation failed."
-    assert cleaned["message"] == _MARKER
-    other = redacted_operation_result(
-        {"status": "SUCCESS", "overall_status": "INVALID", "detail": _MARKER},
-        "mapping delete",
-    )
-    assert other["detail"] == "mapping delete failed."
-    assert _MARKER not in other["detail"]
-
-
-def test_success_dict_leaves_message_and_detail_unchanged():
-    cleaned = redacted_operation_result(
-        {
-            "status": "SUCCESS",
-            "overall_status": "SUCCESS",
-            "message": _MARKER,
-            "detail": _MARKER,
-            "reason": _MARKER,
-        },
-        "mapping generation",
-    )
-    assert cleaned["message"] == _MARKER
-    assert cleaned["detail"] == _MARKER
-    assert cleaned["reason"] == _MARKER
-
-
-def _skipped_data_payload():
-    """Reviewer shape: skip context must survive the data list, not only message/detail/reason keys."""
-    return {
-        "overall_status": "SKIPPED",
-        "data": [
-            {"message": _MARKER},
-            {"detail": _MARKER},
+        {"status": "SKIPPED", "detail": 5, "reason": b"secret-bytes"},
+    ])
+    add("empty_values", "mapping generation", [
+        {"status": "SKIPPED", "detail": "", "reason": None, "message": ""},
+        {"status": "SKIPPED", "detail": "   ", "reason": "\t"},
+        {"status": "SKIPPED", "detail": 0, "reason": False},
+        {"status": "SKIPPED", "detail": [], "reason": {}},
+    ])
+    add("allowlisted_with_whitespace", "mapping generation", [
+        {"status": "SKIPPED", "detail": f"  {audit}\n", "reason": f"\n{_SKEY_SKIP}  "},
+        {"status": "SKIPPED", "detail": _SKEY_SKIP + "."},
+    ])
+    add("every_allowlisted_sentence", "mapping generation", {
+        "log": [
+            {"status": "SKIPPED", "detail": sentence}
+            for sentence in (
+                _AUDIT_SKIP,
+                _SKEY_SKIP,
+                _SOURCE_DATASTORE_SKIP,
+                _TARGET_DATASTORE_SKIP,
+                _SKEY_KEY_SKIP,
+                _NO_SKEY_CHANGE,
+                _TARGET_UNCHANGED,
+                _NO_ROLLBACK,
+            )
         ],
-    }
+    })
+    add("deep_nesting", "mapping generation", {
+        "overall_status": "SKIPPED",
+        "buried_without_status": _buried({"detail": marker, "message": marker, "reason": audit}),
+        "buried_skipped": _buried({"status": "SKIPPED", "detail": marker, "message": marker}),
+    })
+    add("genuine_failure", "mapping generation", {
+        "overall_status": "FAILED",
+        "error": marker,
+        "error_code": "target_changed_during_generation",
+        "steps": {"create_mapping": {"status": "FAILED", "detail": marker, "reason": marker}},
+        "log": [
+            {"step": "pipeline", "status": "FAILED", "detail": marker},
+            {"step": "create_skey", "status": "SKIPPED", "detail": _SKEY_SKIP},
+            {"step": "populate_lineage", "status": "SKIPPED", "detail": marker},
+        ],
+    })
+    add("pure_failure_statuses", "mapping delete", [
+        {"status": status, "detail": marker, "reason": marker, "message": marker}
+        for status in ("BLOCKED", "ERROR", "FAILED", "FAILURE", "INVALID")
+    ])
+    add("audit_preservation_code", "mapping generation", {
+        "overall_status": "FAILED",
+        "error_code": "audit_preservation_rejected",
+        "error": marker,
+        "detail": marker,
+    })
+    add("datamart_code", "mapping update", {
+        "status": "FAILED",
+        "error_code": "datamart_requires_type2",
+        "error_message": marker,
+        "reason": marker,
+    })
+    add("error_on_skip", "mapping generation", {
+        "status": "SKIPPED",
+        "error": marker,
+        "ERROR_MESSAGE": marker,
+        "detail": audit,
+    })
+    add("blank_status_uses_overall", "mapping generation", {
+        "status": "",
+        "overall_status": "SKIPPED",
+        "detail": marker,
+        "reason": audit,
+    })
+    add("none_status_uses_overall", "mapping generation", {
+        "status": None,
+        "overall_status": "SKIPPED",
+        "detail": marker,
+    })
+    add("status_failed_before_overall_skipped", "mapping generation", {
+        "status": "FAILED",
+        "overall_status": "SKIPPED",
+        "detail": marker,
+        "reason": audit,
+        "message": marker,
+    })
+    add("reviewer_mixed_spellings", "mapping generation", {
+        "status": "SUCCESS",
+        "Status": "FAILED",
+        "overall_status": "SKIPPED",
+        "message": marker,
+        "detail": marker,
+        "reason": marker,
+    })
+    add("tuple_inside_a_list", "mapping generation", {
+        "overall_status": "SKIPPED",
+        "data": [({"message": marker, "detail": marker},)],
+    })
+    return cases
 
 
-def test_skipped_parent_redacts_messages_inside_a_data_list():
-    cleaned = redacted_operation_result(_skipped_data_payload(), "mapping generation")
-    assert cleaned["overall_status"] == "SKIPPED"
-    assert cleaned["data"] == [
-        {"message": STEP_SKIPPED},
-        {"detail": STEP_SKIPPED},
-    ]
-    assert _MARKER not in json.dumps(cleaned)
+_REDACTOR_CORPUS = _redactor_corpus()
 
 
-def test_generate_route_redacts_skipped_data_list_messages(app_client, monkeypatch):
-    import app as app_module
-    import odi81_app_acceptance as driver
+def _substitute_skipped_replacements(source, oracle_result, action):
+    """Apply W1 to the oracle result.
 
-    class FakeGenerator:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def generate_from_params(self, _params):
-            return _skipped_data_payload()
-
-        def generate_from_prompt(self, _prompt):
-            raise AssertionError("prompt path")
-
-    monkeypatch.setattr(app_module, "MappingGenerator", FakeGenerator)
-    response = app_client.post("/api/mapping/generate", json=driver.classic_generate_body("F1"))
-    assert response.status_code == 200
-    body = response.get_json()
-    assert body["overall_status"] == "SKIPPED"
-    assert body["data"] == [
-        {"message": STEP_SKIPPED},
-        {"detail": STEP_SKIPPED},
-    ]
-    assert _MARKER not in response.get_data(as_text=True)
-
-
-def test_nested_success_under_a_skip_keeps_its_own_text():
-    cleaned = redacted_operation_result(
-        {
-            "overall_status": "SKIPPED",
-            "kept": {
-                "status": "SUCCESS",
-                "message": _MARKER,
-                "detail": _MARKER,
-                "reason": _MARKER,
-            },
-            "inherited": {"message": _MARKER, "detail": _MARKER, "reason": _MARKER},
-        },
-        "mapping generation",
-    )
-    assert cleaned["kept"]["status"] == "SUCCESS"
-    assert cleaned["kept"]["message"] == _MARKER
-    assert cleaned["kept"]["detail"] == _MARKER
-    assert cleaned["kept"]["reason"] == _MARKER
-    assert cleaned["inherited"] == {
-        "message": STEP_SKIPPED,
-        "detail": STEP_SKIPPED,
-        "reason": STEP_SKIPPED,
-    }
+    The oracle decides every replacement. Where it wrote ``"<action> failed."``
+    on reason or detail because the base status expression was ``SKIPPED``,
+    the original stays when it is an allowlisted sentence, and every other
+    replaced value becomes ``STEP_SKIPPED``. Nothing else moves.
+    """
+    failure = f"{action} failed."
+    if isinstance(source, list):
+        return [
+            _substitute_skipped_replacements(item, oracle_item, action)
+            for item, oracle_item in zip(source, oracle_result, strict=True)
+        ]
+    if not isinstance(source, dict):
+        return oracle_result
+    # Same expression the base uses to decide that a replacement was for a skip.
+    status = str(source.get("status") or source.get("overall_status") or "").upper()
+    rewritten = {}
+    for key, oracle_item in oracle_result.items():
+        if key not in source:
+            rewritten[key] = oracle_item
+            continue
+        item = source[key]
+        normalized = str(key).lower()
+        if (
+            status == "SKIPPED"
+            and normalized in {"reason", "detail"}
+            and oracle_item == failure
+            and item
+        ):
+            if isinstance(item, str) and item.strip() in EXPECTED_SKIP_SENTENCES:
+                rewritten[key] = item
+            else:
+                rewritten[key] = STEP_SKIPPED
+            continue
+        if isinstance(item, list) and isinstance(oracle_item, list):
+            rewritten[key] = _substitute_skipped_replacements(item, oracle_item, action)
+        elif isinstance(item, dict) and isinstance(oracle_item, dict):
+            rewritten[key] = _substitute_skipped_replacements(item, oracle_item, action)
+        else:
+            rewritten[key] = oracle_item
+    return rewritten
 
 
-def test_skip_inherits_through_a_list_of_lists():
-    cleaned = redacted_operation_result(
-        {
-            "overall_status": "SKIPPED",
-            "data": [[
-                {"message": _MARKER},
-                {"detail": {"inner": _MARKER, "kept": _AUDIT_KEEP, "n": 2}},
-                {"status": "SUCCESS", "message": _MARKER, "detail": _MARKER},
-            ]],
-        },
-        "mapping generation",
-    )
-    row = cleaned["data"][0]
-    assert row[0] == {"message": STEP_SKIPPED}
-    assert row[1] == {"detail": {"inner": STEP_SKIPPED, "kept": _AUDIT_KEEP, "n": 2}}
-    assert row[2]["status"] == "SUCCESS"
-    assert row[2]["message"] == _MARKER
-    assert row[2]["detail"] == _MARKER
+def _w1_from_oracle(value, action):
+    return _substitute_skipped_replacements(value, _BASE_ORACLE(value, action), action)
 
 
-def test_skip_ancestor_two_levels_up_covers_nested_sentences():
-    cleaned = redacted_operation_result(
-        {
-            "overall_status": "SKIPPED",
-            "level1": {
-                "level2": {
-                    "message": {"text": _MARKER},
-                    "detail": _MARKER,
-                    "reason": [_SKEY_SKIP, _MARKER],
-                    "untouched": _MARKER,
-                },
-            },
-        },
-        "mapping generation",
-    )
-    level2 = cleaned["level1"]["level2"]
-    assert level2["message"] == {"text": STEP_SKIPPED}
-    assert level2["detail"] == STEP_SKIPPED
-    assert level2["reason"] == [_SKEY_SKIP, STEP_SKIPPED]
-    assert level2["untouched"] == _MARKER
+def _short(value):
+    text = repr(value)
+    if len(text) > 600:
+        return text[:600] + "..."
+    return text
 
 
-def test_dict_outside_a_skipped_ancestor_is_unchanged():
-    cleaned = redacted_operation_result(
-        {
-            "overall_status": "SUCCESS",
-            "data": [{"message": _MARKER, "detail": _MARKER, "reason": _MARKER}],
-            "nested": {
-                "overall_status": "SKIPPED",
-                "data": [{"message": _MARKER}],
-            },
-        },
-        "mapping generation",
-    )
-    assert cleaned["data"] == [{"message": _MARKER, "detail": _MARKER, "reason": _MARKER}]
-    assert cleaned["nested"]["overall_status"] == "SKIPPED"
-    assert cleaned["nested"]["data"] == [{"message": STEP_SKIPPED}]
+def test_redactor_matches_the_base_oracle_with_the_skip_substitution():
+    """head(x) == transform(oracle(x)), and the oracle is the base function."""
+    missing = _REQUIRED_SHAPES - {name for name, _action, _value in _REDACTOR_CORPUS}
+    assert not missing, missing
+    probe = _BASE_ORACLE({"status": "SKIPPED", "detail": _MARKER, "message": _MARKER}, "mapping generation")
+    assert probe["detail"] == "mapping generation failed."
+    assert probe["message"] == _MARKER
+
+    mismatches = []
+    first = None
+    for name, action, value in _REDACTOR_CORPUS:
+        actual = redacted_operation_result(value, action)
+        expected = _w1_from_oracle(value, action)
+        if actual != expected:
+            mismatches.append(name)
+            if first is None:
+                first = (name, actual, expected)
+    if mismatches:
+        name, actual, expected = first
+        raise AssertionError(
+            f"{len(mismatches)} of {len(_REDACTOR_CORPUS)}: {mismatches}\n"
+            f"first {name}\nactual={_short(actual)}\nexpected={_short(expected)}"
+        )
+
 
 
 def test_two_flagged_rows_with_the_same_names_are_unknown():
@@ -849,82 +971,3 @@ def test_one_flagged_datastore_row_is_the_target():
     assert found["TGT_OWNER"] == "DWH"
     assert found["LAYER"] == "EDW"
     assert found["SRC_TABLE"] == "HR.ORDERS"
-
-
-def test_status_key_in_another_case_is_a_skip():
-    cleaned = redacted_operation_result(
-        {"Status": "Skipped", "message": _MARKER, "detail": _AUDIT_KEEP},
-        "mapping generation",
-    )
-    assert cleaned["message"] == STEP_SKIPPED
-    assert cleaned["detail"] == _AUDIT_KEEP
-    assert _MARKER not in json.dumps(cleaned)
-
-
-def test_overall_status_key_in_another_case_is_a_skip():
-    cleaned = redacted_operation_result(
-        {"OVERALL_STATUS": "SKIPPED", "reason": _MARKER, "message": [_MARKER, _SKEY_SKIP]},
-        "mapping generation",
-    )
-    assert cleaned["reason"] == STEP_SKIPPED
-    assert cleaned["message"] == [STEP_SKIPPED, _SKEY_SKIP]
-    assert _MARKER not in json.dumps(cleaned)
-
-
-def test_skipped_flag_key_in_another_case_is_a_skip():
-    cleaned = redacted_operation_result(
-        {"Skipped": True, "detail": {"leak": _MARKER, "kept": _AUDIT_KEEP, "n": 1}},
-        "mapping update",
-    )
-    assert cleaned["detail"] == {"leak": STEP_SKIPPED, "kept": _AUDIT_KEEP, "n": 1}
-    assert cleaned["Skipped"] is True
-    assert _MARKER not in json.dumps(cleaned)
-
-
-def test_failure_status_in_another_case_gets_the_failure_treatment():
-    """Alternate-case failure redacts at least what a lowercase failure status redacts."""
-    cleaned = redacted_operation_result(
-        {
-            "Status": "FAILED",
-            "detail": _MARKER,
-            "reason": _MARKER,
-            "message": _MARKER,
-        },
-        "mapping generation",
-    )
-    assert cleaned["detail"] == "mapping generation failed."
-    assert cleaned["reason"] == "mapping generation failed."
-    assert cleaned["message"] == _MARKER
-    assert cleaned["Status"] == "FAILED"
-
-
-def test_any_failure_spelling_wins_then_any_skip_spelling():
-    failure = redacted_operation_result(
-        {
-            "status": "SUCCESS",
-            "Status": "FAILED",
-            "overall_status": "SKIPPED",
-            "detail": _MARKER,
-            "reason": _MARKER,
-            "message": _MARKER,
-        },
-        "mapping generation",
-    )
-    assert failure["detail"] == "mapping generation failed."
-    assert failure["reason"] == "mapping generation failed."
-    assert failure["message"] == _MARKER
-
-    skip = redacted_operation_result(
-        {
-            "status": "SUCCESS",
-            "OVERALL_STATUS": "Skipped",
-            "skipped": False,
-            "Skipped": True,
-            "message": _MARKER,
-            "detail": _AUDIT_KEEP,
-        },
-        "mapping update",
-    )
-    assert skip["message"] == STEP_SKIPPED
-    assert skip["detail"] == _AUDIT_KEEP
-    assert _MARKER not in json.dumps(skip)
