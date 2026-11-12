@@ -31,6 +31,23 @@ def _visible_skip_detail(item) -> str:
     return STEP_SKIPPED
 
 
+def _status_token(value: dict, key: str) -> str:
+    raw = value.get(key)
+    if raw is None:
+        return ""
+    return str(raw).strip().upper()
+
+
+def _redact_skip_value(item):
+    if isinstance(item, str):
+        return _visible_skip_detail(item)
+    if isinstance(item, list):
+        return [_redact_skip_value(part) for part in item]
+    if isinstance(item, dict):
+        return {key: _redact_skip_value(part) for key, part in item.items()}
+    return item
+
+
 def redacted_operation_result(value, action: str):
     """Remove diagnostic exception text from otherwise successful JSON responses."""
 
@@ -39,9 +56,17 @@ def redacted_operation_result(value, action: str):
     if not isinstance(value, dict):
         return value
 
-    status = str(value.get("status") or value.get("overall_status") or "").upper()
-    failed = status in _FAILURE_STATUSES
-    skipped = status == "SKIPPED" or value.get("skipped") is True
+    status = _status_token(value, "status")
+    overall = _status_token(value, "overall_status")
+    failed = status in _FAILURE_STATUSES or overall in _FAILURE_STATUSES
+    skipped = (
+        not failed
+        and (
+            status == "SKIPPED"
+            or overall == "SKIPPED"
+            or value.get("skipped") is True
+        )
+    )
     had_error = any(str(key).lower() in {"error", "error_message"} and item for key, item in value.items())
     code = value.get("error_code")
     fixed_error = (
@@ -55,8 +80,13 @@ def redacted_operation_result(value, action: str):
             cleaned[key] = fixed_error if fixed_error is not None else f"{action} failed."
         elif normalized_key in {"reason", "detail"} and item and failed:
             cleaned[key] = f"{action} failed."
-        elif normalized_key in {"reason", "detail"} and item and skipped:
-            cleaned[key] = _visible_skip_detail(item)
+        elif (
+            normalized_key in {"reason", "detail", "message"}
+            and item
+            and skipped
+            and isinstance(item, (str, list, dict))
+        ):
+            cleaned[key] = _redact_skip_value(item)
         else:
             cleaned[key] = redacted_operation_result(item, action)
     if had_error:

@@ -24,16 +24,7 @@ def df_to_jsonable(df: pd.DataFrame) -> list:
 # Page helpers
 
 _DATASTORE_TYPES = frozenset({"FILE", "XML", "DATASTORE", "XSD"})
-_TARGET_FLAG_VALUES = frozenset({"Y", "YES", "TRUE", "1"})
-# Highest name rank wins. A structural target adds 1000 and beats every name.
-_NAME_RANKS = (
-    ("DM_", 70),
-    ("DIM_", 60),
-    ("EDW_", 50),
-    ("ODS_", 40),
-    ("STG_", 30),
-    ("DWH_", 10),
-)
+_TARGET_COMPONENT_TYPES = frozenset({"DATASTORE", "FILE"})
 _LAYER_BY_PREFIX = (
     ("DM_", "DM"),
     ("DIM_", "EDW"),
@@ -45,185 +36,207 @@ _LAYER_BY_PREFIX = (
 _SCHEMA_LAYERS = {"ODS": "ODS", "STG": "STG", "EDW": "EDW", "DM": "DM"}
 
 
-def _text(value: object) -> str:
-    return str(value).strip() if value else ""
-
-
-def _remember_project_fields(entry: dict, item: dict) -> None:
-    folder_name = _text(item.get("FOLDER_NAME") or item.get("folder_name"))
-    project_code = _text(item.get("PROJECT_CODE") or item.get("project_code"))
-    project_name = _text(item.get("PROJECT_NAME") or item.get("project_name"))
-    if folder_name and not entry.get("folder_name"):
-        entry["FOLDER_NAME"] = folder_name
-        entry["folder_name"] = folder_name
-    if project_code and not entry.get("project_code"):
-        entry["PROJECT_CODE"] = project_code
-        entry["project_code"] = project_code
-        entry["project"] = project_code
-    if project_name and not entry.get("project_name"):
-        entry["PROJECT_NAME"] = project_name
-        entry["project_name"] = project_name
-        entry["project"] = entry.get("project") or project_name
-
-
-def _flag_is_target(value: object) -> bool:
-    if value is True or value == 1:
-        return True
-    return str(value or "").strip().upper() in _TARGET_FLAG_VALUES
-
-
-def _row_is_structural_target(item: dict) -> bool:
-    component_type = str(item.get("COMP_TYPE") or "").upper()
-    if component_type not in _DATASTORE_TYPES:
+def _is_target_flag(item: dict) -> bool:
+    if "IS_TARGET" in item:
+        raw = item.get("IS_TARGET")
+    elif "is_target" in item:
+        raw = item.get("is_target")
+    else:
         return False
-    if _flag_is_target(item.get("IS_TARGET")) or _flag_is_target(item.get("is_target")):
-        return True
-    expression = item.get("EXPRESSION")
-    return isinstance(expression, str) and bool(expression.strip())
+    return str(raw if raw is not None else "").strip().upper() == "Y"
 
 
-def _target_name_rank(short_name: str, comp_name: str, qualified: str, mapping_name: str) -> int:
-    ranks = [
-        rank
-        for prefix, rank in _NAME_RANKS
-        if short_name.startswith(prefix) or comp_name.startswith(prefix)
-    ]
-    if qualified.upper().startswith("ODS."):
-        ranks.append(40)
-    mapping = mapping_name.upper()
-    skey_requested = "_SKEY_" in mapping or mapping.startswith("MAP_SKEY")
-    if skey_requested and (short_name.startswith("SKEY_") or comp_name.startswith("SKEY_")):
-        ranks.append(20)
-    if comp_name.startswith("TGT_"):
-        ranks.append(5)
-    return max(ranks) if ranks else 0
+def _component_key(item: dict) -> tuple[str, str]:
+    comp = str(item.get("COMP_NAME") or "").strip().upper()
+    qualified = str(item.get("TABLE_QUALIFIED_NAME") or "").strip()
+    return comp, qualified
 
 
-def _choose_mapping_target(rows: list[dict], mapping_name: str) -> dict | None:
-    structural = [row for row in rows if row["structural"]]
-    pool = structural or rows
-    best: dict | None = None
-    best_key = (-1, -1)
-    for row in pool:
-        qualified = row["qualified"]
-        if not qualified:
+def _evidence_target(items: list) -> dict | None:
+    """The one DATASTORE/FILE component flagged IS_TARGET. Otherwise unknown."""
+    flagged = []
+    seen = set()
+    for item in items:
+        comp_type = str(item.get("COMP_TYPE") or "").strip().upper()
+        if comp_type not in _TARGET_COMPONENT_TYPES or not _is_target_flag(item):
             continue
-        name_rank = _target_name_rank(row["short"], row["comp"], qualified, mapping_name)
-        if row["structural"]:
-            rank = 1000 + name_rank
-        elif name_rank <= 0:
+        key = _component_key(item)
+        if key in seen:
             continue
-        else:
-            rank = name_rank
-        key = (rank, row["index"])
-        if key > best_key:
-            best = row
-            best_key = key
-    return best
+        seen.add(key)
+        flagged.append(item)
+    if len(flagged) != 1:
+        return None
+    return flagged[0]
 
 
-def _layer_for_target(qualified: str) -> str:
+def _table_and_owner(item: dict) -> tuple[str, str]:
+    qualified = str(item.get("TABLE_QUALIFIED_NAME") or "").strip()
+    if not qualified:
+        return "DWH", str(item.get("COMP_NAME") or "")
     parts = qualified.split(".")
-    short = (parts[1] if len(parts) > 1 else qualified).upper()
-    owner = parts[0].upper() if len(parts) > 1 else ""
+    if len(parts) >= 2:
+        return parts[-2], parts[-1]
+    return "DWH", qualified
+
+
+def _layer_for_target(table: str, owner: str) -> str:
+    short = table.upper()
     for prefix, layer in _LAYER_BY_PREFIX:
         if short.startswith(prefix):
             return layer
-    return _SCHEMA_LAYERS.get(owner, "")
+    return _SCHEMA_LAYERS.get(owner.upper(), "")
 
 
-def _source_names(rows: list[dict], chosen: dict | None) -> str:
-    names = []
-    for row in rows:
-        if chosen is not None and row["index"] == chosen["index"]:
+def _source_label(item: dict) -> str:
+    qualified = str(item.get("TABLE_QUALIFIED_NAME") or "").strip()
+    if qualified:
+        return qualified
+    return str(item.get("COMP_NAME") or "").upper()
+
+
+def _formatted_sources(items: list, excluded: tuple[str, str] | None) -> str:
+    names = set()
+    for item in items:
+        comp_type = str(item.get("COMP_TYPE") or "").upper()
+        if comp_type not in _DATASTORE_TYPES:
             continue
-        if row["component_type"] not in _DATASTORE_TYPES:
+        if excluded is not None and _component_key(item) == excluded:
             continue
-        source_name = row["qualified"] or row["comp_display"]
-        if source_name:
-            names.append(source_name)
-    return ", ".join(sorted(set(names)))
+        label = _source_label(item)
+        if label:
+            names.add(label)
+    return ", ".join(sorted(names))
+
+
+def _base_route_source_table(items: list) -> str:
+    """Source list the base mappings route produced for these rows.
+
+    When no single IS_TARGET is present, SRC_TABLE stays byte-equal to that
+    list. The name checks below are only that historical source partition.
+    They do not choose TGT_TABLE, TGT_OWNER, or LAYER.
+    """
+    sources = set()
+    for item in items:
+        name = item.get("MAPPING_NAME")
+        if not name:
+            continue
+        qualified_name = str(item.get("TABLE_QUALIFIED_NAME") or "").strip()
+        comp_type = str(item.get("COMP_TYPE") or "").upper()
+        comp_name = str(item.get("COMP_NAME") or "").upper()
+        mapping_name_upper = str(name).upper()
+        qualified_short = qualified_name.split(".")[-1].upper() if qualified_name else ""
+        named_target = (
+            qualified_name.upper().startswith("ODS.")
+            or qualified_short.startswith("ODS_")
+            or qualified_short.startswith("DWH_")
+            or comp_name.startswith("ODS_")
+            or comp_name.startswith("DWH_")
+            or comp_name.startswith("TGT_")
+            or (
+                qualified_short.startswith("SKEY_")
+                and ("_SKEY_" in mapping_name_upper or mapping_name_upper.startswith("MAP_SKEY"))
+            )
+        )
+        if named_target and qualified_name:
+            continue
+        if not qualified_name and not comp_name:
+            continue
+        if comp_type not in _DATASTORE_TYPES:
+            continue
+        sources.add(qualified_name if qualified_name else comp_name)
+    return ", ".join(sorted(sources))
 
 
 def _group_odi_mapping_lineage_items(items: list) -> list:
     grouped = {}
-    for it in items:
-        name = it.get("MAPPING_NAME")
+    grouped_items = {}
+    for item in items:
+        name = item.get("MAPPING_NAME")
         if not name:
             continue
-        k = str(name).strip().upper()
-        if k not in grouped:
-            grouped[k] = {
+        key = str(name).strip().upper()
+        if key not in grouped:
+            folder_name = item.get("FOLDER_NAME") or item.get("folder_name") or ""
+            project_code = item.get("PROJECT_CODE") or item.get("project_code") or ""
+            project_name = item.get("PROJECT_NAME") or item.get("project_name") or ""
+            grouped[key] = {
                 "MAPPING_NAME": str(name),
-                "FOLDER_NAME": "",
-                "folder_name": "",
-                "PROJECT_CODE": "",
-                "project_code": "",
-                "PROJECT_NAME": "",
-                "project_name": "",
-                "project": "",
-                "SRC_TABLE": "",
+                "FOLDER_NAME": str(folder_name) if folder_name else "",
+                "folder_name": str(folder_name) if folder_name else "",
+                "PROJECT_CODE": str(project_code) if project_code else "",
+                "project_code": str(project_code) if project_code else "",
+                "PROJECT_NAME": str(project_name) if project_name else "",
+                "project_name": str(project_name) if project_name else "",
+                "project": str(project_code or project_name) if (project_code or project_name) else "",
+                "SRC_TABLE": "?",
                 "TGT_TABLE": "?",
                 "TGT_OWNER": "DWH",
                 "LAYER": "",
                 "DESC": "",
                 "COMP_COUNT": 0,
                 "JOIN_COUNT": 0,
-                "_ROWS": [],
             }
-        _remember_project_fields(grouped[k], it)
-
-        grouped[k]["COMP_COUNT"] += 1
-        qname = str(it.get("TABLE_QUALIFIED_NAME") or "").strip()
-        ctype = str(it.get("COMP_TYPE") or "").upper()
-        cname = str(it.get("COMP_NAME") or "").upper()
-
-        if ctype in ("JOIN", "LOOKUP"):
-            grouped[k]["JOIN_COUNT"] += 1
-        expr = it.get("EXPRESSION")
-        if expr:
-            expr_s = str(expr).strip()
-            if any(c in expr_s for c in ["'", "(", " ", "+", "||"]) or "." not in expr_s:
-                grouped[k]["HAS_EXP"] = True
-        if ctype == "FILTER":
-            grouped[k]["HAS_FILTER"] = True
-
-        grouped[k]["_ROWS"].append({
-            "index": len(grouped[k]["_ROWS"]),
-            "qualified": qname,
-            "short": qname.split(".")[-1].upper() if qname else "",
-            "comp": cname,
-            "comp_display": str(it.get("COMP_NAME") or ""),
-            "component_type": ctype,
-            "structural": _row_is_structural_target(it),
-        })
-
-        mn = str(name).upper()
-        if "FLAT_FILE" in mn and "DWH" in mn:
-            grouped[k]["DESC"] = "Flat File -> DWH"
-        elif "_TO_ODS" in mn:
-            src_part = mn.split("_TO_ODS")[0].replace("MAP_", "").replace("_", " ")
-            grouped[k]["DESC"] = f"{src_part.title()} -> ODS"
-        elif "_SKEY_" in mn or mn.startswith("MAP_SKEY"):
-            src_part = mn.replace("MAP_SKEY_", "").replace("MAP_", "").replace("_", " ")
-            grouped[k]["DESC"] = f"{src_part.title()} -> SKEY"
-        elif "_TO_EDW" in mn:
-            grouped[k]["DESC"] = "ODS -> EDW (Core)"
-        elif "_TO_DM" in mn:
-            grouped[k]["DESC"] = "EDW -> DM (Mart)"
+            grouped_items[key] = []
         else:
-            grouped[k]["DESC"] = mn.replace("MAP_", "").replace("_", " ").title()
+            folder_name = item.get("FOLDER_NAME") or item.get("folder_name")
+            project_code = item.get("PROJECT_CODE") or item.get("project_code")
+            project_name = item.get("PROJECT_NAME") or item.get("project_name")
+            if folder_name and not grouped[key].get("folder_name"):
+                grouped[key]["FOLDER_NAME"] = str(folder_name)
+                grouped[key]["folder_name"] = str(folder_name)
+            if project_code and not grouped[key].get("project_code"):
+                grouped[key]["PROJECT_CODE"] = str(project_code)
+                grouped[key]["project_code"] = str(project_code)
+                grouped[key]["project"] = str(project_code)
+            if project_name and not grouped[key].get("project_name"):
+                grouped[key]["PROJECT_NAME"] = str(project_name)
+                grouped[key]["project_name"] = str(project_name)
+                grouped[key]["project"] = grouped[key].get("project") or str(project_name)
 
-    for item in grouped.values():
-        rows = item.pop("_ROWS")
-        chosen = _choose_mapping_target(rows, item["MAPPING_NAME"])
-        if chosen is not None:
-            qualified = chosen["qualified"]
-            parts = qualified.split(".")
-            item["TGT_OWNER"] = parts[0] if len(parts) > 1 else "DWH"
-            item["TGT_TABLE"] = parts[1] if len(parts) > 1 else qualified
-            item["LAYER"] = _layer_for_target(qualified)
-        item["SRC_TABLE"] = _source_names(rows, chosen)
+        grouped[key]["COMP_COUNT"] += 1
+        comp_type = str(item.get("COMP_TYPE") or "").upper()
+        if comp_type == "JOIN" or comp_type == "LOOKUP":
+            grouped[key]["JOIN_COUNT"] += 1
+        expression = item.get("EXPRESSION")
+        if expression:
+            expression_text = str(expression).strip()
+            if any(char in expression_text for char in ["'", "(", " ", "+", "||"]) or "." not in expression_text:
+                grouped[key]["HAS_EXP"] = True
+        if comp_type == "FILTER":
+            grouped[key]["HAS_FILTER"] = True
+
+        mapping_name_display = str(name).upper()
+        if "FLAT_FILE" in mapping_name_display and "DWH" in mapping_name_display:
+            grouped[key]["DESC"] = "Flat File -> DWH"
+        elif "_TO_ODS" in mapping_name_display:
+            src_part = mapping_name_display.split("_TO_ODS")[0].replace("MAP_", "").replace("_", " ")
+            grouped[key]["DESC"] = f"{src_part.title()} -> ODS"
+        elif "_SKEY_" in mapping_name_display or mapping_name_display.startswith("MAP_SKEY"):
+            src_part = mapping_name_display.replace("MAP_SKEY_", "").replace("MAP_", "").replace("_", " ")
+            grouped[key]["DESC"] = f"{src_part.title()} -> SKEY"
+        elif "_TO_EDW" in mapping_name_display:
+            grouped[key]["DESC"] = "ODS -> EDW (Core)"
+        elif "_TO_DM" in mapping_name_display:
+            grouped[key]["DESC"] = "EDW -> DM (Mart)"
+        else:
+            grouped[key]["DESC"] = mapping_name_display.replace("MAP_", "").replace("_", " ").title()
+        grouped_items[key].append(item)
+
+    for key, entry in grouped.items():
+        rows = grouped_items[key]
+        chosen = _evidence_target(rows)
+        if chosen is None:
+            entry["TGT_TABLE"] = "?"
+            entry["TGT_OWNER"] = "DWH"
+            entry["LAYER"] = ""
+            entry["SRC_TABLE"] = _base_route_source_table(rows)
+        else:
+            owner, table = _table_and_owner(chosen)
+            entry["TGT_OWNER"] = owner
+            entry["TGT_TABLE"] = table
+            entry["LAYER"] = _layer_for_target(table, owner)
+            entry["SRC_TABLE"] = _formatted_sources(rows, _component_key(chosen))
     return list(grouped.values())
 
 

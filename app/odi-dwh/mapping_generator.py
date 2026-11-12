@@ -1431,6 +1431,7 @@ class MappingGenerator:
             has_rows = None
             row_state = "not_created"
             row_probe_error = None
+            row_probe_error_type = None
 
             if exists:
                 cursor.execute("""
@@ -1451,7 +1452,8 @@ class MappingGenerator:
                     row_state = "has_rows" if has_rows else "empty"
                 except Exception as exc:
                     row_state = "unknown"
-                    row_probe_error = str(exc)
+                    row_probe_error = "Row count check failed."
+                    row_probe_error_type = type(exc).__name__
 
             metadata_aligned = exists and not missing_columns
             metadata_exact = metadata_aligned and not extra_columns
@@ -1494,6 +1496,7 @@ class MappingGenerator:
                 "row_state": row_state,
                 "has_rows": has_rows,
                 "row_probe_error": row_probe_error,
+                "row_probe_error_type": row_probe_error_type,
                 "expected_columns_count": len(expected_columns),
                 "target_columns_count": len(target_columns),
                 "missing_columns": missing_columns,
