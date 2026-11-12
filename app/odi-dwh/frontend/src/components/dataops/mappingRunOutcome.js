@@ -387,9 +387,25 @@ function projectBatch(value) {
   return null;
 }
 
+const COUNT_KEYS = ['processed', 'inserted', 'updated', 'errors'];
+const SESSION_ERROR_CODE = /^(?:ORA-[0-9]{5}|ODI-[0-9]{4,5})$/;
+
+function projectSessionNumber(payload) {
+  const places = [payload, remoteOf(payload)].filter(Boolean);
+  for (const place of places) {
+    const value = place.session_number;
+    if (typeof value === 'number' && Number.isInteger(value) && value > 0 && Number.isSafeInteger(value)) {
+      return String(value);
+    }
+  }
+  return null;
+}
+
 function projectSession(payload) {
+  const number = projectSessionNumber(payload);
+  if (number) return number;
   if (!payload) return NOT_REPORTED;
-  for (const key of ['session_id', 'odi_session_id', 'session_number']) {
+  for (const key of ['session_id', 'odi_session_id']) {
     const value = payload[key];
     if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 999999999) {
       return String(value);
@@ -399,6 +415,39 @@ function projectSession(payload) {
     if (SESSION.test(text) || UUID.test(text)) return text;
   }
   return NOT_REPORTED;
+}
+
+function projectCounts(payload) {
+  const raw = payload?.counts;
+  if (!plainObject(raw)) return NOT_REPORTED;
+  const keys = Object.keys(raw);
+  if (keys.length !== COUNT_KEYS.length || COUNT_KEYS.some((key) => !keys.includes(key))) {
+    return NOT_REPORTED;
+  }
+  const parts = [];
+  for (const key of COUNT_KEYS) {
+    const value = raw[key];
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || !Number.isSafeInteger(value)) {
+      return NOT_REPORTED;
+    }
+    parts.push(`${key} ${value}`);
+  }
+  return parts.join(', ');
+}
+
+function projectSessionErrorCode(payload) {
+  const raw = payload?.session_error_code;
+  return typeof raw === 'string' && SESSION_ERROR_CODE.test(raw) ? raw : null;
+}
+
+function projectResolvedSessionError(payload, outcomeClass) {
+  if (outcomeClass !== 'failed' || !payload) return null;
+  if (!plainObject(payload.remote) || payload.remote.error_code !== 'ScenarioRunFailed') return null;
+  const session = projectSessionNumber(payload);
+  const code = projectSessionErrorCode(payload);
+  if (!session && !code) return null;
+  const detail = session && code ? `session ${session}, ${code}` : session ? `session ${session}` : code;
+  return `The ODI session ended with an error (${detail}). Open the session in ODI Operator for details.`;
 }
 
 function allowedErrorText(value) {
@@ -492,7 +541,9 @@ export function projectMappingRunOutcome({
     generation: Number.isInteger(generation) ? generation : null,
     requestedMapping: requested.requestedMapping,
     requestedRunMode: requested.requestedRunMode,
-    mapping: projectBackendIdentifier(body?.mapping_name) || NOT_REPORTED,
+    mapping: projectBackendIdentifier(body?.mapping_name)
+      || projectBackendIdentifier(requested.requestedMapping)
+      || NOT_REPORTED,
     scenarioName: projectBackendIdentifier(body?.scenario_name) || projectBackendIdentifier(body?.scenario) || NOT_REPORTED,
     scenarioVersion: projectVersion(body?.scenario_version) || projectVersion(body?.version) || NOT_REPORTED,
     context: projectBackendIdentifier(body?.context) || NOT_REPORTED,
@@ -501,11 +552,14 @@ export function projectMappingRunOutcome({
     failedStep: outcomeClass === 'succeeded'
       ? NOT_REPORTED
       : (safeIdentifier(body?.current_step) || NOT_REPORTED),
-    error: finishError(errorForClass(projectError(body, thrown), outcomeClass, body, thrown), body),
+    error: finishError(
+      projectResolvedSessionError(body, outcomeClass)
+        || errorForClass(projectError(body, thrown), outcomeClass, body, thrown),
+      body,
+    ),
     batchId: projectBatch(body?.batch_id) || NOT_REPORTED,
     sessionId: projectSession(body),
-    // MappingRunSuccess / MappingRunFailure define no count fields.
-    counts: NOT_REPORTED,
+    counts: projectCounts(body),
   };
 }
 

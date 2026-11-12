@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ import oracledb
 
 import remote_run_contract
 import repository_write_contract
+
+logger = logging.getLogger(__name__)
 
 
 class MappingRunSuccess(TypedDict):
@@ -61,6 +64,7 @@ class RemoteRunPhase:
     batch_id: str = ""
     scenario_name: str = ""
     remote: dict[str, Any] | None = None
+    evidence: dict[str, Any] | None = None
     persist_failed: bool = False
     history_uncommitted: bool = False
     pending_outcome: MappingRunOutcome | None = None
@@ -139,6 +143,78 @@ def _scenario_ready(value: object, name: str, version: str) -> bool:
             and all(isinstance(check, dict) and check.get("status") == "pass" for check in checks))
 
 
+_MAX_SAFE_INTEGER = 2**53 - 1
+_SESSION_ERROR_CODE_RE = re.compile(r"\b(?:ORA-[0-9]{5}|ODI-[0-9]{4,5})\b")
+_COUNT_COLUMNS = (
+    ("processed", "PROCESSED_ROWS"),
+    ("inserted", "INSERTED_ROWS"),
+    ("updated", "UPDATED_ROWS"),
+    ("errors", "ERROR_ROWS"),
+)
+
+
+def extract_session_error_code(text: object) -> str | None:
+    """Return at most one ORA-/ODI- token. Message text never leaves this function."""
+    if not isinstance(text, str):
+        return None
+    match = _SESSION_ERROR_CODE_RE.search(text)
+    return match.group(0) if match else None
+
+
+def _counts_from_row(row: dict[str, Any]) -> dict[str, int] | None:
+    counts: dict[str, int] = {}
+    for name, column in _COUNT_COLUMNS:
+        value = row.get(column)
+        if value is None:
+            value = row.get(column.lower())
+        if type(value) is not int or isinstance(value, bool) or value < 0 or value > _MAX_SAFE_INTEGER:
+            return None
+        counts[name] = value
+    return counts
+
+
+def _usable_session_number(value: object) -> bool:
+    return type(value) is int and not isinstance(value, bool) and 0 < value <= _MAX_SAFE_INTEGER
+
+
+def _read_session_row(session_number: int, *, include_error_text: bool = False) -> dict[str, Any] | None:
+    from odi_mcp import read_session_run_evidence
+
+    return read_session_run_evidence(session_number, include_error_text=include_error_text)
+
+
+def _collect_run_evidence(remote: dict[str, Any]) -> dict[str, Any]:
+    extra: dict[str, Any] = {}
+    error_class = None
+    try:
+        if not isinstance(remote, dict):
+            return extra
+        session_number = remote.get("session_number")
+        if not _usable_session_number(session_number):
+            return extra
+        extra["session_number"] = session_number
+        row = _read_session_row(
+            session_number,
+            include_error_text=remote.get("error_code") == "ScenarioRunFailed",
+        )
+        if not isinstance(row, dict):
+            return extra
+        counts = _counts_from_row(row)
+        if counts is not None:
+            extra["counts"] = counts
+        if remote.get("error_code") == "ScenarioRunFailed":
+            code = extract_session_error_code(row.get("ERROR_MESSAGE") or row.get("error_message"))
+            if code is not None:
+                extra["session_error_code"] = code
+        return extra
+    except Exception as exc:
+        # The remote run has already happened. History, alerts and the response still run.
+        error_class = type(exc).__name__
+    if type(error_class) is str:
+        logger.warning("%s", error_class)
+    return extra
+
+
 def _state_payload(
     options: MappingRunOptions,
     batch_id: str,
@@ -147,8 +223,9 @@ def _state_payload(
     overall_status: str,
     completed_steps: list[str],
     safe_error: str,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    state = {
         "batch_id": batch_id,
         "mapping_name": options.mapping_name,
         "scenario_name": scenario_name,
@@ -167,6 +244,11 @@ def _state_payload(
             "truncate_target_table": options.truncate_target_table,
         },
     }
+    if evidence:
+        for key in ("session_number", "counts", "session_error_code"):
+            if key in evidence:
+                state[key] = evidence[key]
+    return state
 
 
 def _explicitly_committed(result: Any) -> bool:
@@ -226,7 +308,8 @@ def _persist_run_state(
     try:
         safe_error = app_module.redact_sensitive_text(str(error or ""), max_len=2000)
         state = _state_payload(
-            options, batch_id, scenario_name, current_step, overall_status, completed_steps, safe_error
+            options, batch_id, scenario_name, current_step, overall_status, completed_steps, safe_error,
+            evidence=None if phase is None else phase.evidence,
         )
         with app_module.MappingStateManager() as manager:
             result = manager.upsert_state(state, thread_id=batch_id)
@@ -384,6 +467,7 @@ def _begin_remote_run(
         scenario_name=scenario_name, version=options.version, context=options.context,
     ), "run")
     phase.remote = parsed
+    phase.evidence = _collect_run_evidence(parsed)
     return parsed
 
 
@@ -394,6 +478,7 @@ def _remote_run_payload(
     remote: dict[str, Any],
     *,
     persist_failed: bool,
+    evidence: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], int]:
     if remote["status"] == "passed":
         payload: dict[str, Any] = {
@@ -409,6 +494,10 @@ def _remote_run_payload(
     else:
         payload = {"status": remote["status"], "remote": remote, "batch_id": batch_id}
         code = 504 if remote.get("error_code") == "RemoteTimeout" else 502
+    if evidence:
+        for key in ("session_number", "counts", "session_error_code"):
+            if key in evidence:
+                payload[key] = evidence[key]
     if persist_failed:
         payload["state_persist_failed"] = True
         payload["warning"] = _HISTORY_WARNINGS[str(payload["status"])]
@@ -427,6 +516,7 @@ def preserved_remote_outcome(
             payload, code = _remote_run_payload(
                 options, phase.batch_id, phase.scenario_name, remote,
                 persist_failed=phase.persist_failed or phase.history_uncommitted,
+                evidence=phase.evidence,
             )
             return MappingRunOutcome(payload, code)
         return MappingRunOutcome(
@@ -529,6 +619,7 @@ def execute_mapping_run(
                               run_result["error_code"])
         payload, code = _remote_run_payload(
             options, batch_id, scenario_name, run_result, persist_failed=phase.persist_failed,
+            evidence=phase.evidence,
         )
         return MappingRunOutcome(payload, code)
     completed_steps.append("run_scenario")
@@ -539,5 +630,6 @@ def execute_mapping_run(
     ) is False
     payload, code = _remote_run_payload(
         options, batch_id, scenario_name, run_result, persist_failed=phase.persist_failed,
+        evidence=phase.evidence,
     )
     return MappingRunOutcome(payload, code)

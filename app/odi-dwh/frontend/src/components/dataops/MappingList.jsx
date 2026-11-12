@@ -3,6 +3,7 @@ import { getOdiMappings, getOdiMappingDetail, runMapping, getMappingState, delet
 import { useDispatch } from '../../store/AppContext';
 import clsx from 'clsx';
 import { buildRunMappingRequest, openRunDialogState, runModeWarning, selectRunMode } from './mappingRunDialog';
+import { applyDetailResponse, applyListResponse, beginDetailRequest } from './mappingSelection';
 import {
   NOT_REPORTED,
   applyRefreshToPanels,
@@ -110,6 +111,7 @@ export function MappingList() {
   const dispatch = useDispatch();
   const [mappings, setMappings] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
   const [detail, setDetail] = useState(null);
   const [runStatus, setRunStatus] = useState({});
@@ -119,7 +121,41 @@ export function MappingList() {
   const [runDialog, setRunDialog] = useState(null);
   const [lastRuns, setLastRuns] = useState({});
   const autoSelectedRef = useRef(false);
+  const selectedNameRef = useRef(null);
+  const detailRef = useRef(null);
+  const runDialogRef = useRef(null);
+  const runStatusRef = useRef({});
+  const selectionRef = useRef({
+    nextSeq: 1,
+    latestSeq: 0,
+    requestedName: null,
+    listedNames: [],
+  });
   const runSeq = useRef(0);
+
+  const commitDetail = useCallback((value) => {
+    detailRef.current = value;
+    setDetail(value);
+  }, []);
+  const commitRunDialog = useCallback((updater) => {
+    const next = typeof updater === 'function' ? updater(runDialogRef.current) : updater;
+    runDialogRef.current = next;
+    setRunDialog(next);
+  }, []);
+  const commitRunStatus = useCallback((updater) => {
+    const next = typeof updater === 'function' ? updater(runStatusRef.current) : updater;
+    runStatusRef.current = next;
+    setRunStatus(next);
+  }, []);
+  const rememberSelection = useCallback((state) => {
+    selectionRef.current = {
+      nextSeq: state.nextSeq,
+      latestSeq: state.latestSeq,
+      requestedName: state.requestedName,
+      listedNames: state.listedNames || [],
+    };
+    selectedNameRef.current = state.requestedName ?? null;
+  }, []);
 
   const showToast = useCallback((message, type = 'success') => {
     setToast({ message, type });
@@ -127,27 +163,38 @@ export function MappingList() {
   }, []);
 
   const loadDetail = useCallback(async (name) => {
+    const begun = beginDetailRequest(selectionRef.current, name);
+    rememberSelection(begun.state);
+    selectedNameRef.current = begun.state.requestedName;
+    const requestSeq = begun.requestSeq;
     try {
       const data = await getOdiMappingDetail(name);
-      setDetail(data);
+      const response = { requestSeq, mappingName: name, detail: data };
+      const decision = applyDetailResponse(selectionRef.current, response);
+      if (decision === selectionRef.current) return;
+      rememberSelection(decision);
+      commitDetail(decision.detail);
       setMappingState(null);
       setStateLoading(true);
       try {
         const s = await getMappingState(name);
+        if (applyDetailResponse(selectionRef.current, response) === selectionRef.current) return;
         setMappingState(s?.state || null);
       } catch {
+        if (applyDetailResponse(selectionRef.current, response) === selectionRef.current) return;
         setMappingState(null);
       } finally {
         setStateLoading(false);
       }
     } catch (e) {
-      showToast('Could not load details: ' + e.message, 'error');
+      if (selectionRef.current.latestSeq === requestSeq) {
+        showToast('Could not load details: ' + e.message, 'error');
+      }
     }
-  }, [showToast]);
+  }, [commitDetail, rememberSelection, showToast]);
 
   const loadMappings = useCallback(async () => {
     try {
-      setLoading(true);
       const data = await getOdiMappings();
       const unique = [];
       const seen = new Set();
@@ -160,7 +207,30 @@ export function MappingList() {
       });
       setMappings(unique);
       setLastRuns((prev) => reconcileLastRuns(prev, unique.map((row) => row.MAPPING_NAME)));
-      if (!detail && !autoSelectedRef.current && unique.length > 0) {
+      const names = unique.map((row) => row.MAPPING_NAME);
+      const decision = applyListResponse({
+        ...selectionRef.current,
+        requestedName: selectedNameRef.current,
+        detail: detailRef.current,
+        runDialog: runDialogRef.current,
+        runStatus: runStatusRef.current,
+      }, names);
+      selectionRef.current = {
+        nextSeq: decision.nextSeq,
+        latestSeq: decision.latestSeq,
+        requestedName: decision.requestedName,
+        listedNames: decision.listedNames || [],
+      };
+      selectedNameRef.current = decision.requestedName ?? null;
+      if (decision.cleared) {
+        detailRef.current = null;
+        setDetail(null);
+        runDialogRef.current = decision.runDialog;
+        setRunDialog(decision.runDialog);
+        runStatusRef.current = decision.runStatus;
+        setRunStatus(decision.runStatus);
+      }
+      if (!selectedNameRef.current && !autoSelectedRef.current && unique.length > 0) {
         autoSelectedRef.current = true;
         setTimeout(() => loadDetail(unique[0].MAPPING_NAME), 0);
       }
@@ -168,8 +238,14 @@ export function MappingList() {
       showToast('Failed to load: ' + e.message, 'error');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  }, [detail, loadDetail, showToast]);
+  }, [loadDetail, showToast]);
+
+  const refreshMappings = useCallback(() => {
+    setRefreshing(true);
+    return loadMappings();
+  }, [loadMappings]);
 
   useEffect(() => {
     const id = setTimeout(loadMappings, 0);
@@ -185,7 +261,7 @@ export function MappingList() {
   const openRunDialog = (name, e) => {
     e.stopPropagation();
     // Non-destructive by default; truncate is only ever an explicit operator choice.
-    setRunDialog(openRunDialogState(name));
+    commitRunDialog(openRunDialogState(name));
   };
 
   const handleRun = async () => {
@@ -194,19 +270,19 @@ export function MappingList() {
     const name = request.mapping_name;
     const generation = runSeq.current + 1;
     runSeq.current = generation;
-    setRunDialog(null);
+    commitRunDialog(null);
     setLastRuns((prev) => {
       if (!prev[name]) return prev;
       const next = { ...prev };
       delete next[name];
       return next;
     });
-    setRunStatus(p => ({ ...p, [name]: 'running' }));
+    commitRunStatus(p => ({ ...p, [name]: 'running' }));
     const publish = (outcome) => {
       setLastRuns((prev) => ({ ...prev, [name]: outcome }));
       const toast = mappingRunToast(outcome, name);
       showToast(toast.message, toast.type);
-      setRunStatus(p => ({ ...p, [name]: outcome.outcomeClass === 'succeeded' ? 'done' : 'error' }));
+      commitRunStatus(p => ({ ...p, [name]: outcome.outcomeClass === 'succeeded' ? 'done' : 'error' }));
     };
     try {
       const res = await runMapping(request);
@@ -220,7 +296,7 @@ export function MappingList() {
         generation,
       }));
     } finally {
-      setTimeout(() => setRunStatus(p => { const n = {...p}; delete n[name]; return n; }), 4000);
+      setTimeout(() => commitRunStatus(p => { const n = {...p}; delete n[name]; return n; }), 4000);
     }
   };
 
@@ -281,9 +357,16 @@ export function MappingList() {
       
       showToast(`${name} deleted successfully.`, 'success');
       setMappings(prev => prev.filter(m => m.MAPPING_NAME !== name));
-      if (detail?.MAPPING_NAME === name) {
+      selectionRef.current = {
+        ...selectionRef.current,
+        listedNames: (selectionRef.current.listedNames || []).filter((item) => item !== name),
+      };
+      if (detail?.MAPPING_NAME === name || selectedNameRef.current === name) {
         autoSelectedRef.current = false;
-        setDetail(null);
+        const begun = beginDetailRequest(selectionRef.current, null);
+        rememberSelection(begun.state);
+        selectedNameRef.current = null;
+        commitDetail(null);
       }
     } catch (err) {
       showToast(`Delete failed: ${err.message}`, 'error');
@@ -331,7 +414,7 @@ export function MappingList() {
                   type="radio"
                   name="target-run-mode"
                   checked={runDialog.truncateTargetTable === true}
-                  onChange={() => setRunDialog(prev => selectRunMode(prev, true))}
+                  onChange={() => commitRunDialog(prev => selectRunMode(prev, true))}
                   className="mt-1 h-4 w-4 accent-violet-600"
                 />
                 <span>
@@ -344,7 +427,7 @@ export function MappingList() {
                   type="radio"
                   name="target-run-mode"
                   checked={runDialog.truncateTargetTable === false}
-                  onChange={() => setRunDialog(prev => selectRunMode(prev, false))}
+                  onChange={() => commitRunDialog(prev => selectRunMode(prev, false))}
                   className="mt-1 h-4 w-4 accent-violet-600"
                 />
                 <span>
@@ -352,16 +435,18 @@ export function MappingList() {
                   <span className="block text-xs leading-5 text-slate-500">Keeps existing target rows and appends new rows.</span>
                 </span>
               </label>
-              {runModeWarning(runDialog) && (
-                <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
-                  {runModeWarning(runDialog)}
-                </p>
-              )}
+              <div className="min-h-[3.25rem]">
+                {runModeWarning(runDialog) ? (
+                  <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+                    {runModeWarning(runDialog)}
+                  </p>
+                ) : null}
+              </div>
             </div>
             <div className="flex justify-end gap-2 border-t border-slate-100 px-5 py-4">
               <button
                 type="button"
-                onClick={() => setRunDialog(null)}
+                onClick={() => commitRunDialog(null)}
                 className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50"
               >
                 Cancel
@@ -395,13 +480,15 @@ export function MappingList() {
           </div>
           <button
             type="button"
-            onClick={loadMappings}
+            onClick={refreshMappings}
             title="Refresh mappings"
             aria-label="Refresh mappings"
-            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs font-bold text-violet-600 transition-colors hover:bg-violet-50 hover:text-violet-700"
+            aria-busy={refreshing}
+            disabled={refreshing}
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs font-bold text-violet-600 transition-colors hover:bg-violet-50 hover:text-violet-700 disabled:opacity-70"
           >
-            <i className="fa-solid fa-arrows-rotate text-[11px]"></i>
-            Refresh
+            <i className={refreshing ? "fa-solid fa-spinner fa-spin text-[11px]" : "fa-solid fa-arrows-rotate text-[11px]"}></i>
+            {refreshing ? "Refreshing..." : "Refresh"}
           </button>
         </div>
       </div>
@@ -514,7 +601,12 @@ export function MappingList() {
                     <h4 className="text-lg font-bold text-slate-800 truncate mb-1">{detail.MAPPING_NAME}</h4>
                     <span className="text-[10px] font-bold text-violet-500 uppercase tracking-widest bg-violet-50 px-2 py-1 rounded-md"> MAPPING CONFIGURATION </span>
                   </div>
-                  <button onClick={() => setDetail(null)} className="text-slate-300 hover:text-slate-600"> <i className="fa-solid fa-xmark"></i> </button>
+                  <button onClick={() => {
+                    const begun = beginDetailRequest(selectionRef.current, null);
+                    rememberSelection(begun.state);
+                    selectedNameRef.current = null;
+                    commitDetail(null);
+                  }} className="text-slate-300 hover:text-slate-600"> <i className="fa-solid fa-xmark"></i> </button>
                 </div>
 
                 <div className="flex-1 overflow-y-auto custom-scrollbar space-y-6 pr-1">

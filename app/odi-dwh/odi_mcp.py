@@ -1,3 +1,7 @@
+import logging
+import threading
+import time
+
 from mcp.server.fastmcp import FastMCP
 import oracledb
 import pandas as pd
@@ -8,6 +12,7 @@ from odi_orchestrator import OdiOrchestrator
 # Create a new MCP server using FastMCP
 mcp = FastMCP("ODI_Repository_MCP_Server")
 odi_orch = OdiOrchestrator()
+logger = logging.getLogger(__name__)
 
 def execute_odi_select(sql: str) -> pd.DataFrame:
     """Execute the given SQL as the configured ODI repository user and return a DataFrame."""
@@ -81,6 +86,163 @@ def odi_get_recent_sessions(limit: int = 20) -> str:
         return df.to_json(orient='records', force_ascii=False)
     except Exception as e:
         return safe_error_json("ODI sessions read", e)
+
+
+# EVIDENCE_READ_BUDGET_S is the caller's total wait on time.monotonic, from
+# function entry (before Thread.start) through the worker. The driver caps
+# below are only the worker's own per-round-trip limits (oracledb 2.4.1:
+# tcp_connect_timeout is seconds, call_timeout is milliseconds for one
+# round trip).
+EVIDENCE_READ_BUDGET_S = 5
+EVIDENCE_CONNECT_TIMEOUT_S = 1.0
+EVIDENCE_CALL_TIMEOUT_MS = 2000
+_EVIDENCE_MESSAGE_CHARS = 4000
+_EVIDENCE_MAX_SAFE_INTEGER = 2**53 - 1
+_EVIDENCE_READ_SLOTS = threading.BoundedSemaphore(2)
+
+
+def _wait_evidence(done: threading.Event, budget_s: float, *, started_at: float) -> bool:
+    """Wait until started_at + budget_s. A late set after this returns is ignored."""
+    deadline = float(started_at) + float(budget_s)
+    remaining = deadline - time.monotonic()
+    if remaining < 0:
+        remaining = 0.0
+    return bool(done.wait(remaining))
+
+
+def _take_evidence_row(cursor: object, session_no: int) -> dict | None:
+    names = [item[0] for item in cursor.description]
+    fetched = cursor.fetchmany(2)
+    if len(fetched) != 1:
+        return None
+    row = {names[index]: fetched[0][index] for index in range(len(names))}
+    found = row.get("SESS_NO")
+    if type(found) is not int or isinstance(found, bool) or found != session_no:
+        return None
+    return row
+
+
+def _finish_evidence_row(row: dict | None, *, include_error_text: bool) -> dict | None:
+    if row is None:
+        return None
+    text = row.get("ERROR_MESSAGE")
+    if (
+        include_error_text
+        and isinstance(text, str)
+        and len(text) <= _EVIDENCE_MESSAGE_CHARS
+    ):
+        return row
+    row.pop("ERROR_MESSAGE", None)
+    return row
+
+
+def _evidence_worker(
+    session_no: int,
+    sql: str,
+    include_error_text: bool,
+    box: dict,
+    done: threading.Event,
+) -> None:
+    """Own the connection. No Flask context. No logger call on this thread."""
+    conn = None
+    try:
+        try:
+            conn = oracledb.connect(
+                user=ODI_REPO_USER,
+                password=ODI_REPO_PASSWORD,
+                dsn=ODI_REPO_DSN or ORACLE_DSN,
+                tcp_connect_timeout=EVIDENCE_CONNECT_TIMEOUT_S,
+                retry_count=0,
+            )
+            conn.call_timeout = EVIDENCE_CALL_TIMEOUT_MS
+            cursor = conn.cursor()
+            cursor.prefetchrows = 2
+            cursor.execute(sql, {"sess_no": session_no})
+            box["result"] = _finish_evidence_row(
+                _take_evidence_row(cursor, session_no),
+                include_error_text=include_error_text,
+            )
+        except (oracledb.Error, OSError) as exc:
+            box["result"] = None
+            box["driver_error_class"] = type(exc).__name__
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except (oracledb.Error, OSError) as exc:
+                box["close_error_class"] = type(exc).__name__
+    except Exception as exc:
+        # Thread boundary. A plain assignment cannot raise or print. Logging
+        # here would chain this exception into stderr when the sink fails.
+        # A close failure must not discard a row already stored on the box.
+        box["error_class"] = type(exc).__name__
+    finally:
+        done.set()
+        _EVIDENCE_READ_SLOTS.release()
+
+
+def read_session_run_evidence(session_no: int, *, include_error_text: bool) -> dict | None:
+    """One SNP_SESSION statement. The caller waits at most EVIDENCE_READ_BUDGET_S."""
+    started_at = time.monotonic()
+    if (
+        type(session_no) is not int
+        or isinstance(session_no, bool)
+        or session_no <= 0
+        or session_no > _EVIDENCE_MAX_SAFE_INTEGER
+    ):
+        return None
+    if not _EVIDENCE_READ_SLOTS.acquire(blocking=False):
+        return None
+    message_column = ""
+    if include_error_text:
+        message_column = (
+            f",\n               SUBSTR(SESS_MESS, 1, {_EVIDENCE_MESSAGE_CHARS}) AS ERROR_MESSAGE"
+        )
+    sql = f"""
+        SELECT SESS_NO,
+               NB_ROW AS PROCESSED_ROWS,
+               NB_INS AS INSERTED_ROWS,
+               NB_UPD AS UPDATED_ROWS,
+               NB_ERR AS ERROR_ROWS{message_column}
+          FROM {ODI_REPO_SCHEMA}.SNP_SESSION
+         WHERE SESS_NO = :sess_no
+         FETCH FIRST 2 ROWS ONLY
+    """
+    done = threading.Event()
+    box: dict = {}
+    worker = threading.Thread(
+        target=_evidence_worker,
+        args=(session_no, sql, include_error_text, box, done),
+        daemon=True,
+        name="odi-evidence-read",
+    )
+    started = False
+    start_error = None
+    completed = False
+    try:
+        try:
+            worker.start()
+        except RuntimeError as exc:
+            start_error = type(exc).__name__
+        else:
+            started = True
+            completed = _wait_evidence(done, EVIDENCE_READ_BUDGET_S, started_at=started_at)
+    finally:
+        if not started:
+            _EVIDENCE_READ_SLOTS.release()
+    # No exception is being handled. A failing sink has nothing to chain.
+    if start_error is not None:
+        logger.warning("%s", start_error)
+        return None
+    if not completed:
+        return None
+    for key in ("driver_error_class", "close_error_class", "error_class"):
+        name = box.get(key)
+        if type(name) is str:
+            logger.warning("%s", name)
+    result = box.get("result")
+    return result if isinstance(result, dict) else None
+
 
 @mcp.tool()
 def odi_get_scenario_list() -> str:

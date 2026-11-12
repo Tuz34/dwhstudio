@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   HISTORY_CHECK_TEXT,
@@ -303,7 +306,7 @@ test('missing fields and a body without a status are not reported and not succes
   assertUnknownWording(onlyStatus, REQUEST.mapping_name);
   assert.equal(onlyStatus.overallStatus, NOT_REPORTED);
   assert.equal(rendered(onlyStatus).includes('SUCCESS'), false);
-  assert.equal(onlyStatus.mapping, NOT_REPORTED);
+  assert.equal(onlyStatus.mapping, 'MAP_HR_EMPLOYEES_TO_ODS');
   assert.equal(onlyStatus.scenarioName, NOT_REPORTED);
   assert.equal(onlyStatus.scenarioVersion, NOT_REPORTED);
   assert.equal(onlyStatus.context, NOT_REPORTED);
@@ -1165,4 +1168,236 @@ test('an absent, false, or string persist flag adds no history notice', () => {
     assert.equal(rendered(outcome).includes(HISTORY_NOT_SAVED_TEXT), false, label);
     assertNoPersistLeak(outcome, label);
   }
+});
+
+const SESSION_COUNTS = { processed: 10, inserted: 8, updated: 2, errors: 0 };
+const SESSION_ERROR_SENTENCE = 'The ODI session ended with an error (session 311, ORA-00932). Open the session in ODI Operator for details.';
+
+function assertClassUnchanged(label, input, expectedClass) {
+  const outcome = projectMappingRunOutcome(input);
+  assert.equal(outcome.outcomeClass, expectedClass, label);
+}
+
+test('session number and counts project from allowlisted integers only', () => {
+  const success = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: {
+      ...SUCCESS_PAYLOAD,
+      session_number: 311,
+      counts: SESSION_COUNTS,
+      remote: { ...DONE_REMOTE, session_number: 311 },
+    },
+    request: REQUEST,
+  });
+  assert.equal(success.outcomeClass, 'succeeded');
+  assert.equal(success.sessionId, '311');
+  assert.equal(success.counts, 'processed 10, inserted 8, updated 2, errors 0');
+  assert.equal(success.mapping, 'MAP_HR_EMPLOYEES_TO_ODS');
+  assert.equal(rendered(success).includes('Session: 311'), true);
+  assert.equal(rendered(success).includes('Mapping: not reported'), false);
+  assert.equal(rendered(success).includes('Session: not reported'), false);
+  assert.equal(rendered(success).includes('Counts: not reported'), false);
+
+  const noCounts = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: {
+      ...SUCCESS_PAYLOAD,
+      session_number: 311,
+      remote: { ...DONE_REMOTE, session_number: 311 },
+    },
+    request: REQUEST,
+  });
+  assert.equal(noCounts.outcomeClass, 'succeeded');
+  assert.equal(noCounts.sessionId, '311');
+  assert.equal(noCounts.counts, NOT_REPORTED);
+  assert.equal(noCounts.mapping, 'MAP_HR_EMPLOYEES_TO_ODS');
+});
+
+test('a failed run with session and code uses the fixed operator sentence', () => {
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: {
+      status: 'failed',
+      remote: { ...FAILED_REMOTE, session_number: 311 },
+      batch_id: 'RUN-001',
+      session_number: 311,
+      session_error_code: 'ORA-00932',
+      counts: SESSION_COUNTS,
+    },
+    request: REQUEST,
+  });
+  assertFailedClass(outcome);
+  assert.equal(outcome.sessionId, '311');
+  assert.equal(outcome.counts, 'processed 10, inserted 8, updated 2, errors 0');
+  assert.equal(outcome.error, SESSION_ERROR_SENTENCE);
+  assert.equal(outcome.mapping, 'MAP_HR_EMPLOYEES_TO_ODS');
+  const text = rendered(outcome);
+  assert.equal(text.includes('ORA-00932'), true);
+  assert.equal(text.includes('session 311'), true);
+  assert.equal(text.includes('INSERT INTO'), false);
+  assert.equal(text.includes('O\'Brien'), false);
+});
+
+test('non-integer session or counts stay not reported and do not change class', () => {
+  const cases = [
+    { extra: { session_number: '311', counts: SESSION_COUNTS }, session: NOT_REPORTED, counts: 'processed 10, inserted 8, updated 2, errors 0' },
+    { extra: { session_number: 0, counts: SESSION_COUNTS }, session: NOT_REPORTED, counts: 'processed 10, inserted 8, updated 2, errors 0' },
+    { extra: { session_number: 311, counts: { ...SESSION_COUNTS, processed: 1.5 } }, session: '311', counts: NOT_REPORTED },
+    { extra: { session_number: 311, counts: { ...SESSION_COUNTS, customer_id: 123456 } }, session: '311', counts: NOT_REPORTED },
+    { extra: { session_number: 311, session_error_code: 'INSERT INTO "HR"."EMP" VALUES (\'x\') ORA-00932' }, session: '311', counts: NOT_REPORTED },
+  ];
+  for (const { extra, session, counts } of cases) {
+    const outcome = projectMappingRunOutcome({
+      httpStatus: 200,
+      payload: { ...SUCCESS_PAYLOAD, ...extra, remote: { ...DONE_REMOTE, ...extra } },
+      request: REQUEST,
+    });
+    assert.equal(outcome.outcomeClass, 'succeeded');
+    assert.equal(outcome.sessionId, session);
+    assert.equal(outcome.counts, counts);
+    assert.equal(rendered(outcome).includes('customer_id'), false);
+    assert.equal(rendered(outcome).includes('INSERT INTO'), false);
+  }
+});
+
+test('new allowlisted fields never move an existing fixture class', () => {
+  assertClassUnchanged('success', { httpStatus: 200, payload: SUCCESS_PAYLOAD }, 'succeeded');
+  assertClassUnchanged('success plus session', {
+    httpStatus: 200,
+    payload: { ...SUCCESS_PAYLOAD, session_number: 311, counts: SESSION_COUNTS },
+  }, 'succeeded');
+  assertClassUnchanged('resolved error', {
+    httpStatus: 502,
+    payload: { status: 'failed', remote: FAILED_REMOTE, batch_id: 'RUN-001' },
+  }, 'failed');
+  assertClassUnchanged('resolved error plus evidence', {
+    httpStatus: 502,
+    payload: {
+      status: 'failed',
+      remote: { ...FAILED_REMOTE, session_number: 311 },
+      batch_id: 'RUN-001',
+      session_number: 311,
+      session_error_code: 'ORA-00932',
+      counts: SESSION_COUNTS,
+    },
+  }, 'failed');
+  assertClassUnchanged('unknown timeout', {
+    httpStatus: 504,
+    payload: { status: 'unknown', remote: TIMEOUT_REMOTE, batch_id: 'RUN-TIME1' },
+  }, 'unknown');
+  assertClassUnchanged('gate', { httpStatus: 409, payload: GATE_PAYLOAD }, 'failed');
+  assertClassUnchanged('redacted 500', {
+    httpStatus: 500,
+    payload: { error: 'mapping run failed.', error_type: 'RuntimeError' },
+  }, 'unknown');
+});
+
+test('a panel-started run never reports Mapping as not reported', () => {
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: SUCCESS_PAYLOAD,
+    request: REQUEST,
+  });
+  assert.equal(outcome.mapping, 'MAP_HR_EMPLOYEES_TO_ODS');
+  assert.equal(rendered(outcome).includes('Mapping: not reported'), false);
+});
+
+const SAFE_MAX = Number.MAX_SAFE_INTEGER;
+
+test('round 2: unsafe session numbers and counters stay not reported', () => {
+  for (const unsafe of [2 ** 53, 10 ** 5000]) {
+    const outcome = projectMappingRunOutcome({
+      httpStatus: 200,
+      payload: {
+        ...SUCCESS_PAYLOAD,
+        session_number: unsafe,
+        counts: { ...SESSION_COUNTS, processed: unsafe },
+        remote: { ...DONE_REMOTE, session_number: unsafe },
+      },
+      request: REQUEST,
+    });
+    assert.equal(outcome.outcomeClass, 'succeeded');
+    assert.equal(outcome.sessionId, NOT_REPORTED);
+    assert.equal(outcome.counts, NOT_REPORTED);
+  }
+  const atLimit = projectMappingRunOutcome({
+    httpStatus: 200,
+    payload: {
+      ...SUCCESS_PAYLOAD,
+      session_number: SAFE_MAX,
+      counts: { ...SESSION_COUNTS, errors: SAFE_MAX },
+      remote: { ...DONE_REMOTE, session_number: SAFE_MAX },
+    },
+    request: REQUEST,
+  });
+  assert.equal(atLimit.sessionId, String(SAFE_MAX));
+  assert.equal(atLimit.counts.includes(`errors ${SAFE_MAX}`), true);
+});
+
+test('round 2: error code pattern is ascii digits with the same shape as the service', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const panel = readFileSync(join(here, 'mappingRunOutcome.js'), 'utf8');
+  const service = readFileSync(join(here, '../../../../mapping_run_service.py'), 'utf8');
+  const shape = 'ORA-[0-9]{5}|ODI-[0-9]{4,5}';
+  assert.equal(panel.includes(shape), true);
+  assert.equal(service.includes(shape), true);
+  const arabic = 'ORA-\u0660\u0660\u0669\u0663\u0662';
+  const outcome = projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: {
+      status: 'failed',
+      remote: { ...FAILED_REMOTE, session_number: 311 },
+      batch_id: 'RUN-001',
+      session_number: 311,
+      session_error_code: arabic,
+      counts: SESSION_COUNTS,
+    },
+    request: REQUEST,
+  });
+  assert.equal(rendered(outcome).includes(arabic), false);
+  assert.equal(outcome.error.includes('ORA-00932'), false);
+});
+
+test('round 2: a pre-run body does not say the session ended in error', () => {
+  const evidence = {
+    session_number: 311,
+    session_error_code: 'ORA-00932',
+    counts: SESSION_COUNTS,
+  };
+  const validation = projectMappingRunOutcome({
+    httpStatus: 400,
+    payload: { error: 'Invalid mapping_name.', ...evidence },
+    request: REQUEST,
+  });
+  assert.equal(validation.outcomeClass, 'failed');
+  assert.equal(validation.error, 'Invalid mapping_name.');
+  assert.equal(rendered(validation).includes('ended with an error'), false);
+
+  const blocked = projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: {
+      status: 'blocked',
+      remote: { ...blockedRemote('AgentUnavailable'), ...evidence },
+      batch_id: 'RUN-BLOCK1',
+      ...evidence,
+    },
+    request: REQUEST,
+  });
+  assert.equal(blocked.outcomeClass, 'failed');
+  assert.equal(blocked.error, 'AgentUnavailable');
+  assert.equal(rendered(blocked).includes('ended with an error'), false);
+
+  const stillFailed = projectMappingRunOutcome({
+    httpStatus: 502,
+    payload: {
+      status: 'failed',
+      remote: { ...FAILED_REMOTE, session_number: 311 },
+      batch_id: 'RUN-001',
+      session_number: 311,
+      session_error_code: 'ORA-00932',
+      counts: SESSION_COUNTS,
+    },
+    request: REQUEST,
+  });
+  assert.equal(stillFailed.error, SESSION_ERROR_SENTENCE);
 });
