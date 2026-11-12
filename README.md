@@ -133,11 +133,15 @@ Examples from the code and tests (Oracle sample schemas `HR` and `SH` as sources
 
 ## What has been verified on a live system
 
-A chat request was taken through the mapping wizard or Type 2 screen and the application's own
-ODI generator for five load patterns. Each pattern ran against Oracle Database 19c and ODI
-12.2.1.4: an initial run, a run after one source update and one source insert, and a run with
-no source change. Count-only checks covered row counts, key parity, and audit timestamps;
-no row values were used.
+Five load patterns were each built from a chat request and the application's own ODI generator.
+ODS insert/update, ODS truncate and insert, and EDW Type 1 used the mapping wizard; EDW Type 2
+and Datamart Type 2 used the Type 2 screen. Each ran against Oracle Database 19c and ODI
+12.2.1.4 with an initial run, a run after a source change, and a run with no source change.
+The source change was one update and one insert for ODS insert/update and EDW Type 1, and
+changed tracked attributes plus an insert for both Type 2 patterns. For ODS truncate and
+insert, the source changed and the target was truncated and reloaded. Count-only checks covered
+row counts, key parity, and audit timestamps; Type 2 checks also covered total, current, and
+closed counts and parity between current rows and the source. No row values were used.
 
 - ODS insert/update.
 - ODS truncate and insert.
@@ -169,10 +173,12 @@ python tools/workspace/appsec_gate.py --no-write
 
 ## How changes are made
 
-Every change goes through a pull request reviewed by an AI coding agent other than its
+Since the initial baseline commit, every change on `main` has landed through a pull request.
+In the current process, each pull request is reviewed by an AI coding agent other than its
 author. CI gates include a secret scan over the full history, a quality gate with a fixed
 baseline, the full test suite with no deselections, and an application-security endpoint
-gate. Delivery to the running installation is hash-verified and retains before-images.
+gate. Updates to the running installation are delivered by tooling kept outside this repository,
+which compares file hashes with the delivered commit and keeps the replaced files as before-images.
 
 ## Roadmap
 
