@@ -6,6 +6,7 @@ from mcp.server.fastmcp import FastMCP
 import oracledb
 import pandas as pd
 from config import ODI_REPO_SCHEMA, ODI_REPO_USER, ODI_REPO_PASSWORD, ODI_REPO_DSN, ORACLE_DSN
+from contained import contained
 from diagnostic_errors import safe_error_json
 from odi_orchestrator import OdiOrchestrator
 
@@ -144,8 +145,9 @@ def _evidence_worker(
     done: threading.Event,
 ) -> None:
     """Own the connection. No Flask context. No logger call on this thread."""
-    conn = None
-    try:
+
+    def _read() -> None:
+        conn = None
         try:
             conn = oracledb.connect(
                 user=ODI_REPO_USER,
@@ -171,11 +173,13 @@ def _evidence_worker(
                     conn.close()
             except (oracledb.Error, OSError) as exc:
                 box["close_error_class"] = type(exc).__name__
-    except Exception as exc:
-        # Thread boundary. A plain assignment cannot raise or print. Logging
-        # here would chain this exception into stderr when the sink fails.
-        # A close failure must not discard a row already stored on the box.
-        box["error_class"] = type(exc).__name__
+
+    # Class name is captured inside contained(). This thread does not log.
+    # A close failure must not discard a row already stored on the box.
+    try:
+        _result, error_class = contained(_read)
+        if type(error_class) is str:
+            box["error_class"] = error_class
     finally:
         done.set()
         _EVIDENCE_READ_SLOTS.release()
