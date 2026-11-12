@@ -20,10 +20,7 @@ WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-if (WORKSPACE_ROOT / "tools" / "workspace" / "appsec_gate.py").is_file():
-    from tools.workspace import appsec_gate  # noqa: E402
-else:
-    appsec_gate = None
+from tools.workspace import appsec_gate  # noqa: E402
 
 APP_PY = Path(__file__).resolve().parents[1] / "app.py"
 
@@ -45,8 +42,6 @@ def stub_services(monkeypatch, plan):
 
 
 def matrix_row(path):
-    if appsec_gate is None:
-        pytest.skip("Repository AppSec gate is absent from this application-only tree.")
     rows = [r for r in appsec_gate.build_endpoint_matrix(APP_PY) if r["path"] == path]
     assert len(rows) == 1
     return rows[0]
@@ -74,8 +69,6 @@ def test_new_endpoints_are_classified_in_the_appsec_matrix(path, methods, risk, 
 
 
 def test_appsec_gate_passes_with_new_endpoints():
-    if appsec_gate is None:
-        pytest.skip("Repository AppSec gate is absent from this application-only tree.")
     report = appsec_gate.run_gate(APP_PY, APP_PY.with_name("config.py"), APP_PY.parent)
     assert report["passed"] is True, [c for c in report["checks"] if not c["passed"]]
 

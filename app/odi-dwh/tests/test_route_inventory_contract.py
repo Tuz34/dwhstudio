@@ -4,18 +4,13 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from route_inventory import build_route_contract, route_contract_rows, write_route_contract
-if (WORKSPACE_ROOT / "tools" / "workspace" / "appsec_gate.py").is_file():
-    from tools.workspace import appsec_gate
-else:
-    appsec_gate = None
+from tools.workspace import appsec_gate
 
 
 ACTIVE_APP_ROOT = WORKSPACE_ROOT / "app" / "odi-dwh"
@@ -142,8 +137,6 @@ def _stable_route_contract(contract):
 
 
 def test_runtime_route_inventory_matches_static_appsec_matrix():
-    if appsec_gate is None:
-        pytest.skip("Repository AppSec gate is absent from this application-only tree.")
     from app import app
 
     static_rows = appsec_gate.build_endpoint_matrix(ACTIVE_APP_ROOT / "app.py")

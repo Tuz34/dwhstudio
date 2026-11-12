@@ -8,8 +8,6 @@ import pytest
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
-if not (WORKSPACE_ROOT / "tools" / "workspace" / "appsec_gate.py").is_file():
-    pytest.skip("Repository AppSec gate is absent from this application-only tree.", allow_module_level=True)
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
