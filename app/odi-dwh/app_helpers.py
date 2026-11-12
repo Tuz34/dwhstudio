@@ -53,18 +53,12 @@ def _component_key(item: dict) -> tuple[str, str]:
 
 
 def _evidence_target(items: list) -> dict | None:
-    """The one DATASTORE/FILE component flagged IS_TARGET. Otherwise unknown."""
-    flagged = []
-    seen = set()
-    for item in items:
-        comp_type = str(item.get("COMP_TYPE") or "").strip().upper()
-        if comp_type not in _TARGET_COMPONENT_TYPES or not _is_target_flag(item):
-            continue
-        key = _component_key(item)
-        if key in seen:
-            continue
-        seen.add(key)
-        flagged.append(item)
+    """The one flagged DATASTORE/FILE row. Two rows are unknown even when the names match."""
+    flagged = [
+        item for item in items
+        if str(item.get("COMP_TYPE") or "").strip().upper() in _TARGET_COMPONENT_TYPES
+        and _is_target_flag(item)
+    ]
     if len(flagged) != 1:
         return None
     return flagged[0]

@@ -675,3 +675,256 @@ def test_success_dict_leaves_message_and_detail_unchanged():
     assert cleaned["message"] == _MARKER
     assert cleaned["detail"] == _MARKER
     assert cleaned["reason"] == _MARKER
+
+
+def _skipped_data_payload():
+    """Reviewer shape: skip context must survive the data list, not only message/detail/reason keys."""
+    return {
+        "overall_status": "SKIPPED",
+        "data": [
+            {"message": _MARKER},
+            {"detail": _MARKER},
+        ],
+    }
+
+
+def test_skipped_parent_redacts_messages_inside_a_data_list():
+    cleaned = redacted_operation_result(_skipped_data_payload(), "mapping generation")
+    assert cleaned["overall_status"] == "SKIPPED"
+    assert cleaned["data"] == [
+        {"message": STEP_SKIPPED},
+        {"detail": STEP_SKIPPED},
+    ]
+    assert _MARKER not in json.dumps(cleaned)
+
+
+def test_generate_route_redacts_skipped_data_list_messages(app_client, monkeypatch):
+    import app as app_module
+    import odi81_app_acceptance as driver
+
+    class FakeGenerator:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def generate_from_params(self, _params):
+            return _skipped_data_payload()
+
+        def generate_from_prompt(self, _prompt):
+            raise AssertionError("prompt path")
+
+    monkeypatch.setattr(app_module, "MappingGenerator", FakeGenerator)
+    response = app_client.post("/api/mapping/generate", json=driver.classic_generate_body("F1"))
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["overall_status"] == "SKIPPED"
+    assert body["data"] == [
+        {"message": STEP_SKIPPED},
+        {"detail": STEP_SKIPPED},
+    ]
+    assert _MARKER not in response.get_data(as_text=True)
+
+
+def test_nested_success_under_a_skip_keeps_its_own_text():
+    cleaned = redacted_operation_result(
+        {
+            "overall_status": "SKIPPED",
+            "kept": {
+                "status": "SUCCESS",
+                "message": _MARKER,
+                "detail": _MARKER,
+                "reason": _MARKER,
+            },
+            "inherited": {"message": _MARKER, "detail": _MARKER, "reason": _MARKER},
+        },
+        "mapping generation",
+    )
+    assert cleaned["kept"]["status"] == "SUCCESS"
+    assert cleaned["kept"]["message"] == _MARKER
+    assert cleaned["kept"]["detail"] == _MARKER
+    assert cleaned["kept"]["reason"] == _MARKER
+    assert cleaned["inherited"] == {
+        "message": STEP_SKIPPED,
+        "detail": STEP_SKIPPED,
+        "reason": STEP_SKIPPED,
+    }
+
+
+def test_skip_inherits_through_a_list_of_lists():
+    cleaned = redacted_operation_result(
+        {
+            "overall_status": "SKIPPED",
+            "data": [[
+                {"message": _MARKER},
+                {"detail": {"inner": _MARKER, "kept": _AUDIT_KEEP, "n": 2}},
+                {"status": "SUCCESS", "message": _MARKER, "detail": _MARKER},
+            ]],
+        },
+        "mapping generation",
+    )
+    row = cleaned["data"][0]
+    assert row[0] == {"message": STEP_SKIPPED}
+    assert row[1] == {"detail": {"inner": STEP_SKIPPED, "kept": _AUDIT_KEEP, "n": 2}}
+    assert row[2]["status"] == "SUCCESS"
+    assert row[2]["message"] == _MARKER
+    assert row[2]["detail"] == _MARKER
+
+
+def test_skip_ancestor_two_levels_up_covers_nested_sentences():
+    cleaned = redacted_operation_result(
+        {
+            "overall_status": "SKIPPED",
+            "level1": {
+                "level2": {
+                    "message": {"text": _MARKER},
+                    "detail": _MARKER,
+                    "reason": [_SKEY_SKIP, _MARKER],
+                    "untouched": _MARKER,
+                },
+            },
+        },
+        "mapping generation",
+    )
+    level2 = cleaned["level1"]["level2"]
+    assert level2["message"] == {"text": STEP_SKIPPED}
+    assert level2["detail"] == STEP_SKIPPED
+    assert level2["reason"] == [_SKEY_SKIP, STEP_SKIPPED]
+    assert level2["untouched"] == _MARKER
+
+
+def test_dict_outside_a_skipped_ancestor_is_unchanged():
+    cleaned = redacted_operation_result(
+        {
+            "overall_status": "SUCCESS",
+            "data": [{"message": _MARKER, "detail": _MARKER, "reason": _MARKER}],
+            "nested": {
+                "overall_status": "SKIPPED",
+                "data": [{"message": _MARKER}],
+            },
+        },
+        "mapping generation",
+    )
+    assert cleaned["data"] == [{"message": _MARKER, "detail": _MARKER, "reason": _MARKER}]
+    assert cleaned["nested"]["overall_status"] == "SKIPPED"
+    assert cleaned["nested"]["data"] == [{"message": STEP_SKIPPED}]
+
+
+def test_two_flagged_rows_with_the_same_names_are_unknown():
+    rows = [
+        _lineage_row(
+            "MAP_DUP_FLAG", "DIM_X", "DWH.DIM_X",
+            IS_TARGET="Y", PROJECT_CODE="PROJ_A", PROJECT_NAME="Project A",
+        ),
+        _lineage_row(
+            "MAP_DUP_FLAG", "DIM_X", "DWH.DIM_X",
+            IS_TARGET="Y", PROJECT_CODE="PROJ_B", PROJECT_NAME="Project B",
+        ),
+    ]
+    [found] = _group_odi_mapping_lineage_items(rows)
+    assert found["TGT_TABLE"] == "?"
+    assert found["TGT_OWNER"] == "DWH"
+    assert found["LAYER"] == ""
+
+
+def test_two_flagged_rows_with_different_names_are_unknown():
+    rows = [
+        _lineage_row("MAP_TWO_FLAGS", "ODS_A", "DWH.ODS_A", IS_TARGET="Y"),
+        _lineage_row("MAP_TWO_FLAGS", "EDW_B", "DWH.EDW_B", IS_TARGET="Y"),
+    ]
+    [found] = _group_odi_mapping_lineage_items(rows)
+    assert found["TGT_TABLE"] == "?"
+    assert found["TGT_OWNER"] == "DWH"
+    assert found["LAYER"] == ""
+
+
+def test_one_flagged_datastore_row_is_the_target():
+    rows = [
+        _lineage_row("MAP_ONE_FLAG", "ORDERS", "HR.ORDERS", IS_TARGET="N"),
+        _lineage_row("MAP_ONE_FLAG", "DIM_CUSTOMER", "DWH.DIM_CUSTOMER", IS_TARGET="Y"),
+    ]
+    [found] = _group_odi_mapping_lineage_items(rows)
+    assert found["TGT_TABLE"] == "DIM_CUSTOMER"
+    assert found["TGT_OWNER"] == "DWH"
+    assert found["LAYER"] == "EDW"
+    assert found["SRC_TABLE"] == "HR.ORDERS"
+
+
+def test_status_key_in_another_case_is_a_skip():
+    cleaned = redacted_operation_result(
+        {"Status": "Skipped", "message": _MARKER, "detail": _AUDIT_KEEP},
+        "mapping generation",
+    )
+    assert cleaned["message"] == STEP_SKIPPED
+    assert cleaned["detail"] == _AUDIT_KEEP
+    assert _MARKER not in json.dumps(cleaned)
+
+
+def test_overall_status_key_in_another_case_is_a_skip():
+    cleaned = redacted_operation_result(
+        {"OVERALL_STATUS": "SKIPPED", "reason": _MARKER, "message": [_MARKER, _SKEY_SKIP]},
+        "mapping generation",
+    )
+    assert cleaned["reason"] == STEP_SKIPPED
+    assert cleaned["message"] == [STEP_SKIPPED, _SKEY_SKIP]
+    assert _MARKER not in json.dumps(cleaned)
+
+
+def test_skipped_flag_key_in_another_case_is_a_skip():
+    cleaned = redacted_operation_result(
+        {"Skipped": True, "detail": {"leak": _MARKER, "kept": _AUDIT_KEEP, "n": 1}},
+        "mapping update",
+    )
+    assert cleaned["detail"] == {"leak": STEP_SKIPPED, "kept": _AUDIT_KEEP, "n": 1}
+    assert cleaned["Skipped"] is True
+    assert _MARKER not in json.dumps(cleaned)
+
+
+def test_failure_status_in_another_case_gets_the_failure_treatment():
+    """Alternate-case failure redacts at least what a lowercase failure status redacts."""
+    cleaned = redacted_operation_result(
+        {
+            "Status": "FAILED",
+            "detail": _MARKER,
+            "reason": _MARKER,
+            "message": _MARKER,
+        },
+        "mapping generation",
+    )
+    assert cleaned["detail"] == "mapping generation failed."
+    assert cleaned["reason"] == "mapping generation failed."
+    assert cleaned["message"] == _MARKER
+    assert cleaned["Status"] == "FAILED"
+
+
+def test_any_failure_spelling_wins_then_any_skip_spelling():
+    failure = redacted_operation_result(
+        {
+            "status": "SUCCESS",
+            "Status": "FAILED",
+            "overall_status": "SKIPPED",
+            "detail": _MARKER,
+            "reason": _MARKER,
+            "message": _MARKER,
+        },
+        "mapping generation",
+    )
+    assert failure["detail"] == "mapping generation failed."
+    assert failure["reason"] == "mapping generation failed."
+    assert failure["message"] == _MARKER
+
+    skip = redacted_operation_result(
+        {
+            "status": "SUCCESS",
+            "OVERALL_STATUS": "Skipped",
+            "skipped": False,
+            "Skipped": True,
+            "message": _MARKER,
+            "detail": _AUDIT_KEEP,
+        },
+        "mapping update",
+    )
+    assert skip["message"] == STEP_SKIPPED
+    assert skip["detail"] == _AUDIT_KEEP
+    assert _MARKER not in json.dumps(skip)

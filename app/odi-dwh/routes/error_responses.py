@@ -31,11 +31,37 @@ def _visible_skip_detail(item) -> str:
     return STEP_SKIPPED
 
 
-def _status_token(value: dict, key: str) -> str:
-    raw = value.get(key)
-    if raw is None:
-        return ""
-    return str(raw).strip().upper()
+_STATUS_NAMES = frozenset({"status", "overall_status", "skipped"})
+
+
+def _named_values(value: dict, name: str) -> list:
+    target = name.lower()
+    return [item for key, item in value.items() if str(key).lower() == target]
+
+
+def _status_tokens(value: dict, name: str) -> list[str]:
+    tokens = []
+    for raw in _named_values(value, name):
+        if raw is None:
+            tokens.append("")
+        else:
+            tokens.append(str(raw).strip().upper())
+    return tokens
+
+
+def _has_own_status(value: dict) -> bool:
+    return any(str(key).lower() in _STATUS_NAMES for key in value)
+
+
+def _failure_and_skip(value: dict) -> tuple[bool, bool]:
+    """Any failure spelling wins, then any skip spelling. Letter case does not matter."""
+    labels = _status_tokens(value, "status") + _status_tokens(value, "overall_status")
+    failed = any(label in _FAILURE_STATUSES for label in labels)
+    skipped = not failed and (
+        any(label == "SKIPPED" for label in labels)
+        or any(item is True for item in _named_values(value, "skipped"))
+    )
+    return failed, skipped
 
 
 def _redact_skip_value(item):
@@ -48,25 +74,28 @@ def _redact_skip_value(item):
     return item
 
 
-def redacted_operation_result(value, action: str):
-    """Remove diagnostic exception text from otherwise successful JSON responses."""
+def redacted_operation_result(value, action: str, *, inherited_skip: bool = False):
+    """Remove diagnostic exception text from otherwise successful JSON responses.
+
+    A skipped dict lends that skip to every nested dict that has no status of
+    its own, at any depth and under any key. A nested dict with its own status
+    is judged only by its own values.
+    """
 
     if isinstance(value, list):
-        return [redacted_operation_result(item, action) for item in value]
+        return [
+            redacted_operation_result(item, action, inherited_skip=inherited_skip)
+            for item in value
+        ]
     if not isinstance(value, dict):
         return value
 
-    status = _status_token(value, "status")
-    overall = _status_token(value, "overall_status")
-    failed = status in _FAILURE_STATUSES or overall in _FAILURE_STATUSES
-    skipped = (
-        not failed
-        and (
-            status == "SKIPPED"
-            or overall == "SKIPPED"
-            or value.get("skipped") is True
-        )
-    )
+    if _has_own_status(value):
+        failed, skipped = _failure_and_skip(value)
+    elif inherited_skip:
+        failed, skipped = False, True
+    else:
+        failed, skipped = False, False
     had_error = any(str(key).lower() in {"error", "error_message"} and item for key, item in value.items())
     code = value.get("error_code")
     fixed_error = (
@@ -88,7 +117,7 @@ def redacted_operation_result(value, action: str):
         ):
             cleaned[key] = _redact_skip_value(item)
         else:
-            cleaned[key] = redacted_operation_result(item, action)
+            cleaned[key] = redacted_operation_result(item, action, inherited_skip=skipped)
     if had_error:
         cleaned["error_type"] = "OperationError"
     return cleaned
