@@ -11,6 +11,7 @@ import oracledb
 
 import remote_run_contract
 import repository_write_contract
+from contained import contained
 
 logger = logging.getLogger(__name__)
 
@@ -185,8 +186,8 @@ def _read_session_row(session_number: int, *, include_error_text: bool = False) 
 
 def _collect_run_evidence(remote: dict[str, Any]) -> dict[str, Any]:
     extra: dict[str, Any] = {}
-    error_class = None
-    try:
+
+    def _fill() -> dict[str, Any]:
         if not isinstance(remote, dict):
             return extra
         session_number = remote.get("session_number")
@@ -207,9 +208,9 @@ def _collect_run_evidence(remote: dict[str, Any]) -> dict[str, Any]:
             if code is not None:
                 extra["session_error_code"] = code
         return extra
-    except Exception as exc:
-        # The remote run has already happened. History, alerts and the response still run.
-        error_class = type(exc).__name__
+
+    # The remote run has already happened. History, alerts and the response still run.
+    _result, error_class = contained(_fill)
     if type(error_class) is str:
         logger.warning("%s", error_class)
     return extra
