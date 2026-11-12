@@ -4,7 +4,7 @@ import json
 
 from flask import Blueprint, current_app, jsonify, request
 
-from app_helpers import _group_odi_mapping_lineage_items
+from app_helpers import _cap_odi_lineage_rows_by_mapping_id, _group_odi_mapping_lineage_items
 from routes.deps import get_app_module
 from routes.error_responses import redacted_error, redacted_operation_result
 
@@ -449,10 +449,8 @@ def api_odi_mappings():
         items = json.loads(raw_data)
         if not isinstance(items, list):
             return current_app.response_class(response=raw_data, status=200, mimetype="application/json")
-        grouped = _group_odi_mapping_lineage_items(items)
-        truncated = len(grouped) > ODI_MAPPINGS_LIST_CAP
-        if truncated:
-            grouped = grouped[:ODI_MAPPINGS_LIST_CAP]
+        kept, truncated = _cap_odi_lineage_rows_by_mapping_id(items, ODI_MAPPINGS_LIST_CAP)
+        grouped = _group_odi_mapping_lineage_items(kept)
         response = jsonify(grouped)
         if truncated:
             response.headers["X-ODI-Mappings-Truncated"] = "1"

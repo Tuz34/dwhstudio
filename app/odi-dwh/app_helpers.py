@@ -142,6 +142,26 @@ def _base_route_source_table(items: list) -> str:
     return ", ".join(sorted(sources))
 
 
+def _cap_odi_lineage_rows_by_mapping_id(items: list, cap: int) -> tuple[list, bool]:
+    """Keep rows of the first `cap` distinct MAPPING_IDs in input order.
+
+    Input order is the lineage SQL order. A later mapping id truncates the
+    page even when its name matches a kept mapping. Callers group after this.
+    """
+    order: list = []
+    seen: set = set()
+    for item in items:
+        mapping_id = item.get("MAPPING_ID")
+        if mapping_id in seen:
+            continue
+        seen.add(mapping_id)
+        order.append(mapping_id)
+    if len(order) <= cap:
+        return items, False
+    keep = set(order[:cap])
+    return [item for item in items if item.get("MAPPING_ID") in keep], True
+
+
 def _group_odi_mapping_lineage_items(items: list) -> list:
     grouped = {}
     grouped_items = {}

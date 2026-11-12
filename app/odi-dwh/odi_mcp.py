@@ -301,6 +301,7 @@ def odi_get_mapping_lineage(limit: int = 50) -> str:
             FETCH FIRST :lmt ROWS ONLY
         )
         SELECT
+            m.I_MAPPING AS MAPPING_ID,
             m.NAME as MAPPING_NAME,
             p.PROJECT_CODE as PROJECT_CODE,
             p.PROJECT_NAME as PROJECT_NAME,

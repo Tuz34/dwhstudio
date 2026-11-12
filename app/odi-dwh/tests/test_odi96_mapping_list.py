@@ -23,7 +23,9 @@ def _pair_rows(prefix: str, count: int, extra_join: bool = False) -> list[dict]:
     rows = []
     for index in range(count):
         name = f"{prefix}_{index:03d}"
+        mapping_id = index + 1
         rows.append({
+            "MAPPING_ID": mapping_id,
             "MAPPING_NAME": name,
             "PROJECT_CODE": "ORA_DWH",
             "PROJECT_NAME": "Oracle DWH",
@@ -35,6 +37,7 @@ def _pair_rows(prefix: str, count: int, extra_join: bool = False) -> list[dict]:
         })
         if extra_join:
             rows.append({
+                "MAPPING_ID": mapping_id,
                 "MAPPING_NAME": name,
                 "PROJECT_CODE": "ORA_DWH",
                 "PROJECT_NAME": "Oracle DWH",
@@ -45,6 +48,7 @@ def _pair_rows(prefix: str, count: int, extra_join: bool = False) -> list[dict]:
                 "IS_TARGET": "N",
             })
         rows.append({
+            "MAPPING_ID": mapping_id,
             "MAPPING_NAME": name,
             "PROJECT_CODE": "ORA_DWH",
             "PROJECT_NAME": "Oracle DWH",
@@ -357,3 +361,208 @@ def test_odi_lineage_route_passes_its_mapping_limit_explicitly():
     body = source[start:source.index("@bp.route", start)]
     assert "odi_get_mapping_lineage(limit=50)" in body
     assert "odi_get_mapping_lineage()" not in body
+
+
+def _folder_pair(
+    name: str,
+    mapping_id: int,
+    folder: str,
+    source: str,
+    target: str,
+    comp_base: int,
+) -> list[dict]:
+    shared = {
+        "MAPPING_ID": mapping_id,
+        "MAPPING_NAME": name,
+        "PROJECT_CODE": "ORA_DWH",
+        "PROJECT_NAME": "Oracle DWH",
+        "FOLDER_NAME": folder,
+    }
+    return [
+        {
+            **shared,
+            "COMP_NAME": source.split(".")[-1],
+            "COMP_TYPE": "DATASTORE",
+            "TABLE_QUALIFIED_NAME": source,
+            "IS_TARGET": "N",
+            "_comp_id": comp_base,
+        },
+        {
+            **shared,
+            "COMP_NAME": target.split(".")[-1],
+            "COMP_TYPE": "DATASTORE",
+            "TABLE_QUALIFIED_NAME": target,
+            "IS_TARGET": "Y",
+            "_comp_id": comp_base + 2,
+        },
+    ]
+
+
+def _rows_past_cap_with_shared_name(cap: int) -> list[dict]:
+    """`cap` mappings plus one later id that reuses the last name in folder F2."""
+    rows: list[dict] = []
+    for index in range(cap):
+        rows.extend(_folder_pair(
+            f"MAP_CAP_{index:03d}",
+            index + 1,
+            "F1",
+            f"HR.SRC_{index:03d}",
+            f"DWH.ODS_TGT_{index:03d}",
+            index * 10,
+        ))
+    last = cap - 1
+    # Source comp id sits between the kept mapping's source and target.
+    rows.extend(_folder_pair(
+        f"MAP_CAP_{last:03d}",
+        cap + 1,
+        "F2",
+        "HR.EXTRA_SOURCE",
+        "DWH.ODS_EXTRA",
+        last * 10 + 1,
+    ))
+    return rows
+
+
+def _rows_inside_cap_with_shared_name() -> list[dict]:
+    """Two ids share a name. Both are inside either cap. A third name does not."""
+    return [
+        *_folder_pair("MAP_SAME", 1, "F1", "HR.SRC_INSIDE", "DWH.ODS_INSIDE", 10),
+        *_folder_pair("MAP_SAME", 2, "F2", "HR.EXTRA_SOURCE", "DWH.ODS_EXTRA", 11),
+        *_folder_pair("MAP_OTHER", 3, "F1", "HR.SRC_OTHER", "DWH.ODS_OTHER", 30),
+    ]
+
+
+def _sql_mapping_page(rows: list[dict], limit: int) -> list[dict]:
+    """CTE keeps the first `limit` ids by name then id; outer orders component rows."""
+    seen: set[int] = set()
+    order: list[int] = []
+    for row in sorted(rows, key=lambda item: (item["MAPPING_NAME"], item["MAPPING_ID"], item["_comp_id"])):
+        mapping_id = row["MAPPING_ID"]
+        if mapping_id in seen:
+            continue
+        seen.add(mapping_id)
+        order.append(mapping_id)
+    keep = set(order[:limit])
+    kept = [row for row in rows if row["MAPPING_ID"] in keep]
+    kept.sort(key=lambda item: (item["MAPPING_NAME"], item["COMP_TYPE"], item["_comp_id"]))
+    return [{key: value for key, value in row.items() if not str(key).startswith("_")} for row in kept]
+
+
+def test_lineage_select_adds_mapping_id_and_leaves_the_rest_unchanged():
+    body = _lineage_function_body()
+    cte, outer = _cte_and_outer(body)
+    assert "m2.I_MAPPING" in cte
+    assert "m.I_MAPPING AS MAPPING_ID" in outer
+    assert outer.count("m.I_MAPPING AS MAPPING_ID") == 1
+    for column in (
+        "m.NAME as MAPPING_NAME",
+        "p.PROJECT_CODE as PROJECT_CODE",
+        "p.PROJECT_NAME as PROJECT_NAME",
+        "f.FOLDER_NAME as FOLDER_NAME",
+        "c.NAME as COMP_NAME",
+        "c.TYPE_NAME as COMP_TYPE",
+        "r.QUALIFIED_NAME as TABLE_QUALIFIED_NAME",
+    ):
+        assert column in outer
+
+
+def _install_lineage(monkeypatch, module, rows: list[dict]):
+    calls = []
+
+    def fake_lineage(limit=50):
+        calls.append(limit)
+        return json.dumps(_sql_mapping_page(rows, limit))
+
+    monkeypatch.setattr(module, "odi_get_mapping_lineage", fake_lineage)
+    return calls
+
+
+@pytest.mark.parametrize("cap", [MAPPINGS_LIST_CAP, 100])
+def test_same_named_mapping_past_the_cap_stays_out(cap, app_client, monkeypatch):
+    """Folder F2 reuses the last kept name. Its components must not enter the page."""
+    rows = _rows_past_cap_with_shared_name(cap)
+    last = cap - 1
+    kept_name = f"MAP_CAP_{last:03d}"
+    if cap == MAPPINGS_LIST_CAP:
+        import app as app_module
+
+        calls = _install_lineage(monkeypatch, app_module, rows)
+        response = app_client.get("/api/odi/mappings")
+        assert response.status_code == 200
+        assert calls == [cap + 1]
+        found = response.get_json()
+        assert [item["MAPPING_NAME"] for item in found] == [f"MAP_CAP_{index:03d}" for index in range(cap)]
+        assert all(item["COMP_COUNT"] == 2 for item in found)
+        assert all(item["FOLDER_NAME"] == "F1" for item in found)
+        last_item = found[-1]
+        assert last_item["MAPPING_NAME"] == kept_name
+        assert last_item["TGT_TABLE"] == f"ODS_TGT_{last:03d}"
+        assert last_item["SRC_TABLE"] == f"HR.SRC_{last:03d}"
+        blob = json.dumps(found)
+        assert "HR.EXTRA_SOURCE" not in blob
+        assert "ODS_EXTRA" not in blob
+        assert "F2" not in blob
+        assert response.headers.get("X-ODI-Mappings-Truncated") == "1"
+        assert response.headers.get("X-ODI-Mappings-Limit") == str(cap)
+        return
+
+    import ai_helpers
+
+    calls = _install_lineage(monkeypatch, ai_helpers, rows)
+    body = ai_helpers._modeled_tables_answer()
+    assert calls == [cap + 1]
+    listed = body["queries"][0]["result"]["rows"]
+    assert [row["MAPPING_NAME"] for row in listed] == [f"MAP_CAP_{index:03d}" for index in range(cap)]
+    assert all(row["TARGET_TABLE"] == f"DWH.ODS_TGT_{index:03d}" for index, row in enumerate(listed))
+    assert all(row["SOURCE_TABLES"] == f"HR.SRC_{index:03d}" for index, row in enumerate(listed))
+    blob = json.dumps(body)
+    assert "HR.EXTRA_SOURCE" not in blob
+    assert "ODS_EXTRA" not in blob
+    assert "F2" not in blob
+    base = "Tables modeled in the current ODI mapping inventory are listed below."
+    assert body["aciklama"] == f"{base} This listing summarises the first {cap} mappings."
+
+
+@pytest.mark.parametrize("surface", ["route", "ai"])
+def test_same_named_mappings_inside_the_cap_merge_as_on_0ac6fa2(surface, app_client, monkeypatch):
+    """Name grouping from 0ac6fa2 still merges two in-cap ids. The cap does not split them."""
+    from app_helpers import _group_odi_mapping_lineage_items
+
+    rows = _rows_inside_cap_with_shared_name()
+    page = _sql_mapping_page(rows, limit=10_000)
+    expected = _group_odi_mapping_lineage_items(page)
+    # SQL order is name, then component. MAP_OTHER is the first group on 0ac6fa2.
+    assert [item["MAPPING_NAME"] for item in expected] == ["MAP_OTHER", "MAP_SAME"]
+    merged = expected[1]
+    assert merged["COMP_COUNT"] == 4
+    assert merged["TGT_TABLE"] == "?"
+    assert merged["SRC_TABLE"] == "HR.EXTRA_SOURCE, HR.SRC_INSIDE"
+    assert merged["FOLDER_NAME"] == "F1"
+    assert expected[0]["COMP_COUNT"] == 2
+    assert expected[0]["TGT_TABLE"] == "ODS_OTHER"
+    assert expected[0]["SRC_TABLE"] == "HR.SRC_OTHER"
+
+    if surface == "route":
+        import app as app_module
+
+        calls = _install_lineage(monkeypatch, app_module, rows)
+        response = app_client.get("/api/odi/mappings")
+        assert response.status_code == 200
+        assert calls == [MAPPINGS_LIST_CAP + 1]
+        assert response.get_json() == expected
+        assert response.headers.get("X-ODI-Mappings-Truncated") in (None, "")
+        assert response.headers.get("X-ODI-Mappings-Limit") in (None, "")
+        return
+
+    import ai_helpers
+
+    calls = _install_lineage(monkeypatch, ai_helpers, rows)
+    body = ai_helpers._modeled_tables_answer()
+    assert calls == [101]
+    assert body["aciklama"] == "Tables modeled in the current ODI mapping inventory are listed below."
+    listed = body["queries"][0]["result"]["rows"]
+    assert [row["MAPPING_NAME"] for row in listed] == ["MAP_OTHER", "MAP_SAME"]
+    assert listed[0]["SOURCE_TABLES"] == "HR.SRC_OTHER"
+    assert listed[0]["TARGET_TABLE"] == "DWH.ODS_OTHER"
+    assert listed[1]["SOURCE_TABLES"] == "HR.EXTRA_SOURCE, HR.SRC_INSIDE"
+    assert listed[1]["TARGET_TABLE"] == "?"
